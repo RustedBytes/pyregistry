@@ -1,0 +1,12 @@
+[package]
+name = "pyregistry-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+pep440.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

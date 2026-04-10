@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>{{ project_name }}</title>
+  </head>
+  <body>
+    <h1>{{ project_name }}</h1>
+    {% for artifact in artifacts %}
+    <a href="{{ artifact.url }}#sha256={{ artifact.sha256 }}"
+      {% match artifact.yanked_reason %}
+      {% when Some with (reason) %}data-yanked="{{ reason }}"{% when None %}{% endmatch %}
+      >{{ artifact.filename }}</a>
+    {% match artifact.provenance_url %}
+    {% when Some with (url) %}<a href="{{ url }}">[provenance]</a>{% when None %}{% endmatch %}
+    <br>
+    {% endfor %}
+  </body>
+</html>

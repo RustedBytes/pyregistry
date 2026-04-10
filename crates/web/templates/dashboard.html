@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Pyregistry Dashboard</title>
+    <style>
+      :root {
+        --ink: #15211d;
+        --muted: #5b6b63;
+        --surface: #ffffff;
+        --soft: #f3f7f1;
+        --line: #d9e2dc;
+        --accent: #176341;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: linear-gradient(180deg, #f0f5ee 0%, #fcfdfc 100%);
+      }
+      main {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      header, section {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 22px;
+        margin-bottom: 18px;
+        box-shadow: 0 10px 24px rgba(21, 33, 29, 0.04);
+      }
+      .row {
+        display: grid;
+        gap: 18px;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      }
+      .stats {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      }
+      .chip {
+        background: var(--soft);
+        border-radius: 12px;
+        padding: 12px;
+      }
+      form {
+        display: grid;
+        gap: 10px;
+      }
+      input, select, button {
+        padding: 11px 12px;
+        border-radius: 12px;
+        border: 1px solid #c9d5ce;
+      }
+      button {
+        background: var(--accent);
+        color: white;
+        border: 0;
+        cursor: pointer;
+      }
+      .search-row {
+        display: grid;
+        gap: 8px;
+        grid-template-columns: 1fr auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th, td {
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+      }
+      a { color: var(--accent); }
+      .muted { color: var(--muted); }
+      .tenant-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .tenant-pill {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 10px;
+        border-radius: 999px;
+        background: var(--soft);
+      }
+      .scope-grid {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .job-list {
+        display: grid;
+        gap: 10px;
+      }
+      .job-card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px;
+        background: #fbfdfb;
+      }
+      .job-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        padding: 6px 10px;
+        background: var(--soft);
+        color: var(--ink);
+        font-size: 0.92rem;
+      }
+      .status-pill.active {
+        background: #e8f3eb;
+        color: #155233;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="muted">{{ session.email }}</p>
+        <h1>Registry dashboard</h1>
+        <p>Public landing metrics, tenant-scoped search, mirroring, trusted publishers, and package governance in one minimal admin surface.</p>
+        <form method="post" action="/admin/logout">
+          <button type="submit">Sign out</button>
+        </form>
+      </header>
+
+      <section>
+        <h2>Registry overview</h2>
+        <div class="stats">
+          <div class="chip"><strong>{{ overview.tenant_count }}</strong><br>Tenants</div>
+          <div class="chip"><strong>{{ overview.project_count }}</strong><br>Projects</div>
+          <div class="chip"><strong>{{ overview.release_count }}</strong><br>Releases</div>
+          <div class="chip"><strong>{{ overview.artifact_count }}</strong><br>Artifacts</div>
+          <div class="chip"><strong>{{ overview.mirrored_project_count }}</strong><br>Mirrored</div>
+          <div class="chip"><strong>{{ total_storage_human }}</strong><br>Total storage</div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Tenants</h2>
+        <div class="tenant-list">
+          {% for tenant in tenants %}
+          <a class="tenant-pill" href="/admin/search?tenant={{ tenant.slug }}">
+            <span>{{ tenant.display_name }}</span>
+            <span class="muted">{{ tenant.slug }}</span>
+          </a>
+          {% endfor %}
+        </div>
+      </section>
+
+      <div class="row">
+        {% if session.is_superadmin %}
+        <section>
+          <h2>Create tenant</h2>
+          <form method="post" action="/admin/tenants">
+            <input type="text" name="slug" placeholder="tenant slug" required>
+            <input type="text" name="display_name" placeholder="display name" required>
+            <input type="email" name="admin_email" placeholder="tenant admin email" required>
+            <input type="password" name="admin_password" placeholder="tenant admin password" required>
+            <label><input type="checkbox" name="mirroring_enabled" value="true"> Enable PyPI mirroring</label>
+            <button type="submit">Create tenant</button>
+          </form>
+        </section>
+        {% endif %}
+
+        <section>
+          <h2>Search packages</h2>
+          <form method="get" action="/admin/search">
+            {% match selected_tenant %}
+            {% when Some with (tenant_slug) %}
+            <input type="hidden" name="tenant" value="{{ tenant_slug }}">
+            {% when None %}
+            {% endmatch %}
+            <div class="search-row">
+              <input type="text" name="q" value="{{ search_query }}" placeholder="package name or summary">
+              <button type="submit">Search</button>
+            </div>
+          </form>
+          {% if search_results.len() > 0 %}
+          <table>
+            <thead>
+              <tr><th>Package</th><th>Summary</th><th>Source</th><th>Latest</th></tr>
+            </thead>
+            <tbody>
+              {% for hit in search_results %}
+              <tr>
+                <td><a href="/admin/t/{{ hit.tenant_slug }}/packages/{{ hit.normalized_name }}">{{ hit.project_name }}</a></td>
+                <td>{{ hit.summary }}</td>
+                <td>{{ hit.source }}</td>
+                <td>
+                  {% match hit.latest_version %}
+                  {% when Some with (latest) %}{{ latest }}
+                  {% when None %}-
+                  {% endmatch %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <p class="muted">Search results appear here.</p>
+          {% endif %}
+        </section>
+      </div>
+
+      {% match metrics %}
+      {% when Some with (tenant_metrics) %}
+      <section>
+        <h2>Tenant metrics: {{ tenant_metrics.tenant_slug }}</h2>
+        <div class="stats">
+          <div class="chip"><strong>{{ tenant_metrics.project_count }}</strong><br>Projects</div>
+          <div class="chip"><strong>{{ tenant_metrics.release_count }}</strong><br>Releases</div>
+          <div class="chip"><strong>{{ tenant_metrics.artifact_count }}</strong><br>Artifacts</div>
+          <div class="chip"><strong>{{ tenant_metrics.token_count }}</strong><br>Tokens</div>
+          <div class="chip"><strong>{{ tenant_metrics.trusted_publisher_count }}</strong><br>Trusted publishers</div>
+        </div>
+      </section>
+
+      {% if mirror_jobs.len() > 0 %}
+      <section>
+        <h2>Mirror jobs</h2>
+        <div class="job-list">
+          {% for job in mirror_jobs %}
+          <div class="job-card">
+            <div class="job-head">
+              <strong>{{ job.project_name }}</strong>
+              <span class="status-pill{% if job.active %} active{% endif %}">{{ job.status_label }}</span>
+            </div>
+            <p class="muted">{{ job.detail }}</p>
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+
+      <div class="row">
+        <section>
+          <h2>Issue API token</h2>
+          <form method="post" action="/admin/t/{{ tenant_metrics.tenant_slug }}/tokens">
+            <input type="text" name="label" placeholder="token label" required>
+            <input type="number" name="ttl_hours" placeholder="TTL hours (optional)">
+            <div class="scope-grid">
+              <label><input type="checkbox" name="scopes" value="read"> Read</label>
+              <label><input type="checkbox" name="scopes" value="publish"> Publish</label>
+              <label><input type="checkbox" name="scopes" value="admin"> Admin</label>
+            </div>
+            <button type="submit">Issue token</button>
+          </form>
+        </section>
+
+        <section>
+          <h2>Mirror package</h2>
+          <p class="muted">Starts a background sync so the page returns immediately while artifacts download.</p>
+          <form method="post" action="/admin/t/{{ tenant_metrics.tenant_slug }}/mirror-cache">
+            <input type="text" name="project_name" placeholder="project name to cache" required>
+            <button type="submit">Fetch from PyPI</button>
+          </form>
+        </section>
+
+        <section>
+          <h2>Trusted publisher</h2>
+          <form method="post" action="/admin/t/{{ tenant_metrics.tenant_slug }}/publishers">
+            <input type="text" name="project_name" placeholder="project name" required>
+            <select name="provider">
+              <option value="github">GitHub Actions</option>
+              <option value="gitlab">GitLab</option>
+            </select>
+            <input type="url" name="issuer" placeholder="issuer URL" required>
+            <input type="text" name="audience" value="pyregistry" required>
+            <input type="text" name="claim_repository" placeholder="repository claim">
+            <input type="text" name="claim_workflow" placeholder="workflow claim">
+            <input type="text" name="claim_ref" placeholder="ref claim">
+            <button type="submit">Save publisher</button>
+          </form>
+        </section>
+      </div>
+      {% when None %}
+      <section>
+        <p class="muted">Create or select a tenant to see tenant-level metrics and controls.</p>
+      </section>
+      {% endmatch %}
+    </main>
+  </body>
+</html>

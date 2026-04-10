@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ details.project_name }} - Pyregistry</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        background: #f7faf7;
+        color: #16211c;
+      }
+      main {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      section {
+        background: white;
+        border: 1px solid #d9e3dc;
+        border-radius: 18px;
+        padding: 22px;
+        margin-bottom: 18px;
+      }
+      form { display: inline-block; margin-right: 8px; margin-top: 8px; }
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: #166040;
+        color: white;
+        cursor: pointer;
+      }
+      .danger { background: #a33434; }
+      .secondary {
+        background: #eef5f0;
+        color: #244135;
+        border: 1px solid #c8d8ce;
+      }
+      input {
+        border-radius: 12px;
+        border: 1px solid #c9d6ce;
+        padding: 10px 12px;
+      }
+      .muted { color: #596860; }
+      .release {
+        border-top: 1px solid #e1e9e4;
+        padding-top: 18px;
+        margin-top: 18px;
+      }
+      .release-head {
+        display: flex;
+        gap: 14px;
+        justify-content: space-between;
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+      .release-meta {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        background: #eef5f0;
+        color: #244135;
+        padding: 6px 10px;
+        font-size: 0.92rem;
+      }
+      details {
+        margin-top: 14px;
+        border: 1px solid #d9e3dc;
+        border-radius: 16px;
+        background: #fbfdfb;
+        overflow: hidden;
+      }
+      summary {
+        cursor: pointer;
+        list-style: none;
+        padding: 14px 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        font-weight: 600;
+      }
+      summary::-webkit-details-marker { display: none; }
+      .summary-meta {
+        color: #596860;
+        font-weight: 500;
+        font-size: 0.95rem;
+      }
+      .files {
+        padding: 0 16px 16px;
+      }
+      .file {
+        border-top: 1px solid #e6ede8;
+        padding-top: 14px;
+        margin-top: 14px;
+      }
+      .file:first-child {
+        border-top: 0;
+        padding-top: 0;
+        margin-top: 0;
+      }
+      .file-head {
+        display: flex;
+        gap: 10px;
+        justify-content: space-between;
+        align-items: baseline;
+        flex-wrap: wrap;
+      }
+      .file-name {
+        font-weight: 700;
+      }
+      .file-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin-top: 10px;
+      }
+      .file-actions form {
+        margin-right: 0;
+      }
+      .install-grid {
+        display: grid;
+        gap: 14px;
+      }
+      .security-card {
+        border-color: #d7b46a;
+        background: #fffaf0;
+      }
+      .security-ok {
+        border-color: #bad6c5;
+        background: #f4fbf6;
+      }
+      .security-warning {
+        border: 1px solid #e2b6a6;
+        background: #fff4ef;
+        border-radius: 14px;
+        padding: 12px 14px;
+        margin-top: 12px;
+      }
+      .security-muted {
+        border: 1px solid #d9e3dc;
+        background: #fbfdfb;
+        border-radius: 14px;
+        padding: 12px 14px;
+        margin-top: 12px;
+      }
+      .vuln-list {
+        margin: 10px 0 0;
+        padding-left: 20px;
+      }
+      .vuln-list li {
+        margin-bottom: 8px;
+      }
+      dialog {
+        border: 0;
+        border-radius: 22px;
+        padding: 0;
+        width: min(860px, calc(100vw - 28px));
+        box-shadow: 0 24px 80px rgba(18, 32, 25, 0.28);
+      }
+      dialog::backdrop {
+        background: rgba(14, 22, 18, 0.45);
+      }
+      .modal-shell {
+        padding: 22px;
+        background: #fbfdfb;
+      }
+      .modal-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: flex-start;
+        margin-bottom: 14px;
+      }
+      .modal-head p {
+        margin: 6px 0 0;
+      }
+      .modal-close {
+        background: #eef5f0;
+        color: #244135;
+      }
+      .scan-status {
+        margin-bottom: 12px;
+      }
+      pre {
+        margin: 0;
+        padding: 14px 16px;
+        border-radius: 14px;
+        background: #122019;
+        color: #eef7f2;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      code {
+        font-family: "SFMono-Regular", "Menlo", monospace;
+        font-size: 0.94rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section>
+        <p><a href="/admin/t/{{ details.tenant_slug }}/packages">Back to packages</a></p>
+        <p class="muted">{{ details.source }} package</p>
+        <h1>{{ details.project_name }}</h1>
+        <p>{{ details.summary }}</p>
+        <p class="muted">{{ details.normalized_name }}</p>
+      </section>
+
+      <section class="{% if details.security.vulnerable_file_count > 0 %}security-card{% else %}security-ok{% endif %}">
+        <h2>Known Vulnerabilities</h2>
+        {% match details.security.scan_error %}
+        {% when Some with (error) %}
+        <p class="security-warning">PySentry scan did not complete for every release file: {{ error }}</p>
+        {% when None %}
+        {% endmatch %}
+
+        {% if details.security.vulnerable_file_count > 0 %}
+        <p>
+          PySentry found <strong>{{ details.security.vulnerability_count }}</strong> advisory match{% if details.security.vulnerability_count != 1 %}es{% endif %}
+          across <strong>{{ details.security.vulnerable_file_count }}</strong> vulnerable release file{% if details.security.vulnerable_file_count != 1 %}s{% endif %}.
+        </p>
+        {% match details.security.highest_severity %}
+        {% when Some with (severity) %}
+        <p class="muted">Highest severity: {{ severity }}</p>
+        {% when None %}
+        {% endmatch %}
+        {% else %}
+        <p>PySentry found no known vulnerabilities in {{ details.security.scanned_file_count }} scanned release file{% if details.security.scanned_file_count != 1 %}s{% endif %}.</p>
+        {% endif %}
+      </section>
+
+      <section>
+        <h2>Install</h2>
+        <p class="muted">Use a tenant read token with the simple index for this package.</p>
+        <div class="install-grid">
+          <div>
+            <p><strong>Index URL</strong></p>
+            <pre><code>{{ details.index_url }}</code></pre>
+          </div>
+          <div>
+            <p><strong>pip</strong></p>
+            <pre><code>{{ details.pip_install_command }}</code></pre>
+          </div>
+          <div>
+            <p><strong>uv</strong></p>
+            <pre><code>{{ details.uv_install_command }}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Trusted publishers</h2>
+        {% if details.trusted_publishers.len() == 0 %}
+        <p class="muted">No trusted publishers configured.</p>
+        {% else %}
+        {% for publisher in details.trusted_publishers %}
+        <div>
+          <strong>{{ publisher.provider }}</strong>
+          <p>{{ publisher.issuer }} | audience {{ publisher.audience }}</p>
+        </div>
+        {% endfor %}
+        {% endif %}
+      </section>
+
+      <section>
+        <h2>Releases</h2>
+        {% for release in details.releases %}
+        <div class="release">
+          <div class="release-head">
+            <div>
+              <h3>{{ release.version }}</h3>
+              <div class="release-meta">
+                <span class="pill">{{ release.artifact_count }} file{% if release.artifact_count != 1 %}s{% endif %}</span>
+                <span class="pill">{{ release.total_size_human }}</span>
+                {% match release.yanked_reason %}
+                {% when Some with (reason) %}
+                <span class="pill">Yanked: {{ reason }}</span>
+                {% when None %}
+                {% endmatch %}
+              </div>
+            </div>
+            <div>
+              <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/yank">
+                <input type="text" name="reason" placeholder="yank reason">
+                <button type="submit">Yank release</button>
+              </form>
+              <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/purge">
+                <button class="danger" type="submit">Purge release</button>
+              </form>
+            </div>
+          </div>
+
+          <details {% if release.expanded %}open{% endif %}>
+            <summary>
+              <span>Files</span>
+              <span class="summary-meta">{{ release.artifact_count }} file{% if release.artifact_count != 1 %}s{% endif %} · {{ release.total_size_human }}</span>
+            </summary>
+            <div class="files">
+              {% for artifact in release.artifacts %}
+              <div class="file">
+                <div class="file-head">
+                  <span class="file-name">{{ artifact.filename }}</span>
+                  <span class="muted">{{ artifact.size_human }}</span>
+                </div>
+                <p class="muted">sha256 {{ artifact.sha256 }}</p>
+                {% match artifact.yanked_reason %}
+                {% when Some with (reason) %}
+                <p>Yanked: {{ reason }}</p>
+                {% when None %}
+                {% endmatch %}
+
+                {% match artifact.security.scan_error %}
+                {% when Some with (error) %}
+                <div class="security-muted">
+                  <strong>PySentry scan unavailable</strong>
+                  <p class="muted">{{ error }}</p>
+                </div>
+                {% when None %}
+                  {% if artifact.security.scanned %}
+                    {% if artifact.security.vulnerability_count > 0 %}
+                    <div class="security-warning">
+                      <strong>{{ artifact.security.vulnerability_count }} known vulnerabilit{% if artifact.security.vulnerability_count == 1 %}y{% else %}ies{% endif %}</strong>
+                      {% match artifact.security.highest_severity %}
+                      {% when Some with (severity) %}
+                      <span class="pill">{{ severity }}</span>
+                      {% when None %}
+                      {% endmatch %}
+                      <ul class="vuln-list">
+                        {% for vulnerability in artifact.security.vulnerabilities %}
+                        <li>
+                          <strong>{{ vulnerability.id }}</strong> {{ vulnerability.severity }} - {{ vulnerability.summary }}
+                          <br><span class="muted">Fixed versions: {{ vulnerability.fixed_versions }}</span>
+                          {% match vulnerability.primary_reference %}
+                          {% when Some with (reference) %}
+                          <br><a href="{{ reference }}" rel="noreferrer">Reference</a>
+                          {% when None %}
+                          {% endmatch %}
+                        </li>
+                        {% endfor %}
+                      </ul>
+                      {% if artifact.security.hidden_vulnerability_count > 0 %}
+                      <p class="muted">Plus {{ artifact.security.hidden_vulnerability_count }} more advisory match{% if artifact.security.hidden_vulnerability_count != 1 %}es{% endif %}.</p>
+                      {% endif %}
+                    </div>
+                    {% else %}
+                    <p class="security-muted">No known vulnerabilities found for this package version.</p>
+                    {% endif %}
+                  {% endif %}
+                {% endmatch %}
+
+                <div class="file-actions">
+                  {% if artifact.is_wheel %}
+                  <button
+                    class="secondary scan-wheel-button"
+                    type="button"
+                    data-scan-url="{{ artifact.scan_url }}"
+                    data-filename="{{ artifact.filename }}"
+                  >
+                    Scan wheel
+                  </button>
+                  {% endif %}
+
+                  <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/yank">
+                    <input type="text" name="reason" placeholder="artifact yank reason">
+                    <button type="submit">Yank artifact</button>
+                  </form>
+                  <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/unyank">
+                    <button type="submit">Unyank artifact</button>
+                  </form>
+                  <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/purge">
+                    <button class="danger" type="submit">Purge artifact</button>
+                  </form>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+          </details>
+        </div>
+        {% endfor %}
+      </section>
+    </main>
+
+    <dialog id="wheel-audit-modal">
+      <div class="modal-shell">
+        <div class="modal-head">
+          <div>
+            <h2 id="wheel-audit-title">Wheel scan</h2>
+            <p class="muted" id="wheel-audit-filename"></p>
+          </div>
+          <form method="dialog">
+            <button class="modal-close" type="submit">Close</button>
+          </form>
+        </div>
+        <p class="scan-status muted" id="wheel-audit-status"></p>
+        <pre><code id="wheel-audit-output">Pick a wheel file to scan.</code></pre>
+      </div>
+    </dialog>
+
+    <script>
+      (() => {
+        const modal = document.getElementById("wheel-audit-modal");
+        const title = document.getElementById("wheel-audit-title");
+        const filename = document.getElementById("wheel-audit-filename");
+        const status = document.getElementById("wheel-audit-status");
+        const output = document.getElementById("wheel-audit-output");
+
+        async function runWheelScan(button) {
+          const scanUrl = button.dataset.scanUrl;
+          const artifactName = button.dataset.filename;
+          title.textContent = "Wheel scan";
+          filename.textContent = artifactName;
+          status.textContent = "Running scan...";
+          output.textContent = "";
+          modal.showModal();
+
+          const originalLabel = button.textContent;
+          button.disabled = true;
+          button.textContent = "Scanning...";
+
+          try {
+            const response = await fetch(scanUrl, {
+              method: "POST",
+              headers: {
+                "Accept": "application/json"
+              }
+            });
+
+            if (!response.ok) {
+              throw new Error(await response.text());
+            }
+
+            const payload = await response.json();
+            status.textContent = "Scan complete.";
+            filename.textContent = payload.artifact_filename;
+            output.textContent = payload.report_text;
+          } catch (error) {
+            status.textContent = "Scan failed.";
+            output.textContent = error instanceof Error ? error.message : String(error);
+          } finally {
+            button.disabled = false;
+            button.textContent = originalLabel;
+          }
+        }
+
+        document.querySelectorAll(".scan-wheel-button").forEach((button) => {
+          button.addEventListener("click", () => {
+            runWheelScan(button);
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

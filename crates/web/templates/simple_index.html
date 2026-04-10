@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Simple index</title>
+  </head>
+  <body>
+    <h1>Simple index for {{ tenant_slug }}</h1>
+    {% for project in projects %}
+    <a href="/t/{{ tenant_slug }}/simple/{{ project.normalized_name }}/">{{ project.name }}</a><br>
+    {% endfor %}
+  </body>
+</html>

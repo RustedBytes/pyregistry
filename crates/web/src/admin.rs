@@ -1,0 +1,1014 @@
+use crate::{
+    auth::{ensure_tenant_access, human_bytes, parse_scopes, require_session},
+    error::{WebError, render_html},
+    models::{
+        ArtifactSecurityView, CreateTenantFormData, DashboardTemplate, DashboardView,
+        IndexTemplate, IssueTokenFormData, LoginFormData, LoginTemplate, MessageTemplate,
+        MirrorFormData, MirrorJobView, PackageArtifactView, PackageDetailTemplate,
+        PackageDetailView, PackageReleaseView, PackageSecuritySummaryView,
+        PackageVulnerabilityView, PublisherFormData, SearchQuery, TenantView, WheelAuditResponse,
+        YankFormData,
+    },
+    state::{AppState, MirrorJobPhase, MirrorJobStatus, mirror_job_key},
+};
+use axum::{
+    Form, Json,
+    body::Bytes,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{Html, IntoResponse, Redirect},
+};
+use axum_extra::extract::cookie::{Cookie, CookieJar};
+use log::{debug, info, warn};
+use pyregistry_application::{
+    AdminSession, ApplicationError, AuditStoredWheelCommand, CreateTenantCommand, DeletionCommand,
+    IssueApiTokenCommand, RegisterTrustedPublisherCommand, WheelAuditFinding,
+    WheelAuditFindingKind, WheelAuditReport,
+};
+use pyregistry_domain::{DeletionMode, TrustedPublisherProvider};
+use std::collections::HashMap;
+use std::fmt::Write;
+
+pub(crate) async fn index(State(state): State<AppState>) -> Result<Html<String>, WebError> {
+    let overview = state.app.get_registry_overview().await?;
+    debug!(
+        "rendering public index page with tenants={}, projects={}, artifacts={}",
+        overview.tenant_count, overview.project_count, overview.artifact_count
+    );
+    render_html(IndexTemplate {
+        total_storage_human: human_bytes(overview.total_storage_bytes),
+        overview,
+    })
+}
+
+pub(crate) async fn login_form() -> Result<Html<String>, WebError> {
+    render_html(LoginTemplate { error: None })
+}
+
+pub(crate) async fn login_submit(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<LoginFormData>,
+) -> Result<impl IntoResponse, WebError> {
+    info!("admin login form submitted for `{}`", form.email.trim());
+    match state.app.login_admin(&form.email, &form.password).await {
+        Ok(session) => {
+            let session_id = uuid::Uuid::new_v4().to_string();
+            info!(
+                "admin session established for `{}` (superadmin={}, tenant={:?})",
+                session.email, session.is_superadmin, session.tenant_slug
+            );
+            state
+                .sessions
+                .write()
+                .await
+                .insert(session_id.clone(), session);
+            let cookie = Cookie::build(("admin_session", session_id))
+                .path("/")
+                .http_only(true)
+                .build();
+            Ok((jar.add(cookie), Redirect::to("/admin/dashboard")).into_response())
+        }
+        Err(ApplicationError::Unauthorized(_)) => {
+            warn!("admin login failed for `{}`", form.email.trim());
+            render_html(LoginTemplate {
+                error: Some("Invalid email or password"),
+            })
+            .map(IntoResponse::into_response)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) async fn logout(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<impl IntoResponse, WebError> {
+    if let Some(cookie) = jar.get("admin_session") {
+        state.sessions.write().await.remove(cookie.value());
+        info!("admin session removed");
+    }
+    let mut expired = Cookie::from("admin_session=");
+    expired.set_path("/");
+    expired.make_removal();
+    Ok((jar.remove(expired), Redirect::to("/admin/login")))
+}
+
+pub(crate) async fn dashboard(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<SearchQuery>,
+) -> Result<Html<String>, WebError> {
+    let session = require_session(&state, &jar).await?;
+    debug!(
+        "rendering dashboard for `{}` with selected tenant {:?} and query {:?}",
+        session.email, query.tenant, query.q
+    );
+    render_dashboard(&state, session, query).await
+}
+
+pub(crate) async fn search(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<SearchQuery>,
+) -> Result<Html<String>, WebError> {
+    let session = require_session(&state, &jar).await?;
+    info!(
+        "admin search requested by `{}` for tenant {:?} query {:?}",
+        session.email, query.tenant, query.q
+    );
+    render_dashboard(&state, session, query).await
+}
+
+pub(crate) async fn create_tenant(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<CreateTenantFormData>,
+) -> Result<Html<String>, WebError> {
+    let session = require_session(&state, &jar).await?;
+    if !session.is_superadmin {
+        warn!(
+            "tenant creation denied because `{}` is not a superadmin",
+            session.email
+        );
+        return Err(WebError {
+            status: StatusCode::FORBIDDEN,
+            message: "Only superadmins can create tenants".into(),
+        });
+    }
+    info!(
+        "superadmin `{}` is creating tenant `{}`",
+        session.email, form.slug
+    );
+
+    let tenant = state
+        .app
+        .create_tenant(CreateTenantCommand {
+            slug: form.slug,
+            display_name: form.display_name,
+            mirroring_enabled: form.mirroring_enabled.is_some(),
+            admin_email: form.admin_email,
+            admin_password: form.admin_password,
+        })
+        .await?;
+
+    render_html(MessageTemplate {
+        title: "Tenant created",
+        message: &format!(
+            "Tenant `{}` is ready. The admin account can now sign in from the login page.",
+            tenant.slug.as_str()
+        ),
+        back_href: "/admin/dashboard",
+    })
+}
+
+pub(crate) async fn issue_token(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(tenant): Path<String>,
+    body: Bytes,
+) -> Result<Html<String>, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    let form = parse_issue_token_form(&body)?;
+    let ttl_hours = parse_optional_ttl_hours(form.ttl_hours.as_deref())?;
+    info!(
+        "admin `{}` is issuing token `{}` for tenant `{}`",
+        session.email, form.label, tenant
+    );
+    let token = state
+        .app
+        .issue_api_token(IssueApiTokenCommand {
+            tenant_slug: tenant.clone(),
+            label: form.label,
+            scopes: parse_scopes(form.scopes),
+            ttl_hours,
+        })
+        .await?;
+
+    render_html(MessageTemplate {
+        title: "Token issued",
+        message: &format!("New token `{}`: {}", token.label, token.secret),
+        back_href: &format!("/admin/t/{tenant}/packages"),
+    })
+}
+
+pub(crate) async fn cache_mirror_project(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(tenant): Path<String>,
+    Form(form): Form<MirrorFormData>,
+) -> Result<Html<String>, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    let project_name = form.project_name.trim().to_string();
+    if project_name.is_empty() {
+        return Err(WebError {
+            status: StatusCode::BAD_REQUEST,
+            message: "Project name cannot be empty".into(),
+        });
+    }
+    info!(
+        "admin `{}` requested mirror cache refresh for tenant `{}` project `{}`",
+        session.email, tenant, project_name
+    );
+    let key = mirror_job_key(&tenant, &project_name);
+    {
+        let jobs = state.mirror_jobs.read().await;
+        if jobs.get(&key).is_some_and(MirrorJobStatus::is_active) {
+            let message = format!(
+                "A background mirror sync for `{project_name}` is already running. You can return to the dashboard and watch the status update there."
+            );
+            let back_href = format!("/admin/search?tenant={tenant}");
+            return render_html(MessageTemplate {
+                title: "Mirror sync already running",
+                message: &message,
+                back_href: &back_href,
+            });
+        }
+    }
+
+    {
+        let mut jobs = state.mirror_jobs.write().await;
+        jobs.insert(
+            key.clone(),
+            MirrorJobStatus::queued(tenant.clone(), project_name.clone()),
+        );
+    }
+
+    let app = state.app.clone();
+    let mirror_jobs = state.mirror_jobs.clone();
+    let tenant_for_task = tenant.clone();
+    let project_for_task = project_name.clone();
+    tokio::spawn(async move {
+        {
+            let mut jobs = mirror_jobs.write().await;
+            jobs.insert(
+                key.clone(),
+                MirrorJobStatus::running(tenant_for_task.clone(), project_for_task.clone()),
+            );
+        }
+
+        let next_status = match app
+            .resolve_project_from_mirror(&tenant_for_task, &project_for_task)
+            .await
+        {
+            Ok(Some(project)) => MirrorJobStatus::completed(
+                tenant_for_task.clone(),
+                project_for_task.clone(),
+                format!(
+                    "Mirrored `{}` and cached all currently available upstream files.",
+                    project.name.original()
+                ),
+            ),
+            Ok(None) => MirrorJobStatus::failed(
+                tenant_for_task.clone(),
+                project_for_task.clone(),
+                format!("PyPI package `{project_for_task}` was not found."),
+            ),
+            Err(error) => MirrorJobStatus::failed(
+                tenant_for_task.clone(),
+                project_for_task.clone(),
+                error.to_string(),
+            ),
+        };
+
+        let mut jobs = mirror_jobs.write().await;
+        jobs.insert(key, next_status);
+    });
+
+    let message = format!(
+        "Started a background mirror sync for `{project_name}`. The dashboard will stay responsive while Pyregistry downloads metadata and all available files from PyPI."
+    );
+    let back_href = format!("/admin/search?tenant={tenant}");
+
+    render_html(MessageTemplate {
+        title: "Mirror sync started",
+        message: &message,
+        back_href: &back_href,
+    })
+}
+
+pub(crate) async fn register_publisher(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(tenant): Path<String>,
+    Form(form): Form<PublisherFormData>,
+) -> Result<Html<String>, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` is registering a trusted publisher for tenant `{}` project `{}`",
+        session.email, tenant, form.project_name
+    );
+
+    let provider = if form.provider.eq_ignore_ascii_case("github") {
+        TrustedPublisherProvider::GitHubActions
+    } else {
+        TrustedPublisherProvider::GitLab
+    };
+    let mut claim_rules = HashMap::new();
+    if let Some(value) = form.claim_repository.filter(|value| !value.is_empty()) {
+        claim_rules.insert("repository".to_string(), value);
+    }
+    if let Some(value) = form.claim_workflow.filter(|value| !value.is_empty()) {
+        claim_rules.insert("workflow".to_string(), value);
+    }
+    if let Some(value) = form.claim_ref.filter(|value| !value.is_empty()) {
+        claim_rules.insert("ref".to_string(), value);
+    }
+
+    state
+        .app
+        .register_trusted_publisher(RegisterTrustedPublisherCommand {
+            tenant_slug: tenant.clone(),
+            project_name: form.project_name,
+            provider,
+            issuer: form.issuer,
+            audience: form.audience,
+            claim_rules: claim_rules.into_iter().collect(),
+        })
+        .await?;
+
+    render_html(MessageTemplate {
+        title: "Trusted publisher saved",
+        message: "The OIDC publisher configuration is now active for this tenant.",
+        back_href: &format!("/admin/t/{tenant}/packages"),
+    })
+}
+
+pub(crate) async fn package_list(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(tenant): Path<String>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Html<String>, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    debug!(
+        "rendering package list for tenant `{}` requested by `{}` with query {:?}",
+        tenant, session.email, query.q
+    );
+    render_dashboard(
+        &state,
+        session,
+        SearchQuery {
+            tenant: Some(tenant),
+            q: query.q,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn package_detail(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Path((tenant, project)): Path<(String, String)>,
+) -> Result<Html<String>, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` is viewing package `{}` in tenant `{}`",
+        session.email, project, tenant
+    );
+    let install_base_url = registry_base_url(&headers);
+    let details = package_detail_view(
+        state.app.get_package_details(&tenant, &project).await?,
+        &install_base_url,
+    );
+    render_html(PackageDetailTemplate { details })
+}
+
+pub(crate) async fn yank_release(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project, version)): Path<(String, String, String)>,
+    Form(form): Form<YankFormData>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` is yanking release `{}` for package `{}` in tenant `{}`",
+        session.email, version, project, tenant
+    );
+    state
+        .app
+        .yank_release(DeletionCommand {
+            tenant_slug: tenant.clone(),
+            project_name: project.clone(),
+            version: Some(version),
+            filename: None,
+            reason: form.reason,
+            mode: DeletionMode::Yank,
+        })
+        .await?;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{project}"
+    )))
+}
+
+pub(crate) async fn purge_release(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project, version)): Path<(String, String, String)>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` is purging release `{}` for package `{}` in tenant `{}`",
+        session.email, version, project, tenant
+    );
+    state.app.purge_release(&tenant, &project, &version).await?;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{project}"
+    )))
+}
+
+pub(crate) async fn yank_artifact(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project, version, filename)): Path<(String, String, String, String)>,
+    Form(form): Form<YankFormData>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` is yanking artifact `{}` for package `{}` version `{}` in tenant `{}`",
+        session.email, filename, project, version, tenant
+    );
+    state
+        .app
+        .yank_artifact(DeletionCommand {
+            tenant_slug: tenant.clone(),
+            project_name: project.clone(),
+            version: Some(version),
+            filename: Some(filename),
+            reason: form.reason,
+            mode: DeletionMode::Yank,
+        })
+        .await?;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{project}"
+    )))
+}
+
+pub(crate) async fn unyank_artifact(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project, version, filename)): Path<(String, String, String, String)>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` is unyanking artifact `{}` for package `{}` version `{}` in tenant `{}`",
+        session.email, filename, project, version, tenant
+    );
+    state
+        .app
+        .unyank_artifact(&tenant, &project, &version, &filename)
+        .await?;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{project}"
+    )))
+}
+
+pub(crate) async fn purge_artifact(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project, version, filename)): Path<(String, String, String, String)>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` is purging artifact `{}` for package `{}` version `{}` in tenant `{}`",
+        session.email, filename, project, version, tenant
+    );
+    state
+        .app
+        .purge_artifact(&tenant, &project, &version, &filename)
+        .await?;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{project}"
+    )))
+}
+
+pub(crate) async fn scan_artifact(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project, version, filename)): Path<(String, String, String, String)>,
+) -> Result<Json<WheelAuditResponse>, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` requested wheel scan for `{}` package `{}` version `{}` in tenant `{}`",
+        session.email, filename, project, version, tenant
+    );
+
+    let report = state
+        .app
+        .audit_stored_wheel(AuditStoredWheelCommand {
+            tenant_slug: tenant,
+            project_name: project,
+            version,
+            filename,
+        })
+        .await?;
+    Ok(Json(WheelAuditResponse {
+        artifact_filename: report.wheel_filename.clone(),
+        report_text: format_wheel_audit_report_text(&report),
+    }))
+}
+
+async fn render_dashboard(
+    state: &AppState,
+    session: AdminSession,
+    query: SearchQuery,
+) -> Result<Html<String>, WebError> {
+    debug!(
+        "assembling dashboard view for `{}` tenant_hint={:?} query={:?}",
+        session.email, query.tenant, query.q
+    );
+    let overview = state.app.get_registry_overview().await?;
+    let tenants = state
+        .app
+        .list_tenants()
+        .await?
+        .into_iter()
+        .map(|tenant| TenantView {
+            slug: tenant.slug.as_str().to_string(),
+            display_name: tenant.display_name,
+            mirroring_enabled: tenant.mirror_rule.enabled,
+        })
+        .collect::<Vec<_>>();
+
+    let selected_tenant = session
+        .tenant_slug
+        .clone()
+        .or(query.tenant.clone())
+        .or_else(|| tenants.first().map(|tenant| tenant.slug.clone()));
+    let metrics = if let Some(ref tenant_slug) = selected_tenant {
+        let metrics = state.app.get_tenant_dashboard(tenant_slug).await?;
+        Some(DashboardView {
+            tenant_slug: metrics.tenant_slug,
+            project_count: metrics.project_count,
+            release_count: metrics.release_count,
+            artifact_count: metrics.artifact_count,
+            token_count: metrics.token_count,
+            trusted_publisher_count: metrics.trusted_publisher_count,
+        })
+    } else {
+        None
+    };
+
+    let search_query = query.q.unwrap_or_default();
+    let search_results = if let Some(ref tenant_slug) = selected_tenant {
+        state
+            .app
+            .search_packages(tenant_slug, &search_query)
+            .await?
+    } else {
+        Vec::new()
+    };
+    let mut mirror_jobs = if let Some(ref tenant_slug) = selected_tenant {
+        state
+            .mirror_jobs
+            .read()
+            .await
+            .values()
+            .filter(|job| job.tenant_slug == *tenant_slug)
+            .map(|job| MirrorJobView {
+                project_name: job.project_name.clone(),
+                status_label: mirror_job_label(job.phase).to_string(),
+                detail: job.detail.clone(),
+                active: matches!(job.phase, MirrorJobPhase::Queued | MirrorJobPhase::Running),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    mirror_jobs.sort_by(|left, right| {
+        right
+            .active
+            .cmp(&left.active)
+            .then(left.project_name.cmp(&right.project_name))
+    });
+    let total_storage_human = human_bytes(overview.total_storage_bytes);
+
+    debug!(
+        "dashboard view ready for `{}` with {} tenant option(s), {} search result(s), and {} mirror job(s)",
+        session.email,
+        tenants.len(),
+        search_results.len(),
+        mirror_jobs.len()
+    );
+    render_html(DashboardTemplate {
+        overview,
+        total_storage_human,
+        tenants,
+        selected_tenant,
+        metrics,
+        mirror_jobs,
+        search_query,
+        search_results,
+        session,
+    })
+}
+
+fn mirror_job_label(phase: MirrorJobPhase) -> &'static str {
+    match phase {
+        MirrorJobPhase::Queued => "Queued",
+        MirrorJobPhase::Running => "Running",
+        MirrorJobPhase::Completed => "Completed",
+        MirrorJobPhase::Failed => "Failed",
+    }
+}
+
+fn parse_optional_ttl_hours(raw: Option<&str>) -> Result<Option<i64>, WebError> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+
+    let ttl_hours = raw.parse::<i64>().map_err(|_| WebError {
+        status: StatusCode::BAD_REQUEST,
+        message: "TTL hours must be a whole number".into(),
+    })?;
+    Ok(Some(ttl_hours))
+}
+
+fn parse_issue_token_form(raw_form: &[u8]) -> Result<IssueTokenFormData, WebError> {
+    let mut label = None;
+    let mut ttl_hours = None;
+    let mut scopes = Vec::new();
+
+    for (key, value) in url::form_urlencoded::parse(raw_form) {
+        match key.as_ref() {
+            "label" => label = Some(value.into_owned()),
+            "ttl_hours" => ttl_hours = Some(value.into_owned()),
+            "scopes" => scopes.push(value.into_owned()),
+            _ => {}
+        }
+    }
+
+    let label = label
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| WebError {
+            status: StatusCode::BAD_REQUEST,
+            message: "Token label cannot be empty".into(),
+        })?;
+
+    Ok(IssueTokenFormData {
+        label,
+        ttl_hours,
+        scopes,
+    })
+}
+
+fn package_detail_view(
+    details: pyregistry_application::PackageDetails,
+    install_base_url: &str,
+) -> PackageDetailView {
+    let tenant_slug = details.tenant_slug.clone();
+    let normalized_name = details.normalized_name.clone();
+    let project_name = details.project_name.clone();
+    let base_url = install_base_url.trim_end_matches('/');
+    let index_url = format!("{base_url}/t/{tenant_slug}/simple/");
+    let pip_install_command = install_command("pip install", &index_url, &project_name);
+    let uv_install_command = install_command("uv pip install", &index_url, &project_name);
+
+    PackageDetailView {
+        tenant_slug: details.tenant_slug,
+        project_name: details.project_name,
+        normalized_name: details.normalized_name,
+        summary: details.summary,
+        description: details.description,
+        source: details.source,
+        index_url,
+        security: PackageSecuritySummaryView {
+            scanned_file_count: details.security.scanned_file_count,
+            vulnerable_file_count: details.security.vulnerable_file_count,
+            vulnerability_count: details.security.vulnerability_count,
+            highest_severity: details.security.highest_severity,
+            scan_error: details.security.scan_error,
+        },
+        pip_install_command,
+        uv_install_command,
+        releases: details
+            .releases
+            .into_iter()
+            .enumerate()
+            .map(|(index, release)| {
+                let release_version = release.version.clone();
+                let artifact_count = release.artifacts.len();
+                let total_size_bytes = release
+                    .artifacts
+                    .iter()
+                    .map(|artifact| artifact.size_bytes)
+                    .sum();
+
+                PackageReleaseView {
+                    version: release.version,
+                    yanked_reason: release.yanked_reason,
+                    artifact_count,
+                    total_size_human: human_bytes(total_size_bytes),
+                    expanded: index == 0,
+                    artifacts: release
+                        .artifacts
+                        .into_iter()
+                        .map(|artifact| PackageArtifactView {
+                            is_wheel: artifact.filename.ends_with(".whl"),
+                            scan_url: format!(
+                                "/admin/t/{}/packages/{}/releases/{}/artifacts/{}/scan",
+                                tenant_slug, normalized_name, release_version, artifact.filename
+                            ),
+                            filename: artifact.filename,
+                            size_human: human_bytes(artifact.size_bytes),
+                            sha256: artifact.sha256,
+                            yanked_reason: artifact.yanked_reason,
+                            security: artifact_security_view(artifact.security),
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+        trusted_publishers: details.trusted_publishers,
+    }
+}
+
+fn artifact_security_view(
+    security: pyregistry_application::ArtifactSecurityDetails,
+) -> ArtifactSecurityView {
+    let vulnerability_count = security.vulnerability_count;
+    let vulnerabilities = security
+        .vulnerabilities
+        .into_iter()
+        .take(3)
+        .map(|vulnerability| PackageVulnerabilityView {
+            id: vulnerability.id,
+            summary: vulnerability.summary,
+            severity: vulnerability.severity,
+            fixed_versions: if vulnerability.fixed_versions.is_empty() {
+                "no fixed version listed".into()
+            } else {
+                vulnerability.fixed_versions.join(", ")
+            },
+            primary_reference: vulnerability.references.into_iter().next(),
+        })
+        .collect::<Vec<_>>();
+    let hidden_vulnerability_count = vulnerability_count.saturating_sub(vulnerabilities.len());
+
+    ArtifactSecurityView {
+        scanned: security.scanned,
+        vulnerability_count,
+        highest_severity: security.highest_severity,
+        vulnerabilities,
+        hidden_vulnerability_count,
+        scan_error: security.scan_error,
+    }
+}
+
+fn registry_base_url(headers: &HeaderMap) -> String {
+    let host = forwarded_value(headers, "x-forwarded-host")
+        .or_else(|| forwarded_value(headers, header::HOST.as_str()))
+        .unwrap_or("<registry-host>");
+    let scheme =
+        forwarded_value(headers, "x-forwarded-proto").unwrap_or_else(|| default_scheme_for(host));
+    format!("{scheme}://{host}")
+}
+
+fn install_command(installer: &str, index_url: &str, project_name: &str) -> String {
+    format!(
+        "export PYREGISTRY_TOKEN=<token>\n{} --index-url \"{}\" {}",
+        installer,
+        authenticated_index_url(index_url),
+        project_name
+    )
+}
+
+fn authenticated_index_url(index_url: &str) -> String {
+    if let Some((scheme, rest)) = index_url.split_once("://") {
+        return format!("{scheme}://__token__:${{PYREGISTRY_TOKEN}}@{rest}");
+    }
+
+    format!("__token__:${{PYREGISTRY_TOKEN}}@{index_url}")
+}
+
+fn default_scheme_for(host: &str) -> &'static str {
+    let host = host.to_ascii_lowercase();
+    if host.starts_with("localhost")
+        || host.starts_with("127.")
+        || host.starts_with("[::1]")
+        || host.starts_with("::1")
+    {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+fn format_wheel_audit_report_text(report: &WheelAuditReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Wheel audit: {}", report.wheel_filename);
+    let _ = writeln!(out, "Project: {}", report.project_name);
+    let _ = writeln!(out, "Scanned files: {}", report.scanned_file_count);
+    format_virus_scan_summary(&mut out, report);
+
+    if report.findings.is_empty() {
+        let _ = writeln!(out);
+        let _ = write!(
+            out,
+            "No suspicious heuristic signals or YARA virus signatures were detected."
+        );
+        return out;
+    }
+
+    for kind in [
+        WheelAuditFindingKind::UnexpectedExecutable,
+        WheelAuditFindingKind::NetworkString,
+        WheelAuditFindingKind::PostInstallClue,
+        WheelAuditFindingKind::SuspiciousDependency,
+        WheelAuditFindingKind::VirusSignatureMatch,
+    ] {
+        let findings: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == kind)
+            .collect();
+        if findings.is_empty() {
+            continue;
+        }
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{} ({})", audit_heading(kind), findings.len());
+        for finding in findings {
+            format_wheel_finding(&mut out, finding);
+        }
+    }
+
+    out
+}
+
+fn format_virus_scan_summary(out: &mut String, report: &WheelAuditReport) {
+    let _ = writeln!(
+        out,
+        "YARA virus scan: {}",
+        if report.virus_scan.enabled {
+            "enabled"
+        } else {
+            "unavailable"
+        }
+    );
+    let _ = writeln!(
+        out,
+        "YARA rules loaded: {} (skipped {})",
+        report.virus_scan.signature_rule_count, report.virus_scan.skipped_rule_count
+    );
+    let _ = writeln!(
+        out,
+        "YARA files scanned: {}, signature matches: {}",
+        report.virus_scan.scanned_file_count, report.virus_scan.match_count
+    );
+    if let Some(error) = &report.virus_scan.scan_error {
+        let _ = writeln!(out, "YARA scan warning: {error}");
+    }
+}
+
+fn format_wheel_finding(out: &mut String, finding: &WheelAuditFinding) {
+    match &finding.path {
+        Some(path) => {
+            let _ = writeln!(out, "- {} [{}]", finding.summary, path);
+        }
+        None => {
+            let _ = writeln!(out, "- {}", finding.summary);
+        }
+    }
+
+    for evidence in &finding.evidence {
+        let _ = writeln!(out, "  evidence: {}", evidence);
+    }
+}
+
+fn audit_heading(kind: WheelAuditFindingKind) -> &'static str {
+    match kind {
+        WheelAuditFindingKind::UnexpectedExecutable => "Unexpected executables or shell scripts",
+        WheelAuditFindingKind::NetworkString => "Network-related strings inside binaries",
+        WheelAuditFindingKind::PostInstallClue => "Post-install behavior clues",
+        WheelAuditFindingKind::SuspiciousDependency => "Suspicious dependencies in METADATA",
+        WheelAuditFindingKind::VirusSignatureMatch => "YARA virus signature matches",
+    }
+}
+
+fn forwarded_value<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
+    headers
+        .get(key)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        authenticated_index_url, default_scheme_for, package_detail_view, parse_issue_token_form,
+        parse_optional_ttl_hours,
+    };
+    use axum::http::StatusCode;
+    use pyregistry_application::{PackageDetails, PackageSecuritySummary};
+
+    #[test]
+    fn blank_ttl_hours_becomes_none() {
+        assert_eq!(parse_optional_ttl_hours(None).expect("ttl"), None);
+        assert_eq!(parse_optional_ttl_hours(Some("")).expect("ttl"), None);
+        assert_eq!(parse_optional_ttl_hours(Some("   ")).expect("ttl"), None);
+    }
+
+    #[test]
+    fn numeric_ttl_hours_parses() {
+        assert_eq!(parse_optional_ttl_hours(Some("24")).expect("ttl"), Some(24));
+    }
+
+    #[test]
+    fn invalid_ttl_hours_returns_bad_request() {
+        let error = parse_optional_ttl_hours(Some("tomorrow")).expect_err("invalid ttl");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("TTL hours"));
+    }
+
+    #[test]
+    fn parses_issue_token_form_with_repeated_scopes_and_blank_ttl() {
+        let form = parse_issue_token_form(
+            b"label=CI+token&ttl_hours=&scopes=read&scopes=publish&scopes=admin",
+        )
+        .expect("form");
+
+        assert_eq!(form.label, "CI token");
+        assert_eq!(form.ttl_hours.as_deref(), Some(""));
+        assert_eq!(form.scopes, vec!["read", "publish", "admin"]);
+    }
+
+    #[test]
+    fn issue_token_form_requires_non_empty_label() {
+        let error = match parse_issue_token_form(b"label=++&scopes=read") {
+            Ok(_) => panic!("missing label should fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("Token label"));
+    }
+
+    #[test]
+    fn install_commands_export_token_before_referencing_it() {
+        let details = PackageDetails {
+            tenant_slug: "acme".into(),
+            project_name: "rsloop".into(),
+            normalized_name: "rsloop".into(),
+            summary: String::new(),
+            description: String::new(),
+            source: "Local".into(),
+            security: PackageSecuritySummary::default(),
+            releases: Vec::new(),
+            trusted_publishers: Vec::new(),
+        };
+
+        let view = package_detail_view(details, "http://127.0.0.1:3000");
+
+        assert_eq!(view.index_url, "http://127.0.0.1:3000/t/acme/simple/");
+        assert!(
+            view.uv_install_command
+                .starts_with("export PYREGISTRY_TOKEN=<token>\n")
+        );
+        assert!(
+            view.uv_install_command
+                .contains("http://__token__:${PYREGISTRY_TOKEN}@127.0.0.1:3000/t/acme/simple/")
+        );
+        assert!(
+            !view
+                .uv_install_command
+                .starts_with("PYREGISTRY_TOKEN=<token> uv")
+        );
+    }
+
+    #[test]
+    fn authenticated_index_url_preserves_configured_scheme() {
+        assert_eq!(
+            authenticated_index_url("http://127.0.0.1:3000/t/acme/simple/"),
+            "http://__token__:${PYREGISTRY_TOKEN}@127.0.0.1:3000/t/acme/simple/"
+        );
+        assert_eq!(
+            authenticated_index_url("https://registry.example/t/acme/simple/"),
+            "https://__token__:${PYREGISTRY_TOKEN}@registry.example/t/acme/simple/"
+        );
+    }
+
+    #[test]
+    fn default_scheme_uses_http_for_loopback_hosts() {
+        assert_eq!(default_scheme_for("127.0.0.1:3000"), "http");
+        assert_eq!(default_scheme_for("localhost:3000"), "http");
+        assert_eq!(default_scheme_for("[::1]:3000"), "http");
+        assert_eq!(default_scheme_for("registry.example"), "https");
+    }
+}

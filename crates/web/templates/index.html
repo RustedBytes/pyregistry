@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Pyregistry</title>
+    <style>
+      :root {
+        --bg: #f5f7f4;
+        --surface: #ffffff;
+        --ink: #16221c;
+        --muted: #5d6a62;
+        --accent: #1f7a4d;
+        --line: #d6dfd8;
+      }
+      body {
+        margin: 0;
+        font-family: "Iowan Old Style", "Palatino Linotype", serif;
+        background: radial-gradient(circle at top left, #eef6ea, var(--bg));
+        color: var(--ink);
+      }
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 48px 24px 64px;
+      }
+      .hero, .panel {
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 28px;
+        box-shadow: 0 10px 30px rgba(22, 34, 28, 0.05);
+      }
+      .hero h1 {
+        margin: 0 0 12px;
+        font-size: clamp(2rem, 4vw, 3.25rem);
+      }
+      .grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        margin: 28px 0;
+      }
+      .stat {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 18px;
+        background: #fbfcfa;
+      }
+      .stat strong {
+        display: block;
+        font-size: 1.75rem;
+        margin-bottom: 6px;
+      }
+      a {
+        color: var(--accent);
+      }
+      .muted {
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <p class="muted">Internal Python package infrastructure</p>
+        <h1>Pyregistry</h1>
+        <p>A minimal multi-tenant package registry for company-internal Python packages, mirroring, trusted publishing, and provenance-aware installs.</p>
+        <div class="grid">
+          <div class="stat">
+            <strong>{{ overview.tenant_count }}</strong>
+            <span>Tenants</span>
+          </div>
+          <div class="stat">
+            <strong>{{ overview.project_count }}</strong>
+            <span>Projects</span>
+          </div>
+          <div class="stat">
+            <strong>{{ overview.release_count }}</strong>
+            <span>Releases</span>
+          </div>
+          <div class="stat">
+            <strong>{{ overview.artifact_count }}</strong>
+            <span>Artifacts</span>
+          </div>
+          <div class="stat">
+            <strong>{{ total_storage_human }}</strong>
+            <span>Stored data</span>
+          </div>
+          <div class="stat">
+            <strong>{{ overview.mirrored_project_count }}</strong>
+            <span>Mirrored projects</span>
+          </div>
+        </div>
+        <p><a href="/admin/login">Admin sign in</a></p>
+      </section>
+    </main>
+  </body>
+</html>

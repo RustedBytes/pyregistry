@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Pyregistry Admin Login</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(180deg, #eef5e8 0%, #f8faf7 100%);
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        color: #19231d;
+      }
+      form {
+        width: min(420px, calc(100vw - 32px));
+        background: white;
+        border: 1px solid #d7e0d4;
+        border-radius: 18px;
+        padding: 28px;
+        box-shadow: 0 12px 30px rgba(25, 35, 29, 0.06);
+      }
+      label, input {
+        display: block;
+        width: 100%;
+      }
+      input {
+        margin: 8px 0 16px;
+        padding: 12px 14px;
+        border: 1px solid #c7d1c4;
+        border-radius: 12px;
+        box-sizing: border-box;
+      }
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 18px;
+        background: #196944;
+        color: white;
+        cursor: pointer;
+      }
+      .error {
+        color: #9b1c1c;
+      }
+    </style>
+  </head>
+  <body>
+    <form method="post" action="/admin/login">
+      <h1>Admin sign in</h1>
+      <p>Use the seeded superadmin or a tenant admin account.</p>
+      {% match error %}
+      {% when Some with (message) %}
+      <p class="error">{{ message }}</p>
+      {% when None %}
+      {% endmatch %}
+      <label for="email">Email</label>
+      <input id="email" type="email" name="email" required>
+      <label for="password">Password</label>
+      <input id="password" type="password" name="password" required>
+      <button type="submit">Sign in</button>
+    </form>
+  </body>
+</html>
