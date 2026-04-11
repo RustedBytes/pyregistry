@@ -3,9 +3,10 @@ use chrono::{DateTime, Utc};
 use pyregistry_application::{ApplicationError, RegistryOverview, RegistryStore, SearchHit};
 use pyregistry_domain::{
     AdminUser, AdminUserId, ApiToken, Artifact, ArtifactId, ArtifactKind, AttestationBundle,
-    AttestationSource, DigestSet, MirrorRule, Project, ProjectId, ProjectName, ProjectSource,
-    PublishIdentity, Release, ReleaseId, ReleaseVersion, Tenant, TenantId, TenantSlug, TokenId,
-    TokenScope, TrustedPublisher, TrustedPublisherId, TrustedPublisherProvider, YankState,
+    AttestationSource, AuditEvent, AuditEventId, DigestSet, MirrorRule, Project, ProjectId,
+    ProjectName, ProjectSource, PublishIdentity, Release, ReleaseId, ReleaseVersion, Tenant,
+    TenantId, TenantSlug, TokenId, TokenScope, TrustedPublisher, TrustedPublisherId,
+    TrustedPublisherProvider, YankState,
 };
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -681,6 +682,63 @@ impl RegistryStore for SqliteRegistryStore {
             Ok(())
         })
     }
+
+    async fn save_audit_event(&self, event: AuditEvent) -> Result<(), ApplicationError> {
+        let metadata_json = serde_json::to_string(&event.metadata).map_err(json_error)?;
+        self.with_connection(|connection| {
+            connection.execute(
+                r#"
+                INSERT INTO audit_events
+                    (id, occurred_at, actor, action, tenant_slug, target, metadata_json)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    uuid_string(event.id.into_inner()),
+                    date_string(event.occurred_at),
+                    event.actor,
+                    event.action,
+                    event.tenant_slug,
+                    event.target,
+                    metadata_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn list_audit_events(
+        &self,
+        tenant_slug: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, ApplicationError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.with_connection(|connection| {
+            if let Some(tenant_slug) = tenant_slug {
+                let mut statement = connection.prepare(
+                    r#"
+                    SELECT id, occurred_at, actor, action, tenant_slug, target, metadata_json
+                    FROM audit_events
+                    WHERE tenant_slug = ?1
+                    ORDER BY occurred_at DESC, id DESC
+                    LIMIT ?2
+                    "#,
+                )?;
+                return collect_rows(
+                    statement.query_map(params![tenant_slug, limit], map_audit_event)?,
+                );
+            }
+
+            let mut statement = connection.prepare(
+                r#"
+                SELECT id, occurred_at, actor, action, tenant_slug, target, metadata_json
+                FROM audit_events
+                ORDER BY occurred_at DESC, id DESC
+                LIMIT ?1
+                "#,
+            )?;
+            collect_rows(statement.query_map(params![limit], map_audit_event)?)
+        })
+    }
 }
 
 fn migrate(connection: &Connection) -> Result<(), ApplicationError> {
@@ -779,12 +837,26 @@ fn migrate(connection: &Connection) -> Result<(), ApplicationError> {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id TEXT PRIMARY KEY,
+                occurred_at TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                tenant_slug TEXT,
+                target TEXT,
+                metadata_json TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant ON api_tokens(tenant_id);
             CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id);
             CREATE INDEX IF NOT EXISTS idx_releases_project ON releases(project_id);
             CREATE INDEX IF NOT EXISTS idx_artifacts_release ON artifacts(release_id);
             CREATE INDEX IF NOT EXISTS idx_trusted_publishers_tenant_project
                 ON trusted_publishers(tenant_id, project_normalized_name);
+            CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_time
+                ON audit_events(tenant_slug, occurred_at);
+            CREATE INDEX IF NOT EXISTS idx_audit_events_time
+                ON audit_events(occurred_at);
             "#,
         )
         .map_err(sqlite_error)
@@ -936,6 +1008,19 @@ fn map_trusted_publisher(row: &Row<'_>) -> rusqlite::Result<TrustedPublisher> {
         claim_rules: parse_claims_json(row.get(6)?, 6)?,
         created_at: parse_datetime(row.get(7)?, 7)?,
     })
+}
+
+fn map_audit_event(row: &Row<'_>) -> rusqlite::Result<AuditEvent> {
+    AuditEvent::new(
+        AuditEventId::new(parse_uuid(row.get(0)?, 0)?),
+        parse_datetime(row.get(1)?, 1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, Option<String>>(4)?,
+        row.get::<_, Option<String>>(5)?,
+        parse_claims_json(row.get(6)?, 6)?,
+    )
+    .map_err(|error| rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error)))
 }
 
 fn parse_publish_identity(
@@ -1220,6 +1305,25 @@ mod tests {
                 })
                 .await
                 .expect("save token");
+
+            store
+                .save_audit_event(
+                    AuditEvent::new(
+                        AuditEventId::new(Uuid::new_v4()),
+                        now,
+                        "admin@example.test",
+                        "artifact.upload",
+                        Some("acme".into()),
+                        Some("demo-pkg/1.0.0/demo_pkg-1.0.0-py3-none-any.whl".into()),
+                        BTreeMap::from([(
+                            "filename".into(),
+                            "demo_pkg-1.0.0-py3-none-any.whl".into(),
+                        )]),
+                    )
+                    .expect("audit event"),
+                )
+                .await
+                .expect("save audit event");
         }
 
         let reopened = SqliteRegistryStore::open(&path).expect("reopen sqlite store");
@@ -1240,6 +1344,17 @@ mod tests {
         let tokens = reopened.list_api_tokens(tenant_id).await.expect("tokens");
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].scopes, vec![TokenScope::Read]);
+
+        let audit_events = reopened
+            .list_audit_events(Some("acme"), 10)
+            .await
+            .expect("audit events");
+        assert_eq!(audit_events.len(), 1);
+        assert_eq!(audit_events[0].action, "artifact.upload");
+        assert_eq!(
+            audit_events[0].metadata.get("filename").map(String::as_str),
+            Some("demo_pkg-1.0.0-py3-none-any.whl")
+        );
 
         let _ = fs::remove_file(path);
     }

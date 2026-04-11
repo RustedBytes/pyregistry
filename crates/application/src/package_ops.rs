@@ -1,6 +1,6 @@
 use crate::{
-    ApplicationError, MirroredProjectSnapshot, ProvenanceDescriptor, PyregistryApp,
-    SimpleArtifactLink, SimpleProject, SimpleProjectPage,
+    ApplicationError, MirrorRefreshFailure, MirrorRefreshReport, MirroredProjectSnapshot,
+    ProvenanceDescriptor, PyregistryApp, SimpleArtifactLink, SimpleProject, SimpleProjectPage,
 };
 use futures_util::{StreamExt, stream};
 use log::{debug, info, warn};
@@ -90,6 +90,75 @@ impl PyregistryApp {
             project.name.original()
         );
         Ok(())
+    }
+
+    pub async fn refresh_mirrored_projects(&self) -> Result<MirrorRefreshReport, ApplicationError> {
+        info!("starting background refresh for mirrored projects");
+        let tenants = self.store.list_tenants().await?;
+        let mut report = MirrorRefreshReport::default();
+
+        for tenant in tenants {
+            if !tenant.mirror_rule.enabled {
+                debug!(
+                    "skipping mirrored project refresh for tenant `{}` because mirroring is disabled",
+                    tenant.slug.as_str()
+                );
+                continue;
+            }
+
+            report.tenant_count += 1;
+            let projects = self.store.list_projects(tenant.id).await?;
+            for project in projects
+                .into_iter()
+                .filter(|project| matches!(project.source, ProjectSource::Mirrored))
+            {
+                report.mirrored_project_count += 1;
+                let tenant_slug = tenant.slug.as_str().to_string();
+                let project_name = project.name.original().to_string();
+                match self
+                    .resolve_project_from_mirror(&tenant_slug, &project_name)
+                    .await
+                {
+                    Ok(Some(_)) => {
+                        report.refreshed_project_count += 1;
+                        info!(
+                            "refreshed mirrored project `{project_name}` for tenant `{tenant_slug}`"
+                        );
+                    }
+                    Ok(None) => {
+                        report.failed_project_count += 1;
+                        warn!(
+                            "mirrored project refresh returned no upstream project for tenant `{tenant_slug}` project `{project_name}`"
+                        );
+                        report.failures.push(MirrorRefreshFailure {
+                            tenant_slug,
+                            project_name,
+                            error: "upstream project was not found".into(),
+                        });
+                    }
+                    Err(error) => {
+                        report.failed_project_count += 1;
+                        warn!(
+                            "failed to refresh mirrored project `{project_name}` for tenant `{tenant_slug}`: {error}"
+                        );
+                        report.failures.push(MirrorRefreshFailure {
+                            tenant_slug,
+                            project_name,
+                            error: error.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        info!(
+            "background mirrored project refresh finished: tenants={}, mirrored_projects={}, refreshed={}, failed={}",
+            report.tenant_count,
+            report.mirrored_project_count,
+            report.refreshed_project_count,
+            report.failed_project_count
+        );
+        Ok(report)
     }
 
     pub async fn list_simple_projects(

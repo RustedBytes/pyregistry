@@ -74,6 +74,24 @@ impl PyregistryApp {
         Ok(())
     }
 
+    pub async fn unyank_release(
+        &self,
+        tenant_slug: &str,
+        project_name: &str,
+        version: &str,
+    ) -> Result<(), ApplicationError> {
+        info!(
+            "unyanking release for tenant `{tenant_slug}` project `{project_name}` version `{version}`"
+        );
+        let mut release = self
+            .find_release(tenant_slug, project_name, version)
+            .await?;
+        release.unyank();
+        self.store.save_release(release).await?;
+        info!("release unyank completed");
+        Ok(())
+    }
+
     pub async fn purge_artifact(
         &self,
         tenant_slug: &str,

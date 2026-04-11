@@ -26,6 +26,7 @@ pub(crate) struct DashboardTemplate {
     pub(crate) selected_tenant: Option<String>,
     pub(crate) metrics: Option<DashboardView>,
     pub(crate) mirror_jobs: Vec<MirrorJobView>,
+    pub(crate) audit_events: Vec<AuditTrailEntryView>,
     pub(crate) search_query: String,
     pub(crate) search_results: Vec<SearchHit>,
     pub(crate) session: AdminSession,
@@ -82,6 +83,22 @@ pub(crate) struct MirrorJobView {
     pub(crate) status_label: String,
     pub(crate) detail: String,
     pub(crate) active: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct AuditTrailEntryView {
+    pub(crate) occurred_at: String,
+    pub(crate) actor: String,
+    pub(crate) action: String,
+    pub(crate) tenant_slug: Option<String>,
+    pub(crate) target: Option<String>,
+    pub(crate) metadata: Vec<AuditTrailMetadataView>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct AuditTrailMetadataView {
+    pub(crate) key: String,
+    pub(crate) value: String,
 }
 
 #[derive(Clone, Serialize)]

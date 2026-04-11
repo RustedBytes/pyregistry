@@ -1,4 +1,5 @@
 use crate::{
+    audit::{audit_metadata, record_audit_event},
     auth::package_access,
     error::{WebError, bad_request, render_html, to_bad_request},
     models::{
@@ -109,6 +110,7 @@ pub(crate) async fn legacy_upload(
     let project_name = name.ok_or_else(|| bad_request("missing `name` form field"))?;
     let version = version.ok_or_else(|| bad_request("missing `version` form field"))?;
     let filename = filename.ok_or_else(|| bad_request("missing upload file in `content` field"))?;
+    let upload_target = format!("{project_name}/{version}/{filename}");
     info!(
         "received legacy upload request for tenant `{tenant}` project `{project_name}` version `{version}` filename `{filename}` ({} bytes)",
         content.len()
@@ -119,7 +121,7 @@ pub(crate) async fn legacy_upload(
         .upload_artifact(
             &access,
             UploadArtifactCommand {
-                tenant_slug: tenant,
+                tenant_slug: tenant.clone(),
                 project_name,
                 version,
                 filename,
@@ -129,6 +131,15 @@ pub(crate) async fn legacy_upload(
             },
         )
         .await?;
+    record_audit_event(
+        &state,
+        format!("token:{}", access.token.label),
+        "artifact.upload",
+        Some(tenant),
+        Some(upload_target),
+        audit_metadata([]),
+    )
+    .await;
 
     Ok(StatusCode::OK)
 }
@@ -189,11 +200,20 @@ pub(crate) async fn mint_oidc_publish_token(
     let grant = state
         .app
         .mint_oidc_publish_token(MintOidcPublishTokenCommand {
-            tenant_slug: request.tenant_slug,
-            project_name: request.project_name,
+            tenant_slug: request.tenant_slug.clone(),
+            project_name: request.project_name.clone(),
             oidc_token: request.oidc_token,
         })
         .await?;
+    record_audit_event(
+        &state,
+        "oidc".into(),
+        "oidc_publish_token.mint",
+        Some(request.tenant_slug),
+        Some(request.project_name),
+        audit_metadata([("expires_at", grant.expires_at.to_rfc3339())]),
+    )
+    .await;
     info!(
         "OIDC publish token issued for tenant `{}` project `{}` expiring at {}",
         grant.tenant_slug, grant.project_name, grant.expires_at

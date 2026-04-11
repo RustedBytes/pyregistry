@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use pyregistry_application::{ApplicationError, RegistryOverview, RegistryStore, SearchHit};
 use pyregistry_domain::{
-    AdminUser, ApiToken, Artifact, ArtifactId, AttestationBundle, Project, ProjectId,
+    AdminUser, ApiToken, Artifact, ArtifactId, AttestationBundle, AuditEvent, Project, ProjectId,
     ProjectSource, Release, ReleaseId, ReleaseVersion, Tenant, TenantId, TokenId, TrustedPublisher,
 };
 use std::collections::HashMap;
@@ -18,6 +18,7 @@ struct InMemoryData {
     artifacts: HashMap<Uuid, Artifact>,
     attestations: HashMap<Uuid, AttestationBundle>,
     trusted_publishers: HashMap<Uuid, TrustedPublisher>,
+    audit_events: HashMap<Uuid, AuditEvent>,
 }
 
 #[derive(Default)]
@@ -350,5 +351,40 @@ impl RegistryStore for InMemoryRegistryStore {
             .projects
             .remove(&project_id.into_inner());
         Ok(())
+    }
+
+    async fn save_audit_event(&self, event: AuditEvent) -> Result<(), ApplicationError> {
+        self.data
+            .write()
+            .await
+            .audit_events
+            .insert(event.id.into_inner(), event);
+        Ok(())
+    }
+
+    async fn list_audit_events(
+        &self,
+        tenant_slug: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, ApplicationError> {
+        let data = self.data.read().await;
+        let mut events = data
+            .audit_events
+            .values()
+            .filter(|event| {
+                tenant_slug
+                    .map(|tenant_slug| event.tenant_slug.as_deref() == Some(tenant_slug))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| {
+            right
+                .occurred_at
+                .cmp(&left.occurred_at)
+                .then(right.id.cmp(&left.id))
+        });
+        events.truncate(limit);
+        Ok(events)
     }
 }

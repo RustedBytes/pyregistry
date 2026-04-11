@@ -127,6 +127,23 @@
         background: #e8f3eb;
         color: #155233;
       }
+      .audit-action {
+        font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", monospace;
+        font-size: 0.92rem;
+      }
+      .audit-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      .audit-meta span {
+        border-radius: 999px;
+        background: var(--soft);
+        color: var(--muted);
+        padding: 4px 8px;
+        font-size: 0.82rem;
+      }
     </style>
   </head>
   <body>
@@ -248,6 +265,46 @@
         </div>
       </section>
       {% endif %}
+
+      <section>
+        <h2>Audit trail</h2>
+        <p class="muted">Recent user and token actions for this tenant.</p>
+        {% if audit_events.len() > 0 %}
+        <table>
+          <thead>
+            <tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th></tr>
+          </thead>
+          <tbody>
+            {% for event in audit_events %}
+            <tr>
+              <td>{{ event.occurred_at }}</td>
+              <td>{{ event.actor }}</td>
+              <td><span class="audit-action">{{ event.action }}</span></td>
+              <td>
+                {% match event.target %}
+                {% when Some with (target) %}{{ target }}
+                {% when None %}
+                  {% match event.tenant_slug %}
+                  {% when Some with (tenant_slug) %}{{ tenant_slug }}
+                  {% when None %}-
+                  {% endmatch %}
+                {% endmatch %}
+                {% if event.metadata.len() > 0 %}
+                <div class="audit-meta">
+                  {% for item in event.metadata %}
+                  <span>{{ item.key }}={{ item.value }}</span>
+                  {% endfor %}
+                </div>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No audit events recorded yet.</p>
+        {% endif %}
+      </section>
 
       <div class="row">
         <section>

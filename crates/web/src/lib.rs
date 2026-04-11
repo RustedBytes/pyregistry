@@ -1,4 +1,5 @@
 mod admin;
+mod audit;
 mod auth;
 mod error;
 mod models;
@@ -46,6 +47,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/admin/t/{tenant}/packages/{project}/releases/{version}/yank",
             post(admin::yank_release),
+        )
+        .route(
+            "/admin/t/{tenant}/packages/{project}/releases/{version}/unyank",
+            post(admin::unyank_release),
         )
         .route(
             "/admin/t/{tenant}/packages/{project}/releases/{version}/purge",

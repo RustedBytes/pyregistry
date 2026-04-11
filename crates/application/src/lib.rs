@@ -1,5 +1,6 @@
 mod admin_ops;
 mod audit_ops;
+mod audit_trail_ops;
 mod error;
 mod governance_ops;
 mod models;

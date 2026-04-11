@@ -8,9 +8,9 @@ use crate::{
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use pyregistry_domain::{
-    AdminUser, ApiToken, Artifact, ArtifactId, AttestationBundle, MirrorRule, Project, ProjectId,
-    ProjectName, PublishIdentity, Release, ReleaseId, ReleaseVersion, Tenant, TenantId, TenantSlug,
-    TokenId, TrustedPublisher,
+    AdminUser, ApiToken, Artifact, ArtifactId, AttestationBundle, AuditEvent, MirrorRule, Project,
+    ProjectId, ProjectName, ProjectSource, PublishIdentity, Release, ReleaseId, ReleaseVersion,
+    Tenant, TenantId, TenantSlug, TokenId, TrustedPublisher,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -41,6 +41,51 @@ async fn mirrored_project_caches_artifacts_with_bounded_parallelism() {
         6,
         "all artifact records should be saved before/while payload caching runs"
     );
+}
+
+#[tokio::test]
+async fn refresh_mirrored_projects_updates_existing_mirrors_only() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true));
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(3));
+    let app = test_app(store.clone(), storage.clone(), mirror.clone(), 2);
+
+    let report = app
+        .refresh_mirrored_projects()
+        .await
+        .expect("refresh mirrored projects");
+
+    assert_eq!(report.tenant_count, 1);
+    assert_eq!(report.mirrored_project_count, 1);
+    assert_eq!(report.refreshed_project_count, 1);
+    assert_eq!(report.failed_project_count, 0);
+    assert_eq!(mirror.project_fetch_count(), 1);
+    assert_eq!(
+        mirror.fetch_count(),
+        3,
+        "only the mirrored project should fetch artifact payloads"
+    );
+    assert_eq!(storage.object_count(), 3);
+    assert_eq!(store.artifact_count(), 3);
+}
+
+#[tokio::test]
+async fn refresh_mirrored_projects_skips_disabled_tenants() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(false));
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(3));
+    let app = test_app(store, storage, mirror.clone(), 2);
+
+    let report = app
+        .refresh_mirrored_projects()
+        .await
+        .expect("refresh mirrored projects");
+
+    assert_eq!(report.tenant_count, 0);
+    assert_eq!(report.mirrored_project_count, 0);
+    assert_eq!(report.refreshed_project_count, 0);
+    assert_eq!(mirror.project_fetch_count(), 0);
+    assert_eq!(mirror.fetch_count(), 0);
 }
 
 fn test_app(
@@ -82,15 +127,51 @@ struct FakeRegistryState {
 
 impl FakeRegistryStore {
     fn with_mirrored_tenant() -> Self {
+        Self::with_tenant(false, true)
+    }
+
+    fn with_mirrored_and_local_projects(mirroring_enabled: bool) -> Self {
+        Self::with_tenant(true, mirroring_enabled)
+    }
+
+    fn with_tenant(include_projects: bool, mirroring_enabled: bool) -> Self {
         let tenant = Tenant::new(
             TenantId::default(),
             TenantSlug::new("acme").expect("tenant slug"),
             "Acme",
-            MirrorRule { enabled: true },
+            MirrorRule {
+                enabled: mirroring_enabled,
+            },
             fixed_now(),
         )
         .expect("tenant");
         let mut state = FakeRegistryState::default();
+        if include_projects {
+            let mirrored_project = Project::new(
+                ProjectId::new(Uuid::from_u128(100)),
+                tenant.id,
+                ProjectName::new("demo").expect("project name"),
+                ProjectSource::Mirrored,
+                "Demo package",
+                "Demo package",
+                fixed_now(),
+            );
+            let local_project = Project::new(
+                ProjectId::new(Uuid::from_u128(101)),
+                tenant.id,
+                ProjectName::new("internal").expect("project name"),
+                ProjectSource::Local,
+                "Internal package",
+                "Internal package",
+                fixed_now(),
+            );
+            state
+                .projects
+                .insert(mirrored_project.id.into_inner(), mirrored_project);
+            state
+                .projects
+                .insert(local_project.id.into_inner(), local_project);
+        }
         state.tenants.insert(tenant.id.into_inner(), tenant);
         Self {
             state: Mutex::new(state),
@@ -363,6 +444,18 @@ impl RegistryStore for FakeRegistryStore {
             .remove(&project_id.into_inner());
         Ok(())
     }
+
+    async fn save_audit_event(&self, _event: AuditEvent) -> Result<(), ApplicationError> {
+        Ok(())
+    }
+
+    async fn list_audit_events(
+        &self,
+        _tenant_slug: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<AuditEvent>, ApplicationError> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Default)]
@@ -409,6 +502,7 @@ struct FakeMirrorClient {
 
 #[derive(Default)]
 struct MirrorCounters {
+    project_fetch_count: usize,
     active_fetches: usize,
     max_active_fetches: usize,
     fetch_count: usize,
@@ -451,6 +545,13 @@ impl FakeMirrorClient {
         self.counters.lock().expect("mirror counters").fetch_count
     }
 
+    fn project_fetch_count(&self) -> usize {
+        self.counters
+            .lock()
+            .expect("mirror counters")
+            .project_fetch_count
+    }
+
     fn max_active_fetches(&self) -> usize {
         self.counters
             .lock()
@@ -465,6 +566,10 @@ impl MirrorClient for FakeMirrorClient {
         &self,
         _project_name: &str,
     ) -> Result<Option<MirroredProjectSnapshot>, ApplicationError> {
+        self.counters
+            .lock()
+            .expect("mirror counters")
+            .project_fetch_count += 1;
         Ok(Some(self.snapshot.clone()))
     }
 

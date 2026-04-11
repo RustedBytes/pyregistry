@@ -2,9 +2,9 @@ use crate::ApplicationError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use pyregistry_domain::{
-    AdminUser, ApiToken, Artifact, ArtifactId, AttestationBundle, DeletionMode, Project, ProjectId,
-    PublishIdentity, Release, ReleaseId, ReleaseVersion, Tenant, TenantId, TokenId, TokenScope,
-    TrustedPublisher, TrustedPublisherProvider,
+    AdminUser, ApiToken, Artifact, ArtifactId, AttestationBundle, AuditEvent, DeletionMode,
+    Project, ProjectId, PublishIdentity, Release, ReleaseId, ReleaseVersion, Tenant, TenantId,
+    TokenId, TokenScope, TrustedPublisher, TrustedPublisherProvider,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -37,6 +37,22 @@ pub struct RecentActivity {
     pub tenant_slug: String,
     pub source: String,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MirrorRefreshReport {
+    pub tenant_count: usize,
+    pub mirrored_project_count: usize,
+    pub refreshed_project_count: usize,
+    pub failed_project_count: usize,
+    pub failures: Vec<MirrorRefreshFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirrorRefreshFailure {
+    pub tenant_slug: String,
+    pub project_name: String,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +279,25 @@ pub struct AdminSession {
     pub email: String,
     pub tenant_slug: Option<String>,
     pub is_superadmin: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordAuditEventCommand {
+    pub actor: String,
+    pub action: String,
+    pub tenant_slug: Option<String>,
+    pub target: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditTrailEntry {
+    pub occurred_at: DateTime<Utc>,
+    pub actor: String,
+    pub action: String,
+    pub tenant_slug: Option<String>,
+    pub target: Option<String>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -518,6 +553,13 @@ pub trait RegistryStore: Send + Sync {
         normalized_project_name: &str,
     ) -> Result<Vec<TrustedPublisher>, ApplicationError>;
     async fn delete_project(&self, project_id: ProjectId) -> Result<(), ApplicationError>;
+
+    async fn save_audit_event(&self, event: AuditEvent) -> Result<(), ApplicationError>;
+    async fn list_audit_events(
+        &self,
+        tenant_slug: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, ApplicationError>;
 }
 
 pub trait WheelArchiveReader: Send + Sync {

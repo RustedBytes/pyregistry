@@ -1,9 +1,10 @@
 use crate::{
-    AdminUserId, ArtifactId, ArtifactKind, DigestSet, DomainError, MirrorRule, ProjectId,
-    ProjectName, ProjectSource, PublishIdentity, ReleaseId, ReleaseVersion, TenantId, TenantSlug,
-    TokenId, TokenScope, YankState,
+    AdminUserId, ArtifactId, ArtifactKind, AuditEventId, DigestSet, DomainError, MirrorRule,
+    ProjectId, ProjectName, ProjectSource, PublishIdentity, ReleaseId, ReleaseVersion, TenantId,
+    TenantSlug, TokenId, TokenScope, YankState,
 };
 use chrono::{DateTime, Utc};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tenant {
@@ -192,4 +193,79 @@ pub fn ensure_purge_allowed(source: &ProjectSource) -> Result<(), DomainError> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEvent {
+    pub id: AuditEventId,
+    pub occurred_at: DateTime<Utc>,
+    pub actor: String,
+    pub action: String,
+    pub tenant_slug: Option<String>,
+    pub target: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl AuditEvent {
+    pub fn new(
+        id: AuditEventId,
+        occurred_at: DateTime<Utc>,
+        actor: impl Into<String>,
+        action: impl Into<String>,
+        tenant_slug: Option<String>,
+        target: Option<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<Self, DomainError> {
+        let actor = required_audit_text("audit_actor", actor.into())?;
+        let action = required_audit_text("audit_action", action.into())?;
+        let tenant_slug = optional_audit_text("audit_tenant_slug", tenant_slug)?;
+        let target = optional_audit_text("audit_target", target)?;
+        let metadata = normalize_audit_metadata(metadata)?;
+
+        Ok(Self {
+            id,
+            occurred_at,
+            actor,
+            action,
+            tenant_slug,
+            target,
+            metadata,
+        })
+    }
+}
+
+fn required_audit_text(field: &'static str, value: String) -> Result<String, DomainError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(DomainError::InvalidValue {
+            field,
+            message: "value cannot be empty".into(),
+        });
+    }
+
+    Ok(value)
+}
+
+fn optional_audit_text(
+    field: &'static str,
+    value: Option<String>,
+) -> Result<Option<String>, DomainError> {
+    value
+        .map(|value| required_audit_text(field, value))
+        .transpose()
+}
+
+fn normalize_audit_metadata(
+    metadata: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, DomainError> {
+    let mut normalized = BTreeMap::new();
+    for (key, value) in metadata {
+        let key = required_audit_text("audit_metadata_key", key)?;
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            normalized.insert(key, value);
+        }
+    }
+
+    Ok(normalized)
 }

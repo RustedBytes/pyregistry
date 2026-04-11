@@ -32,3 +32,4 @@ id_newtype!(ProjectId);
 id_newtype!(ReleaseId);
 id_newtype!(ArtifactId);
 id_newtype!(TrustedPublisherId);
+id_newtype!(AuditEventId);

@@ -18,6 +18,7 @@ Implemented today:
 - Multi-crate Rust workspace with Clean Architecture boundaries.
 - Public landing page with aggregate registry statistics.
 - Admin login, dashboard, tenant creation, package search, and token issuance.
+- Durable audit trail for admin, token upload, and OIDC publishing actions.
 - Tenant-scoped Simple Repository API and legacy `twine` upload endpoint.
 - Authenticated package downloads using API tokens.
 - Read-through mirroring from a configurable PyPI-compatible upstream.
@@ -168,6 +169,9 @@ root = ".pyregistry/blobs"
 [pypi]
 base_url = "https://pypi.org"
 mirror_download_concurrency = 4
+mirror_update_enabled = true
+mirror_update_interval_seconds = 3600
+mirror_update_on_startup = true
 
 [sqlite]
 path = ".pyregistry/pyregistry.sqlite3"
@@ -221,6 +225,10 @@ Useful environment variables:
 - `POSTGRES_MIN_CONNECTIONS`
 - `POSTGRES_ACQUIRE_TIMEOUT_SECONDS`
 - `PYPI_BASE_URL` or `PYPI_URL`
+- `PYPI_MIRROR_DOWNLOAD_CONCURRENCY`
+- `PYPI_MIRROR_UPDATE_ENABLED`
+- `PYPI_MIRROR_UPDATE_INTERVAL_SECONDS`
+- `PYPI_MIRROR_UPDATE_ON_STARTUP`
 - `YARA_RULES_PATH`
 - `RATE_LIMIT_ENABLED`
 - `RATE_LIMIT_REQUESTS_PER_MINUTE`
@@ -320,8 +328,8 @@ Trusted publishing API:
 - `POST /_/oidc/mint-token`
 
 Admin actions include tenant creation, API token issuance, mirror cache
-refresh, trusted publisher registration, yanking, unyanking, purge, and wheel
-scan.
+refresh, trusted publisher registration, yanking, unyanking, purge, audit trail,
+and wheel scan.
 
 ## Security Scanning
 
@@ -353,11 +361,19 @@ The upstream base URL is configurable:
 [pypi]
 base_url = "https://pypi.org"
 mirror_download_concurrency = 4
+mirror_update_enabled = true
+mirror_update_interval_seconds = 3600
+mirror_update_on_startup = true
 ```
 
 For an internal PyPI-compatible mirror, set `base_url` to that service instead.
 Increase `mirror_download_concurrency` to cache large projects faster, or lower
 it if your upstream mirror or object storage needs gentler traffic.
+The background updater periodically refreshes already-mirrored projects in
+tenants where mirroring is enabled. It discovers newer upstream releases and
+files, then caches them locally using the same bounded download concurrency.
+Set `mirror_update_enabled = false` to disable background refreshes, or tune
+`mirror_update_interval_seconds` for your upstream traffic budget.
 
 ## Trusted Publishing
 

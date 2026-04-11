@@ -42,6 +42,9 @@
         text-decoration: none;
       }
       .danger { background: #a33434; }
+      .warning {
+        background: #b86720;
+      }
       .secondary {
         background: #eef5f0;
         color: #244135;
@@ -53,6 +56,12 @@
         padding: 10px 12px;
       }
       .muted { color: #596860; }
+      label {
+        display: grid;
+        gap: 6px;
+        color: #415249;
+        font-size: 0.92rem;
+      }
       .release {
         border-top: 1px solid #e1e9e4;
         padding-top: 18px;
@@ -79,6 +88,39 @@
         color: #244135;
         padding: 6px 10px;
         font-size: 0.92rem;
+      }
+      .pill-yanked {
+        background: #fff0df;
+        color: #7a3f12;
+      }
+      .release-actions {
+        display: grid;
+        gap: 10px;
+        min-width: min(360px, 100%);
+      }
+      .release-actions form {
+        margin: 0;
+      }
+      .yank-card {
+        border: 1px solid #d9e3dc;
+        border-radius: 16px;
+        background: #fbfdfb;
+        padding: 12px;
+      }
+      .yank-card p {
+        margin: 6px 0 0;
+      }
+      .yank-card.yanked {
+        border-color: #e0bd83;
+        background: #fff8ed;
+      }
+      .yank-form {
+        display: grid;
+        gap: 10px;
+        margin-top: 10px;
+      }
+      .danger-form {
+        display: inline-block;
       }
       details {
         margin-top: 14px;
@@ -135,6 +177,21 @@
       }
       .file-actions form {
         margin-right: 0;
+      }
+      .file-governance {
+        display: grid;
+        gap: 8px;
+        flex-basis: 100%;
+        margin-top: 4px;
+      }
+      .file-governance .yank-form {
+        grid-template-columns: minmax(180px, 1fr) auto;
+        align-items: end;
+      }
+      @media (max-width: 720px) {
+        .file-governance .yank-form {
+          grid-template-columns: 1fr;
+        }
       }
       .install-grid {
         display: grid;
@@ -284,6 +341,7 @@
 
       <section>
         <h2>Releases</h2>
+        <p class="muted">Yanking is reversible and tells installers to avoid a release or file when possible. Purge is irreversible and removes local artifacts.</p>
         {% for release in details.releases %}
         <div class="release">
           <div class="release-head">
@@ -294,17 +352,36 @@
                 <span class="pill">{{ release.total_size_human }}</span>
                 {% match release.yanked_reason %}
                 {% when Some with (reason) %}
-                <span class="pill">Yanked: {{ reason }}</span>
+                <span class="pill pill-yanked">Yanked: {{ reason }}</span>
                 {% when None %}
+                <span class="pill">Active</span>
                 {% endmatch %}
               </div>
             </div>
-            <div>
-              <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/yank">
-                <input type="text" name="reason" placeholder="yank reason">
-                <button type="submit">Yank release</button>
-              </form>
-              <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/purge">
+            <div class="release-actions">
+              {% match release.yanked_reason %}
+              {% when Some with (reason) %}
+              <div class="yank-card yanked">
+                <strong>Release is yanked</strong>
+                <p class="muted">Installers will avoid this release when possible.</p>
+                <p>Reason: {{ reason }}</p>
+                <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/unyank" onsubmit="return confirm('Unyank release {{ release.version }} and make it installable again?');">
+                  <button class="secondary" type="submit">Unyank release</button>
+                </form>
+              </div>
+              {% when None %}
+              <div class="yank-card">
+                <strong>Release is active</strong>
+                <p class="muted">Yank this release to discourage new installs without deleting files.</p>
+                <form class="yank-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/yank" onsubmit="return confirm('Yank release {{ release.version }}? This is reversible.');">
+                  <label>Reason
+                    <input type="text" name="reason" placeholder="for example: broken metadata">
+                  </label>
+                  <button class="warning" type="submit">Yank release</button>
+                </form>
+              </div>
+              {% endmatch %}
+              <form class="danger-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/purge" onsubmit="return confirm('Permanently purge release {{ release.version }} and its local files? This cannot be undone.');">
                 <button class="danger" type="submit">Purge release</button>
               </form>
             </div>
@@ -325,7 +402,7 @@
                 <p class="muted">sha256 {{ artifact.sha256 }}</p>
                 {% match artifact.yanked_reason %}
                 {% when Some with (reason) %}
-                <p>Yanked: {{ reason }}</p>
+                <p><span class="pill pill-yanked">Yanked</span> {{ reason }}</p>
                 {% when None %}
                 {% endmatch %}
 
@@ -382,16 +459,31 @@
                   </button>
                   {% endif %}
 
-                  <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/yank">
-                    <input type="text" name="reason" placeholder="artifact yank reason">
-                    <button type="submit">Yank artifact</button>
-                  </form>
-                  <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/unyank">
-                    <button type="submit">Unyank artifact</button>
-                  </form>
-                  <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/purge">
-                    <button class="danger" type="submit">Purge artifact</button>
-                  </form>
+                  <div class="file-governance">
+                    {% match artifact.yanked_reason %}
+                    {% when Some with (reason) %}
+                    <div class="yank-card yanked">
+                      <strong>File is yanked</strong>
+                      <p>Reason: {{ reason }}</p>
+                      <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/unyank" onsubmit="return confirm('Unyank {{ artifact.filename }} and make this file installable again?');">
+                        <button class="secondary" type="submit">Unyank file</button>
+                      </form>
+                    </div>
+                    {% when None %}
+                    <div class="yank-card">
+                      <strong>File is active</strong>
+                      <form class="yank-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/yank" onsubmit="return confirm('Yank {{ artifact.filename }}? This is reversible.');">
+                        <label>Reason
+                          <input type="text" name="reason" placeholder="for example: bad wheel tag">
+                        </label>
+                        <button class="warning" type="submit">Yank file</button>
+                      </form>
+                    </div>
+                    {% endmatch %}
+                    <form class="danger-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/purge" onsubmit="return confirm('Permanently purge {{ artifact.filename }}? This cannot be undone.');">
+                      <button class="danger" type="submit">Purge artifact</button>
+                    </form>
+                  </div>
                 </div>
               </div>
               {% endfor %}

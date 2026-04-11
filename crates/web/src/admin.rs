@@ -1,11 +1,12 @@
 use crate::{
+    audit::{audit_metadata, record_audit_event},
     auth::{ensure_tenant_access, human_bytes, parse_scopes, require_session},
     error::{WebError, render_html},
     models::{
-        ArtifactSecurityView, CreateTenantFormData, DashboardTemplate, DashboardView,
-        IndexTemplate, IssueTokenFormData, LoginFormData, LoginTemplate, MessageTemplate,
-        MirrorFormData, MirrorJobView, PackageArtifactView, PackageDetailTemplate,
-        PackageDetailView, PackageReleaseView, PackageSecuritySummaryView,
+        ArtifactSecurityView, AuditTrailEntryView, AuditTrailMetadataView, CreateTenantFormData,
+        DashboardTemplate, DashboardView, IndexTemplate, IssueTokenFormData, LoginFormData,
+        LoginTemplate, MessageTemplate, MirrorFormData, MirrorJobView, PackageArtifactView,
+        PackageDetailTemplate, PackageDetailView, PackageReleaseView, PackageSecuritySummaryView,
         PackageVulnerabilityView, PublisherFormData, SearchQuery, TenantView, WheelAuditResponse,
         YankFormData,
     },
@@ -25,7 +26,7 @@ use pyregistry_application::{
     IssueApiTokenCommand, RegisterTrustedPublisherCommand, WheelAuditFinding,
     WheelAuditFindingKind, WheelAuditReport,
 };
-use pyregistry_domain::{DeletionMode, TrustedPublisherProvider};
+use pyregistry_domain::{DeletionMode, TokenScope, TrustedPublisherProvider};
 use std::collections::HashMap;
 use std::fmt::Write;
 
@@ -62,7 +63,25 @@ pub(crate) async fn login_submit(
                 .sessions
                 .write()
                 .await
-                .insert(session_id.clone(), session);
+                .insert(session_id.clone(), session.clone());
+            record_audit_event(
+                &state,
+                session.email.clone(),
+                "admin.login",
+                session.tenant_slug.clone(),
+                Some(session.email.clone()),
+                audit_metadata([
+                    ("superadmin", session.is_superadmin.to_string()),
+                    (
+                        "tenant",
+                        session
+                            .tenant_slug
+                            .clone()
+                            .unwrap_or_else(|| "global".into()),
+                    ),
+                ]),
+            )
+            .await;
             let cookie = Cookie::build(("admin_session", session_id))
                 .path("/")
                 .http_only(true)
@@ -84,8 +103,21 @@ pub(crate) async fn logout(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, WebError> {
-    if let Some(cookie) = jar.get("admin_session") {
-        state.sessions.write().await.remove(cookie.value());
+    let removed_session = if let Some(cookie) = jar.get("admin_session") {
+        state.sessions.write().await.remove(cookie.value())
+    } else {
+        None
+    };
+    if let Some(session) = removed_session {
+        record_audit_event(
+            &state,
+            session.email.clone(),
+            "admin.logout",
+            session.tenant_slug.clone(),
+            Some(session.email),
+            audit_metadata([]),
+        )
+        .await;
         info!("admin session removed");
     }
     let mut expired = Cookie::from("admin_session=");
@@ -140,17 +172,34 @@ pub(crate) async fn create_tenant(
         "superadmin `{}` is creating tenant `{}`",
         session.email, form.slug
     );
+    let slug = form.slug.clone();
+    let display_name = form.display_name.clone();
+    let admin_email = form.admin_email.clone();
+    let mirroring_enabled = form.mirroring_enabled.is_some();
 
     let tenant = state
         .app
         .create_tenant(CreateTenantCommand {
             slug: form.slug,
             display_name: form.display_name,
-            mirroring_enabled: form.mirroring_enabled.is_some(),
+            mirroring_enabled,
             admin_email: form.admin_email,
             admin_password: form.admin_password,
         })
         .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "tenant.create",
+        Some(tenant.slug.as_str().to_string()),
+        Some(slug),
+        audit_metadata([
+            ("display_name", display_name),
+            ("admin_email", admin_email),
+            ("mirroring_enabled", mirroring_enabled.to_string()),
+        ]),
+    )
+    .await;
 
     render_html(MessageTemplate {
         title: "Tenant created",
@@ -176,15 +225,39 @@ pub(crate) async fn issue_token(
         "admin `{}` is issuing token `{}` for tenant `{}`",
         session.email, form.label, tenant
     );
+    let label = form.label.clone();
+    let scopes = parse_scopes(form.scopes);
+    let scope_summary = scopes
+        .iter()
+        .map(token_scope_label)
+        .collect::<Vec<_>>()
+        .join(",");
     let token = state
         .app
         .issue_api_token(IssueApiTokenCommand {
             tenant_slug: tenant.clone(),
             label: form.label,
-            scopes: parse_scopes(form.scopes),
+            scopes,
             ttl_hours,
         })
         .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "api_token.issue",
+        Some(tenant.clone()),
+        Some(label),
+        audit_metadata([
+            ("scopes", scope_summary),
+            (
+                "ttl_hours",
+                ttl_hours
+                    .map(|ttl| ttl.to_string())
+                    .unwrap_or_else(|| "none".into()),
+            ),
+        ]),
+    )
+    .await;
 
     render_html(MessageTemplate {
         title: "Token issued",
@@ -235,6 +308,15 @@ pub(crate) async fn cache_mirror_project(
             MirrorJobStatus::queued(tenant.clone(), project_name.clone()),
         );
     }
+    record_audit_event(
+        &state,
+        session.email,
+        "mirror.refresh.request",
+        Some(tenant.clone()),
+        Some(project_name.clone()),
+        audit_metadata([("project", project_name.clone())]),
+    )
+    .await;
 
     let app = state.app.clone();
     let mirror_jobs = state.mirror_jobs.clone();
@@ -307,6 +389,9 @@ pub(crate) async fn register_publisher(
     } else {
         TrustedPublisherProvider::GitLab
     };
+    let provider_label = format!("{provider:?}");
+    let project_name = form.project_name.clone();
+    let issuer = form.issuer.clone();
     let mut claim_rules = HashMap::new();
     if let Some(value) = form.claim_repository.filter(|value| !value.is_empty()) {
         claim_rules.insert("repository".to_string(), value);
@@ -329,6 +414,19 @@ pub(crate) async fn register_publisher(
             claim_rules: claim_rules.into_iter().collect(),
         })
         .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "trusted_publisher.register",
+        Some(tenant.clone()),
+        Some(project_name.clone()),
+        audit_metadata([
+            ("project", project_name),
+            ("provider", provider_label),
+            ("issuer", issuer),
+        ]),
+    )
+    .await;
 
     render_html(MessageTemplate {
         title: "Trusted publisher saved",
@@ -392,17 +490,56 @@ pub(crate) async fn yank_release(
         "admin `{}` is yanking release `{}` for package `{}` in tenant `{}`",
         session.email, version, project, tenant
     );
+    let reason = form.reason.clone();
     state
         .app
         .yank_release(DeletionCommand {
             tenant_slug: tenant.clone(),
             project_name: project.clone(),
-            version: Some(version),
+            version: Some(version.clone()),
             filename: None,
-            reason: form.reason,
+            reason,
             mode: DeletionMode::Yank,
         })
         .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "release.yank",
+        Some(tenant.clone()),
+        Some(format!("{project}/{version}")),
+        audit_metadata([("reason", form.reason.unwrap_or_default())]),
+    )
+    .await;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{project}"
+    )))
+}
+
+pub(crate) async fn unyank_release(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project, version)): Path<(String, String, String)>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` is unyanking release `{}` for package `{}` in tenant `{}`",
+        session.email, version, project, tenant
+    );
+    state
+        .app
+        .unyank_release(&tenant, &project, &version)
+        .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "release.unyank",
+        Some(tenant.clone()),
+        Some(format!("{project}/{version}")),
+        audit_metadata([]),
+    )
+    .await;
     Ok(Redirect::to(&format!(
         "/admin/t/{tenant}/packages/{project}"
     )))
@@ -420,6 +557,15 @@ pub(crate) async fn purge_release(
         session.email, version, project, tenant
     );
     state.app.purge_release(&tenant, &project, &version).await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "release.purge",
+        Some(tenant.clone()),
+        Some(format!("{project}/{version}")),
+        audit_metadata([]),
+    )
+    .await;
     Ok(Redirect::to(&format!(
         "/admin/t/{tenant}/packages/{project}"
     )))
@@ -437,17 +583,27 @@ pub(crate) async fn yank_artifact(
         "admin `{}` is yanking artifact `{}` for package `{}` version `{}` in tenant `{}`",
         session.email, filename, project, version, tenant
     );
+    let reason = form.reason.clone();
     state
         .app
         .yank_artifact(DeletionCommand {
             tenant_slug: tenant.clone(),
             project_name: project.clone(),
-            version: Some(version),
-            filename: Some(filename),
-            reason: form.reason,
+            version: Some(version.clone()),
+            filename: Some(filename.clone()),
+            reason,
             mode: DeletionMode::Yank,
         })
         .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "artifact.yank",
+        Some(tenant.clone()),
+        Some(format!("{project}/{version}/{filename}")),
+        audit_metadata([("reason", form.reason.unwrap_or_default())]),
+    )
+    .await;
     Ok(Redirect::to(&format!(
         "/admin/t/{tenant}/packages/{project}"
     )))
@@ -468,6 +624,15 @@ pub(crate) async fn unyank_artifact(
         .app
         .unyank_artifact(&tenant, &project, &version, &filename)
         .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "artifact.unyank",
+        Some(tenant.clone()),
+        Some(format!("{project}/{version}/{filename}")),
+        audit_metadata([]),
+    )
+    .await;
     Ok(Redirect::to(&format!(
         "/admin/t/{tenant}/packages/{project}"
     )))
@@ -488,6 +653,15 @@ pub(crate) async fn purge_artifact(
         .app
         .purge_artifact(&tenant, &project, &version, &filename)
         .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "artifact.purge",
+        Some(tenant.clone()),
+        Some(format!("{project}/{version}/{filename}")),
+        audit_metadata([]),
+    )
+    .await;
     Ok(Redirect::to(&format!(
         "/admin/t/{tenant}/packages/{project}"
     )))
@@ -509,6 +683,20 @@ pub(crate) async fn download_artifact(
         .app
         .download_artifact(&tenant, &project, &version, &filename)
         .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "artifact.download",
+        Some(tenant.clone()),
+        Some(format!("{project}/{version}/{filename}")),
+        audit_metadata([
+            ("project", project),
+            ("version", version),
+            ("filename", filename.clone()),
+            ("bytes", bytes.len().to_string()),
+        ]),
+    )
+    .await;
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -536,12 +724,26 @@ pub(crate) async fn scan_artifact(
     let report = state
         .app
         .audit_stored_wheel(AuditStoredWheelCommand {
-            tenant_slug: tenant,
-            project_name: project,
-            version,
-            filename,
+            tenant_slug: tenant.clone(),
+            project_name: project.clone(),
+            version: version.clone(),
+            filename: filename.clone(),
         })
         .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "artifact.scan",
+        Some(tenant),
+        Some(format!("{project}/{version}/{filename}")),
+        audit_metadata([
+            ("project", project),
+            ("version", version),
+            ("filename", filename),
+            ("findings", report.findings.len().to_string()),
+        ]),
+    )
+    .await;
     Ok(Json(WheelAuditResponse {
         artifact_filename: report.wheel_filename.clone(),
         report_text: format_wheel_audit_report_text(&report),
@@ -621,14 +823,22 @@ async fn render_dashboard(
             .cmp(&left.active)
             .then(left.project_name.cmp(&right.project_name))
     });
+    let audit_events = state
+        .app
+        .list_audit_trail(selected_tenant.as_deref(), 25)
+        .await?
+        .into_iter()
+        .map(audit_trail_entry_view)
+        .collect::<Vec<_>>();
     let total_storage_human = human_bytes(overview.total_storage_bytes);
 
     debug!(
-        "dashboard view ready for `{}` with {} tenant option(s), {} search result(s), and {} mirror job(s)",
+        "dashboard view ready for `{}` with {} tenant option(s), {} search result(s), {} mirror job(s), and {} audit event(s)",
         session.email,
         tenants.len(),
         search_results.len(),
-        mirror_jobs.len()
+        mirror_jobs.len(),
+        audit_events.len()
     );
     render_html(DashboardTemplate {
         overview,
@@ -637,6 +847,7 @@ async fn render_dashboard(
         selected_tenant,
         metrics,
         mirror_jobs,
+        audit_events,
         search_query,
         search_results,
         session,
@@ -649,6 +860,32 @@ fn mirror_job_label(phase: MirrorJobPhase) -> &'static str {
         MirrorJobPhase::Running => "Running",
         MirrorJobPhase::Completed => "Completed",
         MirrorJobPhase::Failed => "Failed",
+    }
+}
+
+fn audit_trail_entry_view(entry: pyregistry_application::AuditTrailEntry) -> AuditTrailEntryView {
+    AuditTrailEntryView {
+        occurred_at: entry
+            .occurred_at
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string(),
+        actor: entry.actor,
+        action: entry.action,
+        tenant_slug: entry.tenant_slug,
+        target: entry.target,
+        metadata: entry
+            .metadata
+            .into_iter()
+            .map(|(key, value)| AuditTrailMetadataView { key, value })
+            .collect(),
+    }
+}
+
+fn token_scope_label(scope: &TokenScope) -> &'static str {
+    match scope {
+        TokenScope::Read => "read",
+        TokenScope::Publish => "publish",
+        TokenScope::Admin => "admin",
     }
 }
 
@@ -960,6 +1197,8 @@ mod tests {
         attachment_content_disposition, authenticated_index_url, default_scheme_for,
         package_detail_view, parse_issue_token_form, parse_optional_ttl_hours,
     };
+    use crate::models::PackageDetailTemplate;
+    use askama::Template;
     use axum::http::StatusCode;
     use pyregistry_application::{
         ArtifactSecurityDetails, PackageArtifactDetails, PackageDetails, PackageReleaseDetails,
@@ -1074,6 +1313,45 @@ mod tests {
             "/admin/t/acme/packages/rsloop/releases/0.1.14/artifacts/rsloop-0.1.14-py3-none-any.whl/download"
         );
         assert_eq!(artifact.size_human, "42.0 B");
+    }
+
+    #[test]
+    fn package_detail_template_shows_stateful_yank_controls() {
+        let details = PackageDetails {
+            tenant_slug: "acme".into(),
+            project_name: "rsloop".into(),
+            normalized_name: "rsloop".into(),
+            summary: String::new(),
+            description: String::new(),
+            source: "Local".into(),
+            security: PackageSecuritySummary::default(),
+            releases: vec![PackageReleaseDetails {
+                version: "0.1.14".into(),
+                yanked_reason: Some("broken metadata".into()),
+                artifacts: vec![PackageArtifactDetails {
+                    filename: "rsloop-0.1.14-py3-none-any.whl".into(),
+                    version: "0.1.14".into(),
+                    size_bytes: 42,
+                    sha256: "abc123".into(),
+                    yanked_reason: Some("bad wheel tag".into()),
+                    security: ArtifactSecurityDetails::pending(),
+                }],
+            }],
+            trusted_publishers: Vec::new(),
+        };
+
+        let rendered = PackageDetailTemplate {
+            details: package_detail_view(details, "http://127.0.0.1:3000"),
+        }
+        .render()
+        .expect("render package detail");
+
+        assert!(rendered.contains("Release is yanked"));
+        assert!(rendered.contains("Unyank release"));
+        assert!(rendered.contains("File is yanked"));
+        assert!(rendered.contains("Unyank file"));
+        assert!(!rendered.contains(">Yank release</button>"));
+        assert!(!rendered.contains(">Yank file</button>"));
     }
 
     #[test]
