@@ -1,0 +1,31 @@
+name: Build & Release on Tag
+on:
+  push:
+    tags:
+      - '*'
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: stable
+      - name: Build release
+        run: cargo build --release
+      - name: Upload release binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyregistry
+          path: target/release/pyregistry
+      - name: Create GitHub Release & Upload Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/pyregistry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
