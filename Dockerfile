@@ -1,4 +1,4 @@
-FROM rust:1-bookworm AS builder
+FROM docker.io/library/rust:1-bookworm AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ COPY supplied ./supplied
 RUN cargo build --locked --release -p pyregistry \
     && cp /app/target/release/pyregistry /usr/local/bin/pyregistry
 
-FROM debian:bookworm-slim AS runtime
+FROM docker.io/library/debian:bookworm-slim AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 \

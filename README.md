@@ -109,20 +109,38 @@ change-me-now
 
 Change these before using the service for anything beyond local development.
 
-## Local Services
+## Docker Compose
 
-Start the optional local dependencies:
+Build and start the registry with the local Compose stack:
 
 ```bash
-docker compose up -d
+docker compose up --build
 ```
 
 This starts:
 
+- Pyregistry on `127.0.0.1:3000`, backed by SQLite and filesystem artifact
+  storage in the `pyregistry-data` volume.
 - Postgres on `127.0.0.1:5432`.
 - MinIO S3 API on `127.0.0.1:9000`.
 - MinIO console on `127.0.0.1:9001`.
 - JWKS test server on `127.0.0.1:8081`.
+
+To start only the registry and the JWKS test server:
+
+```bash
+docker compose up --build pyregistry
+```
+
+Legacy Compose v1 users can run the same commands with `docker-compose`.
+
+## Local Services
+
+Start the optional local dependencies without the registry container:
+
+```bash
+docker compose up -d postgres minio minio-init jwks
+```
 
 Generate a MinIO-oriented config:
 
