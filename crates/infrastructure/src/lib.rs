@@ -11,6 +11,7 @@ mod storage;
 mod store;
 mod supplied_assets;
 mod virus;
+mod webhook;
 mod wheel_archive;
 mod wiring;
 
@@ -26,5 +27,6 @@ pub use sqlite_store::*;
 pub use storage::*;
 pub use store::*;
 pub use virus::*;
+pub use webhook::*;
 pub use wheel_archive::*;
 pub use wiring::*;

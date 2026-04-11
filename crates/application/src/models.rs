@@ -277,6 +277,32 @@ pub struct RegistryPackageSecurityReport {
     pub security: PackageSecuritySummary,
 }
 
+#[derive(Debug, Clone)]
+pub struct VulnerablePackageNotification {
+    pub tenant_slug: String,
+    pub project_name: String,
+    pub normalized_name: String,
+    pub scanned_file_count: usize,
+    pub vulnerable_file_count: usize,
+    pub vulnerability_count: usize,
+    pub highest_severity: Option<String>,
+}
+
+impl VulnerablePackageNotification {
+    #[must_use]
+    pub fn from_registry_package(report: &RegistryPackageSecurityReport) -> Self {
+        Self {
+            tenant_slug: report.tenant_slug.clone(),
+            project_name: report.project_name.clone(),
+            normalized_name: report.normalized_name.clone(),
+            scanned_file_count: report.security.scanned_file_count,
+            vulnerable_file_count: report.security.vulnerable_file_count,
+            vulnerability_count: report.security.vulnerability_count,
+            highest_severity: report.security.highest_severity.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishTokenGrant {
     pub tenant_slug: String,
@@ -905,6 +931,26 @@ pub trait VulnerabilityScanner: Send + Sync {
         &self,
         packages: &[PackageVulnerabilityQuery],
     ) -> Result<Vec<PackageVulnerabilityReport>, ApplicationError>;
+}
+
+#[async_trait]
+pub trait VulnerabilityNotifier: Send + Sync {
+    async fn notify_vulnerable_package(
+        &self,
+        notification: &VulnerablePackageNotification,
+    ) -> Result<(), ApplicationError>;
+}
+
+pub struct NoopVulnerabilityNotifier;
+
+#[async_trait]
+impl VulnerabilityNotifier for NoopVulnerabilityNotifier {
+    async fn notify_vulnerable_package(
+        &self,
+        _notification: &VulnerablePackageNotification,
+    ) -> Result<(), ApplicationError> {
+        Ok(())
+    }
 }
 
 pub trait Clock: Send + Sync {

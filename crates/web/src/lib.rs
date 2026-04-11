@@ -111,11 +111,12 @@ mod tests {
     use http_body_util::BodyExt;
     use pyregistry_application::{
         ApplicationError, AttestationSigner, Clock, CreateTenantCommand, IdGenerator,
-        IssueApiTokenCommand, MirrorClient, MirroredProjectSnapshot, ObjectStorage, OidcVerifier,
-        PackageVulnerabilityQuery, PackageVulnerabilityReport, PasswordHasher, PyregistryApp,
-        RegisterTrustedPublisherCommand, TokenHasher, UploadArtifactCommand, VulnerabilityScanner,
-        WheelArchiveEntry, WheelArchiveReader, WheelArchiveSnapshot, WheelSourceSecurityScanResult,
-        WheelSourceSecurityScanner, WheelVirusScanResult, WheelVirusScanner,
+        IssueApiTokenCommand, MirrorClient, MirroredProjectSnapshot, NoopVulnerabilityNotifier,
+        ObjectStorage, OidcVerifier, PackageVulnerabilityQuery, PackageVulnerabilityReport,
+        PasswordHasher, PyregistryApp, RegisterTrustedPublisherCommand, TokenHasher,
+        UploadArtifactCommand, VulnerabilityScanner, WheelArchiveEntry, WheelArchiveReader,
+        WheelArchiveSnapshot, WheelSourceSecurityScanResult, WheelSourceSecurityScanner,
+        WheelVirusScanResult, WheelVirusScanner,
     };
     use pyregistry_domain::{
         Artifact, ProjectName, PublishIdentity, ReleaseVersion, TokenScope,
@@ -358,6 +359,7 @@ mod tests {
             Arc::new(PlainPasswordHasher),
             Arc::new(PlainTokenHasher),
             Arc::new(CleanVulnerabilityScanner),
+            Arc::new(NoopVulnerabilityNotifier),
             Arc::new(StaticWheelArchiveReader),
             Arc::new(NoopVirusScanner),
             Arc::new(NoopSourceSecurityScanner),

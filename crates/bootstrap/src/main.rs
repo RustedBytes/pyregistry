@@ -12,10 +12,9 @@ use pyregistry_application::{
     WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport, WheelAuditUseCase,
 };
 use pyregistry_infrastructure::{
-    ArtifactDownloadRetryPolicy, ArtifactStorageBackend, DatabaseStoreKind,
-    FilesystemDistributionInspector, FoxGuardWheelSourceSecurityScanner, LoggingConfig,
-    LoggingTimestamp, PypiMirrorClient, Settings, YaraWheelVirusScanner, ZipWheelArchiveReader,
-    build_application, seed_application,
+    ArtifactDownloadRetryPolicy, FilesystemDistributionInspector,
+    FoxGuardWheelSourceSecurityScanner, LoggingConfig, LoggingTimestamp, PypiMirrorClient,
+    Settings, YaraWheelVirusScanner, ZipWheelArchiveReader, build_application, seed_application,
 };
 use pyregistry_web::{
     AppState, MirrorJobs, RateLimitConfig as WebRateLimitConfig, RateLimiter, router,
@@ -981,6 +980,7 @@ mod tests {
         DistributionInspection, DistributionKind, PackageSecuritySummary,
         RegistryPackageSecurityReport, WheelSourceSecurityScanSummary, WheelVirusScanSummary,
     };
+    use pyregistry_infrastructure::{ArtifactStorageBackend, DatabaseStoreKind};
     use std::io::{Cursor, Write};
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;

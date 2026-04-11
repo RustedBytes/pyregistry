@@ -88,6 +88,20 @@ summaries, and the CLI can scan registry state:
 scripts/pyregistry-release.sh check-registry --tenant acme
 ```
 
+Configure a Discord-compatible webhook to notify when `check-registry` finds a
+vulnerable package:
+
+```toml
+[security.vulnerability_webhook]
+url = "https://discord.com/api/webhooks/..."
+username = "Pyregistry"
+timeout_seconds = 10
+```
+
+The posted payload includes `content`, `embeds`, and disabled mentions. It
+summarizes the tenant, package, scanned files, vulnerable files, advisory match
+count, and highest severity.
+
 Treat results as a signal, not a full risk decision. Combine them with company
 policy, dependency ownership, and release criticality.
 

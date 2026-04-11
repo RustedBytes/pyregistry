@@ -1,7 +1,8 @@
 use crate::{
     ApplicationError, ArtifactSecurityDetails, PackageDetails, PackageReleaseDetails,
     PackageSecuritySummary, PackageVulnerabilityQuery, PyregistryApp,
-    RegistryPackageSecurityReport, RegistrySecurityReport, severity_rank,
+    RegistryPackageSecurityReport, RegistrySecurityReport, VulnerablePackageNotification,
+    severity_rank,
 };
 use log::{debug, info, warn};
 use pyregistry_domain::{Project, Tenant};
@@ -156,7 +157,9 @@ impl PyregistryApp {
             }
         }
 
-        Ok(registry_security_report(packages))
+        let report = registry_security_report(packages);
+        self.notify_vulnerable_packages(&report).await;
+        Ok(report)
     }
 
     async fn tenants_for_security_check(
@@ -181,6 +184,26 @@ impl PyregistryApp {
             ]);
         }
         self.store.list_projects(tenant.id).await
+    }
+
+    async fn notify_vulnerable_packages(&self, report: &RegistrySecurityReport) {
+        for package in report
+            .packages
+            .iter()
+            .filter(|package| package.security.vulnerability_count > 0)
+        {
+            let notification = VulnerablePackageNotification::from_registry_package(package);
+            if let Err(error) = self
+                .vulnerability_notifier
+                .notify_vulnerable_package(&notification)
+                .await
+            {
+                warn!(
+                    "failed to send vulnerable package notification for tenant `{}` project `{}`: {error}",
+                    notification.tenant_slug, notification.project_name
+                );
+            }
+        }
     }
 }
 

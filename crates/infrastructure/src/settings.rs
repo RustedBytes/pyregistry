@@ -124,6 +124,7 @@ impl Settings {
                 yara_rules_path: std::env::var("YARA_RULES_PATH")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| default_security_config().yara_rules_path),
+                vulnerability_webhook: vulnerability_webhook_from_env()?,
             },
             rate_limit: RateLimitConfig {
                 enabled: read_env_bool("RATE_LIMIT_ENABLED", true),
@@ -327,6 +328,7 @@ impl Settings {
                 "security.yara_rules_path must not be empty".into(),
             ));
         }
+        self.security.validate()?;
         self.rate_limit.validate()?;
         self.validation.validate()?;
 
@@ -510,12 +512,86 @@ impl SqliteConfig {
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
     pub yara_rules_path: PathBuf,
+    pub vulnerability_webhook: VulnerabilityWebhookConfig,
 }
 
 impl SecurityConfig {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
-        format!("yara_rules_path={}", self.yara_rules_path.display())
+        format!(
+            "yara_rules_path={}, vulnerability_webhook={}",
+            self.yara_rules_path.display(),
+            self.vulnerability_webhook.log_safe_summary()
+        )
+    }
+
+    fn validate(&self) -> Result<(), SettingsError> {
+        if self.yara_rules_path.as_os_str().is_empty() {
+            return Err(SettingsError::InvalidSecurityConfig(
+                "yara_rules_path must not be empty".into(),
+            ));
+        }
+        self.vulnerability_webhook.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VulnerabilityWebhookConfig {
+    pub url: Option<String>,
+    pub username: Option<String>,
+    pub timeout_seconds: u64,
+}
+
+impl VulnerabilityWebhookConfig {
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.url.is_some()
+    }
+
+    #[must_use]
+    pub fn log_safe_summary(&self) -> String {
+        let Some(url) = &self.url else {
+            return "disabled".into();
+        };
+        let endpoint = Url::parse(url)
+            .ok()
+            .map(|url| {
+                let host = url.host_str().unwrap_or("configured");
+                let path = url.path();
+                if path.is_empty() || path == "/" {
+                    host.to_string()
+                } else {
+                    format!("{host}/<redacted>")
+                }
+            })
+            .unwrap_or_else(|| "configured".into());
+        let username = self.username.as_deref().unwrap_or("default");
+        format!(
+            "enabled(endpoint={}, username={}, timeout_seconds={})",
+            endpoint, username, self.timeout_seconds
+        )
+    }
+
+    fn validate(&self) -> Result<(), SettingsError> {
+        if self.timeout_seconds == 0 {
+            return Err(SettingsError::InvalidSecurityConfig(
+                "vulnerability_webhook.timeout_seconds must be greater than zero".into(),
+            ));
+        }
+        let Some(url) = &self.url else {
+            return Ok(());
+        };
+        let parsed = Url::parse(url).map_err(|error| {
+            SettingsError::InvalidSecurityConfig(format!(
+                "vulnerability_webhook.url must be a valid URL: {error}"
+            ))
+        })?;
+        match parsed.scheme() {
+            "http" | "https" => Ok(()),
+            other => Err(SettingsError::InvalidSecurityConfig(format!(
+                "vulnerability_webhook.url must use http or https, got `{other}`"
+            ))),
+        }
     }
 }
 
@@ -734,6 +810,14 @@ struct SqliteConfigFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SecurityConfigFile {
     yara_rules_path: PathBuf,
+    vulnerability_webhook: Option<VulnerabilityWebhookConfigFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VulnerabilityWebhookConfigFile {
+    url: Option<String>,
+    username: Option<String>,
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1054,9 +1138,16 @@ impl TryFrom<SecurityConfigFile> for SecurityConfig {
             ));
         }
 
-        Ok(Self {
+        let config = Self {
             yara_rules_path: value.yara_rules_path,
-        })
+            vulnerability_webhook: value
+                .vulnerability_webhook
+                .map(VulnerabilityWebhookConfig::try_from)
+                .transpose()?
+                .unwrap_or_else(default_vulnerability_webhook_config),
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 
@@ -1064,6 +1155,39 @@ impl From<SecurityConfig> for SecurityConfigFile {
     fn from(value: SecurityConfig) -> Self {
         Self {
             yara_rules_path: value.yara_rules_path,
+            vulnerability_webhook: Some(value.vulnerability_webhook.into()),
+        }
+    }
+}
+
+impl TryFrom<VulnerabilityWebhookConfigFile> for VulnerabilityWebhookConfig {
+    type Error = SettingsError;
+
+    fn try_from(value: VulnerabilityWebhookConfigFile) -> Result<Self, Self::Error> {
+        let config = Self {
+            url: value
+                .url
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty()),
+            username: value
+                .username
+                .map(|username| username.trim().to_string())
+                .filter(|username| !username.is_empty()),
+            timeout_seconds: value
+                .timeout_seconds
+                .unwrap_or_else(default_vulnerability_webhook_timeout_seconds),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl From<VulnerabilityWebhookConfig> for VulnerabilityWebhookConfigFile {
+    fn from(value: VulnerabilityWebhookConfig) -> Self {
+        Self {
+            url: value.url,
+            username: value.username,
+            timeout_seconds: Some(value.timeout_seconds),
         }
     }
 }
@@ -1280,7 +1404,20 @@ fn default_sqlite_config() -> SqliteConfig {
 fn default_security_config() -> SecurityConfig {
     SecurityConfig {
         yara_rules_path: PathBuf::from("supplied/signature-base/yara"),
+        vulnerability_webhook: default_vulnerability_webhook_config(),
     }
+}
+
+fn default_vulnerability_webhook_config() -> VulnerabilityWebhookConfig {
+    VulnerabilityWebhookConfig {
+        url: None,
+        username: Some("Pyregistry".into()),
+        timeout_seconds: default_vulnerability_webhook_timeout_seconds(),
+    }
+}
+
+fn default_vulnerability_webhook_timeout_seconds() -> u64 {
+    10
 }
 
 fn default_rate_limit_config() -> RateLimitConfig {
@@ -1345,6 +1482,26 @@ fn read_env_bool(name: &str, default: bool) -> bool {
             _ => None,
         })
         .unwrap_or(default)
+}
+
+fn vulnerability_webhook_from_env() -> Result<VulnerabilityWebhookConfig, SettingsError> {
+    let config = VulnerabilityWebhookConfig {
+        url: std::env::var("VULNERABILITY_WEBHOOK_URL")
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty()),
+        username: std::env::var("VULNERABILITY_WEBHOOK_USERNAME")
+            .ok()
+            .map(|username| username.trim().to_string())
+            .filter(|username| !username.is_empty())
+            .or_else(|| default_vulnerability_webhook_config().username),
+        timeout_seconds: read_env_u64(
+            "VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS",
+            default_vulnerability_webhook_timeout_seconds(),
+        ),
+    };
+    config.validate()?;
+    Ok(config)
 }
 
 fn artifact_storage_from_env(blob_root: &Path) -> Result<ArtifactStorageConfig, SettingsError> {
@@ -2042,10 +2199,15 @@ mod tests {
         );
         assert_eq!(
             SecurityConfig {
-                yara_rules_path: PathBuf::from("rules")
+                yara_rules_path: PathBuf::from("rules"),
+                vulnerability_webhook: VulnerabilityWebhookConfig {
+                    url: Some("https://discord.example/api/webhooks/token".into()),
+                    username: Some("Security Bot".into()),
+                    timeout_seconds: 7,
+                },
             }
             .log_safe_summary(),
-            "yara_rules_path=rules"
+            "yara_rules_path=rules, vulnerability_webhook=enabled(endpoint=discord.example/<redacted>, username=Security Bot, timeout_seconds=7)"
         );
         assert_eq!(
             RateLimitConfig {
@@ -2145,7 +2307,24 @@ mod tests {
         ));
         assert!(matches!(
             SecurityConfig::try_from(SecurityConfigFile {
-                yara_rules_path: PathBuf::new()
+                yara_rules_path: PathBuf::new(),
+                vulnerability_webhook: None,
+            }),
+            Err(SettingsError::InvalidSecurityConfig(_))
+        ));
+        assert!(matches!(
+            VulnerabilityWebhookConfig::try_from(VulnerabilityWebhookConfigFile {
+                url: Some("file:///tmp/webhook".into()),
+                username: None,
+                timeout_seconds: Some(10),
+            }),
+            Err(SettingsError::InvalidSecurityConfig(_))
+        ));
+        assert!(matches!(
+            VulnerabilityWebhookConfig::try_from(VulnerabilityWebhookConfigFile {
+                url: Some("https://discord.example/webhook".into()),
+                username: None,
+                timeout_seconds: Some(0),
             }),
             Err(SettingsError::InvalidSecurityConfig(_))
         ));
@@ -2337,6 +2516,9 @@ mod tests {
             "PYPI_MIRROR_UPDATE_INTERVAL_SECONDS",
             "PYPI_MIRROR_UPDATE_ON_STARTUP",
             "YARA_RULES_PATH",
+            "VULNERABILITY_WEBHOOK_URL",
+            "VULNERABILITY_WEBHOOK_USERNAME",
+            "VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS",
             "RATE_LIMIT_ENABLED",
             "RATE_LIMIT_REQUESTS_PER_MINUTE",
             "RATE_LIMIT_BURST",
@@ -2378,6 +2560,12 @@ mod tests {
         env.set("PYPI_MIRROR_UPDATE_INTERVAL_SECONDS", "120");
         env.set("PYPI_MIRROR_UPDATE_ON_STARTUP", "no");
         env.set("YARA_RULES_PATH", "/tmp/yara");
+        env.set(
+            "VULNERABILITY_WEBHOOK_URL",
+            "https://discord.example/api/webhooks/secret-token",
+        );
+        env.set("VULNERABILITY_WEBHOOK_USERNAME", "Security Bot");
+        env.set("VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS", "6");
         env.set("RATE_LIMIT_ENABLED", "yes");
         env.set("RATE_LIMIT_REQUESTS_PER_MINUTE", "240");
         env.set("RATE_LIMIT_BURST", "80");
@@ -2432,6 +2620,15 @@ mod tests {
             settings.security.yara_rules_path,
             PathBuf::from("/tmp/yara")
         );
+        assert_eq!(
+            settings.security.vulnerability_webhook.url.as_deref(),
+            Some("https://discord.example/api/webhooks/secret-token")
+        );
+        assert_eq!(
+            settings.security.vulnerability_webhook.username.as_deref(),
+            Some("Security Bot")
+        );
+        assert_eq!(settings.security.vulnerability_webhook.timeout_seconds, 6);
         assert_eq!(settings.rate_limit.requests_per_minute, 240);
         assert_eq!(settings.rate_limit.burst, 80);
         assert_eq!(settings.rate_limit.max_tracked_clients, 1234);

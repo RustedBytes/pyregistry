@@ -167,12 +167,21 @@ By default limits are keyed by the direct TCP peer IP. Set
 [security]
 yara_rules_path = "supplied/signature-base/yara"
 
+[security.vulnerability_webhook]
+url = "https://discord.com/api/webhooks/..."
+username = "Pyregistry"
+timeout_seconds = 10
+
 [validation]
 distribution_parallelism = 4
 ```
 
 If the configured YARA directory is readable, Pyregistry uses it. Otherwise it
 falls back to bundled supplied rules embedded at compile time.
+
+Set `security.vulnerability_webhook.url` to enable Discord-compatible webhook
+notifications from `check-registry` when vulnerable packages are found. The
+webhook URL is redacted from logs; leave `url` unset to disable notifications.
 
 ## Logging
 
@@ -214,6 +223,9 @@ Common environment variables:
 | `DATABASE_URL` or `POSTGRES_URL` | Postgres connection URL. |
 | `PYPI_BASE_URL` or `PYPI_URL` | Upstream PyPI-compatible base URL. |
 | `YARA_RULES_PATH` | External YARA rules directory. |
+| `VULNERABILITY_WEBHOOK_URL` | Discord-compatible webhook URL for vulnerable package notifications. |
+| `VULNERABILITY_WEBHOOK_USERNAME` | Optional webhook display name. |
+| `VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS` | Webhook POST timeout. |
 | `RATE_LIMIT_ENABLED` | Enable or disable API rate limiting. |
 | `RATE_LIMIT_TRUST_PROXY_HEADERS` | Use trusted proxy headers for client IPs. |
 | `VALIDATION_DISTRIBUTION_PARALLELISM` | Default artifact validation workers. |

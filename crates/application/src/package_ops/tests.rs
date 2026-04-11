@@ -3,13 +3,15 @@ use crate::{
     AttestationSigner, CancellationSignal, Clock, CreateTenantCommand, DeletionCommand,
     DistributionFileInspector, DistributionInspection, DistributionKind, IdGenerator,
     IssueApiTokenCommand, MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot,
-    ObjectStorage, OidcVerifier, PackageArtifactDetails, PackageReleaseDetails,
-    PackageVulnerability, PackageVulnerabilityQuery, PackageVulnerabilityReport, PasswordHasher,
-    RecordAuditEventCommand, RegisterTrustedPublisherCommand, RegistryDistributionValidationStatus,
-    RegistryOverview, RegistryStore, SearchHit, TokenHasher, UploadArtifactCommand,
-    ValidateRegistryDistributionsCommand, VulnerabilityScanner, WheelArchiveReader,
-    WheelArchiveSnapshot, WheelSourceSecurityScanResult, WheelSourceSecurityScanner,
-    WheelVirusScanResult, WheelVirusScanner,
+    NoopVulnerabilityNotifier, ObjectStorage, OidcVerifier, PackageArtifactDetails,
+    PackageReleaseDetails, PackageVulnerability, PackageVulnerabilityQuery,
+    PackageVulnerabilityReport, PasswordHasher, RecordAuditEventCommand,
+    RegisterTrustedPublisherCommand, RegistryDistributionValidationStatus, RegistryOverview,
+    RegistryStore, SearchHit, TokenHasher, UploadArtifactCommand,
+    ValidateRegistryDistributionsCommand, VulnerabilityNotifier, VulnerabilityScanner,
+    VulnerablePackageNotification, WheelArchiveReader, WheelArchiveSnapshot,
+    WheelSourceSecurityScanResult, WheelSourceSecurityScanner, WheelVirusScanResult,
+    WheelVirusScanner,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -666,6 +668,72 @@ async fn package_security_attachment_handles_scanner_edge_cases() {
 }
 
 #[tokio::test]
+async fn registry_security_check_notifies_for_vulnerable_packages_only() {
+    let notifier = Arc::new(RecordingVulnerabilityNotifier::default());
+    let app = test_app_with_ports_and_notifier(
+        Arc::new(FakeRegistryStore::default()),
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(FakeMirrorClient::with_artifact_count(0)),
+        Arc::new(ScenarioVulnerabilityScanner {
+            scenario: VulnerabilityScenario::Vulnerable,
+        }),
+        notifier.clone(),
+        1,
+    );
+
+    app.create_tenant(CreateTenantCommand {
+        slug: "acme".into(),
+        display_name: "Acme".into(),
+        mirroring_enabled: false,
+        admin_email: "admin@acme.test".into(),
+        admin_password: "tenant-secret".into(),
+    })
+    .await
+    .expect("tenant");
+    let publish_token = app
+        .issue_api_token(IssueApiTokenCommand {
+            tenant_slug: "acme".into(),
+            label: "publisher".into(),
+            scopes: vec![TokenScope::Publish],
+            ttl_hours: None,
+        })
+        .await
+        .expect("publish token");
+    let publish_access = app
+        .authenticate_tenant_token("acme", &publish_token.secret, TokenScope::Publish)
+        .await
+        .expect("publish access");
+    app.upload_artifact(
+        &publish_access,
+        UploadArtifactCommand {
+            tenant_slug: "acme".into(),
+            project_name: "Demo_Pkg".into(),
+            version: "1.0.0".into(),
+            filename: "demo_pkg-1.0.0-py3-none-any.whl".into(),
+            summary: "Demo package".into(),
+            description: "Demo package".into(),
+            content: b"wheel".to_vec(),
+        },
+    )
+    .await
+    .expect("artifact");
+
+    let report = app
+        .check_registry_security(Some("acme"), Some("Demo_Pkg"))
+        .await
+        .expect("registry security report");
+
+    assert_eq!(report.vulnerability_count, 1);
+    let notifications = notifier.notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].tenant_slug, "acme");
+    assert_eq!(notifications[0].project_name, "Demo_Pkg");
+    assert_eq!(notifications[0].normalized_name, "demo-pkg");
+    assert_eq!(notifications[0].vulnerable_file_count, 1);
+    assert_eq!(notifications[0].vulnerability_count, 1);
+}
+
+#[tokio::test]
 async fn admin_and_publish_use_cases_report_missing_expired_and_oidc_edges() {
     let app = test_app(
         Arc::new(FakeRegistryStore::default()),
@@ -1185,6 +1253,24 @@ fn test_app_with_ports(
     vulnerability_scanner: Arc<dyn VulnerabilityScanner>,
     mirror_download_concurrency: usize,
 ) -> PyregistryApp {
+    test_app_with_ports_and_notifier(
+        store,
+        storage,
+        mirror,
+        vulnerability_scanner,
+        Arc::new(NoopVulnerabilityNotifier),
+        mirror_download_concurrency,
+    )
+}
+
+fn test_app_with_ports_and_notifier(
+    store: Arc<FakeRegistryStore>,
+    storage: Arc<FakeObjectStorage>,
+    mirror: Arc<dyn MirrorClient>,
+    vulnerability_scanner: Arc<dyn VulnerabilityScanner>,
+    vulnerability_notifier: Arc<dyn VulnerabilityNotifier>,
+    mirror_download_concurrency: usize,
+) -> PyregistryApp {
     init_test_logger();
     PyregistryApp::new(
         store,
@@ -1195,6 +1281,7 @@ fn test_app_with_ports(
         Arc::new(UnusedPasswordHasher),
         Arc::new(UnusedTokenHasher),
         vulnerability_scanner,
+        vulnerability_notifier,
         Arc::new(UnusedWheelArchiveReader),
         Arc::new(UnusedWheelVirusScanner),
         Arc::new(UnusedWheelSourceSecurityScanner),
@@ -1267,6 +1354,31 @@ impl VulnerabilityScanner for ScenarioVulnerabilityScanner {
                 })
                 .collect()),
         }
+    }
+}
+
+#[derive(Default)]
+struct RecordingVulnerabilityNotifier {
+    notifications: Mutex<Vec<VulnerablePackageNotification>>,
+}
+
+impl RecordingVulnerabilityNotifier {
+    fn notifications(&self) -> Vec<VulnerablePackageNotification> {
+        self.notifications.lock().expect("notifier state").clone()
+    }
+}
+
+#[async_trait]
+impl VulnerabilityNotifier for RecordingVulnerabilityNotifier {
+    async fn notify_vulnerable_package(
+        &self,
+        notification: &VulnerablePackageNotification,
+    ) -> Result<(), ApplicationError> {
+        self.notifications
+            .lock()
+            .expect("notifier state")
+            .push(notification.clone());
+        Ok(())
     }
 }
 

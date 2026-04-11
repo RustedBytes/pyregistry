@@ -1,13 +1,15 @@
 use crate::{
     ArgonPasswordHasher, ArtifactDownloadRetryPolicy, ArtifactStorageBackend, DatabaseStoreKind,
-    FileSystemObjectStorage, FoxGuardWheelSourceSecurityScanner, InMemoryRegistryStore,
-    JsonAttestationSigner, OpenDalObjectStorage, PostgresRegistryStore,
-    PySentryVulnerabilityScanner, PypiMirrorClient, Settings, Sha256TokenHasher,
-    SimpleJwksOidcVerifier, SqliteRegistryStore, YaraWheelVirusScanner, ZipWheelArchiveReader,
+    DiscordWebhookVulnerabilityNotifier, FileSystemObjectStorage,
+    FoxGuardWheelSourceSecurityScanner, InMemoryRegistryStore, JsonAttestationSigner,
+    OpenDalObjectStorage, PostgresRegistryStore, PySentryVulnerabilityScanner, PypiMirrorClient,
+    Settings, Sha256TokenHasher, SimpleJwksOidcVerifier, SqliteRegistryStore,
+    YaraWheelVirusScanner, ZipWheelArchiveReader,
 };
 use log::{info, warn};
 use pyregistry_application::{
-    ApplicationError, ObjectStorage, PyregistryApp, RegistryStore, SystemClock, UuidGenerator,
+    ApplicationError, NoopVulnerabilityNotifier, ObjectStorage, PyregistryApp, RegistryStore,
+    SystemClock, UuidGenerator, VulnerabilityNotifier,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,6 +59,7 @@ pub async fn build_application(
         Arc::new(PySentryVulnerabilityScanner::new(pysentry_cache_dir(
             settings,
         ))),
+        build_vulnerability_notifier(settings)?,
         Arc::new(ZipWheelArchiveReader),
         Arc::new(YaraWheelVirusScanner::from_rules_dir(
             settings.security.yara_rules_path.clone(),
@@ -112,6 +115,24 @@ async fn build_registry_store(
                 .map_err(|error| InfrastructureError::MetadataStoreConfiguration(error.to_string()))
         }
     }
+}
+
+fn build_vulnerability_notifier(
+    settings: &Settings,
+) -> Result<Arc<dyn VulnerabilityNotifier>, InfrastructureError> {
+    let config = &settings.security.vulnerability_webhook;
+    let Some(url) = &config.url else {
+        info!("vulnerable package webhook notifications are disabled");
+        return Ok(Arc::new(NoopVulnerabilityNotifier));
+    };
+
+    info!(
+        "vulnerable package webhook notifications are enabled: {}",
+        config.log_safe_summary()
+    );
+    DiscordWebhookVulnerabilityNotifier::new(url, config.username.clone(), config.timeout_seconds)
+        .map(|notifier| Arc::new(notifier) as Arc<dyn VulnerabilityNotifier>)
+        .map_err(|error| InfrastructureError::WebhookConfiguration(error.to_string()))
 }
 
 fn pysentry_cache_dir(settings: &Settings) -> PathBuf {
@@ -200,6 +221,8 @@ pub enum InfrastructureError {
     MetadataStoreConfiguration(String),
     #[error("artifact object storage is not configured correctly: {0}")]
     ObjectStorageConfiguration(String),
+    #[error("vulnerability webhook is not configured correctly: {0}")]
+    WebhookConfiguration(String),
 }
 
 #[cfg(test)]

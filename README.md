@@ -186,6 +186,11 @@ acquire_timeout_seconds = 10
 [security]
 yara_rules_path = "supplied/signature-base/yara"
 
+[security.vulnerability_webhook]
+url = "https://discord.com/api/webhooks/..."
+username = "Pyregistry"
+timeout_seconds = 10
+
 [rate_limit]
 enabled = true
 requests_per_minute = 120
@@ -306,7 +311,10 @@ Rayon; tune the default with `[validation].distribution_parallelism` or override
 a single run with `--parallelism`.
 
 `check-registry` checks package versions stored in the current metadata store
-for known vulnerabilities through the PySentry adapter.
+for known vulnerabilities through the PySentry adapter. Configure
+`[security.vulnerability_webhook]` or `VULNERABILITY_WEBHOOK_URL` to send a
+Discord-compatible webhook message for each vulnerable package found by that
+command.
 
 ## Python Tooling
 
