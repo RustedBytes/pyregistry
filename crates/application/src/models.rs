@@ -374,6 +374,7 @@ pub enum WheelAuditFindingKind {
     UnexpectedExecutable,
     NetworkString,
     PostInstallClue,
+    PythonAstSuspiciousBehavior,
     SuspiciousDependency,
     VirusSignatureMatch,
 }

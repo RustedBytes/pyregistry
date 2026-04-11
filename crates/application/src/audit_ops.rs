@@ -5,7 +5,14 @@ use crate::{
 };
 use log::{debug, info, warn};
 use pyregistry_domain::ProjectName;
-use std::sync::Arc;
+use rustpython_parser::{Parse, ast};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+const MAX_PYTHON_AST_EVIDENCE: usize = 12;
+const MAX_PYTHON_SOURCE_BYTES: usize = 1024 * 1024;
 
 pub struct WheelAuditUseCase {
     archive_reader: Arc<dyn WheelArchiveReader>,
@@ -50,6 +57,7 @@ impl WheelAuditUseCase {
         findings.extend(unexpected_executable_findings(&archive.entries));
         findings.extend(network_string_findings(&archive.entries));
         findings.extend(post_install_findings(&archive.entries));
+        findings.extend(python_ast_findings(&archive.entries));
         findings.extend(suspicious_dependency_findings(
             &archive.entries,
             expected_project.normalized(),
@@ -232,7 +240,6 @@ fn post_install_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding
 
     for entry in entries {
         let path = entry.path.to_ascii_lowercase();
-        let content_text = String::from_utf8_lossy(&entry.contents);
         let mut evidence = Vec::new();
 
         if path.ends_with(".pth") {
@@ -248,21 +255,24 @@ fn post_install_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding
             evidence.push("script installed into environment".into());
         }
 
-        let text_matches = find_patterns(
-            &content_text,
-            &[
-                "subprocess",
-                "os.system",
-                "pip._internal",
-                "sitecustomize",
-                "usercustomize",
-                "atexit",
-                "exec(",
-                "eval(",
-            ],
-            4,
-        );
-        evidence.extend(text_matches);
+        if !path.ends_with(".py") {
+            let content_text = String::from_utf8_lossy(&entry.contents);
+            let text_matches = find_patterns(
+                &content_text,
+                &[
+                    "subprocess",
+                    "os.system",
+                    "pip._internal",
+                    "sitecustomize",
+                    "usercustomize",
+                    "atexit",
+                    "exec(",
+                    "eval(",
+                ],
+                4,
+            );
+            evidence.extend(text_matches);
+        }
 
         if !evidence.is_empty() {
             findings.push(WheelAuditFinding {
@@ -275,6 +285,605 @@ fn post_install_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding
     }
 
     findings
+}
+
+fn python_ast_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding> {
+    let mut findings = Vec::new();
+
+    for entry in entries {
+        if !entry.path.to_ascii_lowercase().ends_with(".py") {
+            continue;
+        }
+        if entry.contents.len() > MAX_PYTHON_SOURCE_BYTES {
+            debug!(
+                "skipping RustPython AST audit for `{}` because source is larger than {} bytes",
+                entry.path, MAX_PYTHON_SOURCE_BYTES
+            );
+            continue;
+        }
+
+        let Ok(source) = std::str::from_utf8(&entry.contents) else {
+            debug!(
+                "skipping RustPython AST audit for `{}` because source is not UTF-8",
+                entry.path
+            );
+            continue;
+        };
+
+        let suite = match ast::Suite::parse(source, &entry.path) {
+            Ok(suite) => suite,
+            Err(error) => {
+                debug!(
+                    "RustPython AST audit could not parse `{}`: {}",
+                    entry.path, error
+                );
+                continue;
+            }
+        };
+
+        let mut analyzer = PythonAstAnalyzer::default();
+        analyzer.visit_suite(&suite);
+        let evidence = analyzer.into_evidence();
+        if evidence.is_empty() {
+            continue;
+        }
+
+        debug!(
+            "RustPython AST audit found {} suspicious signal(s) in `{}`",
+            evidence.len(),
+            entry.path
+        );
+        findings.push(WheelAuditFinding {
+            kind: WheelAuditFindingKind::PythonAstSuspiciousBehavior,
+            path: Some(entry.path.clone()),
+            summary: "Python source contains suspicious imports or runtime behavior".into(),
+            evidence,
+        });
+    }
+
+    findings
+}
+
+#[derive(Default)]
+struct PythonAstAnalyzer {
+    import_aliases: BTreeMap<String, String>,
+    evidence: BTreeSet<String>,
+}
+
+impl PythonAstAnalyzer {
+    fn visit_suite(&mut self, suite: &[ast::Stmt]) {
+        for stmt in suite {
+            self.visit_stmt(stmt);
+        }
+    }
+
+    fn visit_stmt(&mut self, stmt: &ast::Stmt) {
+        match stmt {
+            ast::Stmt::FunctionDef(function_def) => {
+                for decorator in &function_def.decorator_list {
+                    self.visit_expr(decorator);
+                }
+                if let Some(returns) = function_def.returns.as_deref() {
+                    self.visit_expr(returns);
+                }
+                self.visit_suite(&function_def.body);
+            }
+            ast::Stmt::AsyncFunctionDef(function_def) => {
+                for decorator in &function_def.decorator_list {
+                    self.visit_expr(decorator);
+                }
+                if let Some(returns) = function_def.returns.as_deref() {
+                    self.visit_expr(returns);
+                }
+                self.visit_suite(&function_def.body);
+            }
+            ast::Stmt::ClassDef(class_def) => {
+                for base in &class_def.bases {
+                    self.visit_expr(base);
+                }
+                for keyword in &class_def.keywords {
+                    self.visit_expr(&keyword.value);
+                }
+                for decorator in &class_def.decorator_list {
+                    self.visit_expr(decorator);
+                }
+                self.visit_suite(&class_def.body);
+            }
+            ast::Stmt::Return(return_stmt) => {
+                if let Some(value) = return_stmt.value.as_deref() {
+                    self.visit_expr(value);
+                }
+            }
+            ast::Stmt::Delete(delete_stmt) => {
+                for target in &delete_stmt.targets {
+                    self.visit_expr(target);
+                }
+            }
+            ast::Stmt::Assign(assign_stmt) => {
+                for target in &assign_stmt.targets {
+                    self.visit_expr(target);
+                }
+                self.visit_expr(&assign_stmt.value);
+            }
+            ast::Stmt::TypeAlias(type_alias) => {
+                self.visit_expr(&type_alias.name);
+                self.visit_expr(&type_alias.value);
+            }
+            ast::Stmt::AugAssign(assign_stmt) => {
+                self.visit_expr(&assign_stmt.target);
+                self.visit_expr(&assign_stmt.value);
+            }
+            ast::Stmt::AnnAssign(assign_stmt) => {
+                self.visit_expr(&assign_stmt.target);
+                self.visit_expr(&assign_stmt.annotation);
+                if let Some(value) = assign_stmt.value.as_deref() {
+                    self.visit_expr(value);
+                }
+            }
+            ast::Stmt::For(for_stmt) => {
+                self.visit_expr(&for_stmt.target);
+                self.visit_expr(&for_stmt.iter);
+                self.visit_suite(&for_stmt.body);
+                self.visit_suite(&for_stmt.orelse);
+            }
+            ast::Stmt::AsyncFor(for_stmt) => {
+                self.visit_expr(&for_stmt.target);
+                self.visit_expr(&for_stmt.iter);
+                self.visit_suite(&for_stmt.body);
+                self.visit_suite(&for_stmt.orelse);
+            }
+            ast::Stmt::While(while_stmt) => {
+                self.visit_expr(&while_stmt.test);
+                self.visit_suite(&while_stmt.body);
+                self.visit_suite(&while_stmt.orelse);
+            }
+            ast::Stmt::If(if_stmt) => {
+                self.visit_expr(&if_stmt.test);
+                self.visit_suite(&if_stmt.body);
+                self.visit_suite(&if_stmt.orelse);
+            }
+            ast::Stmt::With(with_stmt) => {
+                self.visit_with_items(&with_stmt.items);
+                self.visit_suite(&with_stmt.body);
+            }
+            ast::Stmt::AsyncWith(with_stmt) => {
+                self.visit_with_items(&with_stmt.items);
+                self.visit_suite(&with_stmt.body);
+            }
+            ast::Stmt::Match(match_stmt) => {
+                self.visit_expr(&match_stmt.subject);
+                for case in &match_stmt.cases {
+                    self.visit_pattern(&case.pattern);
+                    if let Some(guard) = case.guard.as_deref() {
+                        self.visit_expr(guard);
+                    }
+                    self.visit_suite(&case.body);
+                }
+            }
+            ast::Stmt::Raise(raise_stmt) => {
+                if let Some(exc) = raise_stmt.exc.as_deref() {
+                    self.visit_expr(exc);
+                }
+                if let Some(cause) = raise_stmt.cause.as_deref() {
+                    self.visit_expr(cause);
+                }
+            }
+            ast::Stmt::Try(try_stmt) => {
+                self.visit_suite(&try_stmt.body);
+                self.visit_except_handlers(&try_stmt.handlers);
+                self.visit_suite(&try_stmt.orelse);
+                self.visit_suite(&try_stmt.finalbody);
+            }
+            ast::Stmt::TryStar(try_stmt) => {
+                self.visit_suite(&try_stmt.body);
+                self.visit_except_handlers(&try_stmt.handlers);
+                self.visit_suite(&try_stmt.orelse);
+                self.visit_suite(&try_stmt.finalbody);
+            }
+            ast::Stmt::Assert(assert_stmt) => {
+                self.visit_expr(&assert_stmt.test);
+                if let Some(msg) = assert_stmt.msg.as_deref() {
+                    self.visit_expr(msg);
+                }
+            }
+            ast::Stmt::Import(import_stmt) => {
+                for alias in &import_stmt.names {
+                    self.record_import(
+                        alias.name.as_str(),
+                        alias.asname.as_ref().map(|name| name.as_str()),
+                    );
+                }
+            }
+            ast::Stmt::ImportFrom(import_stmt) => {
+                if let Some(module) = &import_stmt.module {
+                    for alias in &import_stmt.names {
+                        self.record_from_import(
+                            module.as_str(),
+                            alias.name.as_str(),
+                            alias.asname.as_ref().map(|name| name.as_str()),
+                        );
+                    }
+                }
+            }
+            ast::Stmt::Expr(expr_stmt) => self.visit_expr(&expr_stmt.value),
+            ast::Stmt::Global(_)
+            | ast::Stmt::Nonlocal(_)
+            | ast::Stmt::Pass(_)
+            | ast::Stmt::Break(_)
+            | ast::Stmt::Continue(_) => {}
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &ast::Expr) {
+        match expr {
+            ast::Expr::BoolOp(expr) => {
+                for value in &expr.values {
+                    self.visit_expr(value);
+                }
+            }
+            ast::Expr::NamedExpr(expr) => {
+                self.visit_expr(&expr.target);
+                self.visit_expr(&expr.value);
+            }
+            ast::Expr::BinOp(expr) => {
+                self.visit_expr(&expr.left);
+                self.visit_expr(&expr.right);
+            }
+            ast::Expr::UnaryOp(expr) => self.visit_expr(&expr.operand),
+            ast::Expr::Lambda(expr) => self.visit_expr(&expr.body),
+            ast::Expr::IfExp(expr) => {
+                self.visit_expr(&expr.test);
+                self.visit_expr(&expr.body);
+                self.visit_expr(&expr.orelse);
+            }
+            ast::Expr::Dict(expr) => {
+                for key in expr.keys.iter().flatten() {
+                    self.visit_expr(key);
+                }
+                for value in &expr.values {
+                    self.visit_expr(value);
+                }
+            }
+            ast::Expr::Set(expr) => {
+                for element in &expr.elts {
+                    self.visit_expr(element);
+                }
+            }
+            ast::Expr::ListComp(expr) => {
+                self.visit_expr(&expr.elt);
+                self.visit_comprehensions(&expr.generators);
+            }
+            ast::Expr::SetComp(expr) => {
+                self.visit_expr(&expr.elt);
+                self.visit_comprehensions(&expr.generators);
+            }
+            ast::Expr::DictComp(expr) => {
+                self.visit_expr(&expr.key);
+                self.visit_expr(&expr.value);
+                self.visit_comprehensions(&expr.generators);
+            }
+            ast::Expr::GeneratorExp(expr) => {
+                self.visit_expr(&expr.elt);
+                self.visit_comprehensions(&expr.generators);
+            }
+            ast::Expr::Await(expr) => self.visit_expr(&expr.value),
+            ast::Expr::Yield(expr) => {
+                if let Some(value) = expr.value.as_deref() {
+                    self.visit_expr(value);
+                }
+            }
+            ast::Expr::YieldFrom(expr) => self.visit_expr(&expr.value),
+            ast::Expr::Compare(expr) => {
+                self.visit_expr(&expr.left);
+                for comparator in &expr.comparators {
+                    self.visit_expr(comparator);
+                }
+            }
+            ast::Expr::Call(expr) => {
+                if let Some(call_path) = self.resolved_call_path(&expr.func) {
+                    self.record_call(&call_path);
+                }
+                self.visit_expr(&expr.func);
+                for arg in &expr.args {
+                    self.visit_expr(arg);
+                }
+                for keyword in &expr.keywords {
+                    self.visit_expr(&keyword.value);
+                }
+            }
+            ast::Expr::FormattedValue(expr) => {
+                self.visit_expr(&expr.value);
+                if let Some(format_spec) = expr.format_spec.as_deref() {
+                    self.visit_expr(format_spec);
+                }
+            }
+            ast::Expr::JoinedStr(expr) => {
+                for value in &expr.values {
+                    self.visit_expr(value);
+                }
+            }
+            ast::Expr::Attribute(expr) => self.visit_expr(&expr.value),
+            ast::Expr::Subscript(expr) => {
+                self.visit_expr(&expr.value);
+                self.visit_expr(&expr.slice);
+            }
+            ast::Expr::Starred(expr) => self.visit_expr(&expr.value),
+            ast::Expr::List(expr) => {
+                for element in &expr.elts {
+                    self.visit_expr(element);
+                }
+            }
+            ast::Expr::Tuple(expr) => {
+                for element in &expr.elts {
+                    self.visit_expr(element);
+                }
+            }
+            ast::Expr::Slice(expr) => {
+                if let Some(lower) = expr.lower.as_deref() {
+                    self.visit_expr(lower);
+                }
+                if let Some(upper) = expr.upper.as_deref() {
+                    self.visit_expr(upper);
+                }
+                if let Some(step) = expr.step.as_deref() {
+                    self.visit_expr(step);
+                }
+            }
+            ast::Expr::Constant(_) | ast::Expr::Name(_) => {}
+        }
+    }
+
+    fn visit_with_items(&mut self, items: &[ast::WithItem]) {
+        for item in items {
+            self.visit_expr(&item.context_expr);
+            if let Some(optional_vars) = item.optional_vars.as_deref() {
+                self.visit_expr(optional_vars);
+            }
+        }
+    }
+
+    fn visit_except_handlers(&mut self, handlers: &[ast::ExceptHandler]) {
+        for handler in handlers {
+            match handler {
+                ast::ExceptHandler::ExceptHandler(handler) => {
+                    if let Some(type_) = handler.type_.as_deref() {
+                        self.visit_expr(type_);
+                    }
+                    self.visit_suite(&handler.body);
+                }
+            }
+        }
+    }
+
+    fn visit_comprehensions(&mut self, comprehensions: &[ast::Comprehension]) {
+        for comprehension in comprehensions {
+            self.visit_expr(&comprehension.target);
+            self.visit_expr(&comprehension.iter);
+            for condition in &comprehension.ifs {
+                self.visit_expr(condition);
+            }
+        }
+    }
+
+    fn visit_pattern(&mut self, pattern: &ast::Pattern) {
+        match pattern {
+            ast::Pattern::MatchValue(pattern) => self.visit_expr(&pattern.value),
+            ast::Pattern::MatchSequence(pattern) => {
+                for pattern in &pattern.patterns {
+                    self.visit_pattern(pattern);
+                }
+            }
+            ast::Pattern::MatchMapping(pattern) => {
+                for key in &pattern.keys {
+                    self.visit_expr(key);
+                }
+                for pattern in &pattern.patterns {
+                    self.visit_pattern(pattern);
+                }
+            }
+            ast::Pattern::MatchClass(pattern) => {
+                self.visit_expr(&pattern.cls);
+                for pattern in &pattern.patterns {
+                    self.visit_pattern(pattern);
+                }
+                for pattern in &pattern.kwd_patterns {
+                    self.visit_pattern(pattern);
+                }
+            }
+            ast::Pattern::MatchAs(pattern) => {
+                if let Some(pattern) = pattern.pattern.as_deref() {
+                    self.visit_pattern(pattern);
+                }
+            }
+            ast::Pattern::MatchOr(pattern) => {
+                for pattern in &pattern.patterns {
+                    self.visit_pattern(pattern);
+                }
+            }
+            ast::Pattern::MatchSingleton(_) | ast::Pattern::MatchStar(_) => {}
+        }
+    }
+
+    fn record_import(&mut self, module: &str, asname: Option<&str>) {
+        let binding = asname.unwrap_or_else(|| module.split('.').next().unwrap_or(module));
+        self.import_aliases
+            .insert(binding.to_string(), module.to_string());
+        if let Some(evidence) = import_evidence(module) {
+            self.evidence.insert(evidence);
+        }
+    }
+
+    fn record_from_import(&mut self, module: &str, imported_name: &str, asname: Option<&str>) {
+        if imported_name == "*" {
+            if let Some(evidence) = import_evidence(module) {
+                self.evidence.insert(evidence);
+            }
+            return;
+        }
+
+        let full_name = format!("{module}.{imported_name}");
+        let binding = asname.unwrap_or(imported_name);
+        self.import_aliases.insert(binding.to_string(), full_name);
+        if let Some(evidence) = import_evidence(module) {
+            self.evidence.insert(evidence);
+        }
+    }
+
+    fn record_call(&mut self, call_path: &str) {
+        if let Some(evidence) = call_evidence(call_path) {
+            self.evidence.insert(evidence);
+        }
+    }
+
+    fn resolved_call_path(&self, expr: &ast::Expr) -> Option<String> {
+        let raw_path = call_path(expr)?;
+        let (root, suffix) = raw_path
+            .split_once('.')
+            .map_or((raw_path.as_str(), ""), |(root, suffix)| (root, suffix));
+
+        if let Some(resolved_root) = self.import_aliases.get(root) {
+            if suffix.is_empty() {
+                Some(resolved_root.clone())
+            } else {
+                Some(format!("{resolved_root}.{suffix}"))
+            }
+        } else {
+            Some(raw_path)
+        }
+    }
+
+    fn into_evidence(self) -> Vec<String> {
+        self.evidence
+            .into_iter()
+            .take(MAX_PYTHON_AST_EVIDENCE)
+            .collect()
+    }
+}
+
+fn call_path(expr: &ast::Expr) -> Option<String> {
+    match expr {
+        ast::Expr::Name(name) => Some(name.id.to_string()),
+        ast::Expr::Attribute(attribute) => {
+            let base = call_path(&attribute.value)?;
+            Some(format!("{base}.{}", attribute.attr))
+        }
+        _ => None,
+    }
+}
+
+fn import_evidence(module: &str) -> Option<String> {
+    let module = module.to_ascii_lowercase();
+    let root = module.split('.').next().unwrap_or(module.as_str());
+
+    match root {
+        "subprocess" | "pty" => Some(format!("process-capable import: {module}")),
+        "socket" | "urllib" | "http" | "ftplib" | "smtplib" | "requests" | "httpx" | "aiohttp"
+        | "paramiko" => Some(format!("network-capable import: {module}")),
+        "ctypes" | "cffi" | "mmap" => Some(format!("native-code interface import: {module}")),
+        "pickle" | "marshal" | "shelve" | "dill" | "cloudpickle" => {
+            Some(format!("unsafe deserialization import: {module}"))
+        }
+        "pip" | "ensurepip" => Some(format!("package installer import: {module}")),
+        _ => None,
+    }
+}
+
+fn call_evidence(call_path: &str) -> Option<String> {
+    let call_path = call_path.to_ascii_lowercase();
+
+    if matches!(
+        call_path.as_str(),
+        "eval" | "exec" | "compile" | "__import__"
+    ) {
+        return Some(format!("dynamic code execution call: {call_path}"));
+    }
+
+    if call_path == "os.system"
+        || call_path == "os.popen"
+        || call_path.starts_with("os.exec")
+        || call_path.starts_with("os.spawn")
+        || call_path == "subprocess.popen"
+        || call_path == "subprocess.run"
+        || call_path == "subprocess.call"
+        || call_path == "subprocess.check_call"
+        || call_path == "subprocess.check_output"
+        || call_path == "pty.spawn"
+    {
+        return Some(format!("process execution call: {call_path}"));
+    }
+
+    if call_path == "socket.socket"
+        || call_path == "socket.create_connection"
+        || call_path == "urllib.request.urlopen"
+        || call_path == "http.client.httpconnection"
+        || call_path == "http.client.httpsconnection"
+        || call_path == "ftplib.ftp"
+        || call_path == "smtplib.smtp"
+        || network_client_call(&call_path, "requests")
+        || network_client_call(&call_path, "httpx")
+        || network_client_call(&call_path, "aiohttp")
+        || call_path == "paramiko.sshclient"
+    {
+        return Some(format!("network call: {call_path}"));
+    }
+
+    if native_library_loading_call(&call_path) {
+        return Some(format!("native library loading call: {call_path}"));
+    }
+
+    if matches!(
+        call_path.as_str(),
+        "pickle.load"
+            | "pickle.loads"
+            | "marshal.load"
+            | "marshal.loads"
+            | "shelve.open"
+            | "dill.load"
+            | "dill.loads"
+            | "cloudpickle.load"
+            | "cloudpickle.loads"
+    ) {
+        return Some(format!("unsafe deserialization call: {call_path}"));
+    }
+
+    if matches!(
+        call_path.as_str(),
+        "pip.main" | "pip._internal.main" | "pip._internal.cli.main.main" | "ensurepip.bootstrap"
+    ) {
+        return Some(format!("package installer invocation: {call_path}"));
+    }
+
+    if call_path == "importlib.import_module" {
+        return Some(format!("dynamic import call: {call_path}"));
+    }
+
+    None
+}
+
+fn network_client_call(call_path: &str, module: &str) -> bool {
+    let Some(method) = call_path.strip_prefix(&format!("{module}.")) else {
+        return false;
+    };
+    matches!(
+        method,
+        "request" | "get" | "post" | "put" | "patch" | "delete" | "head" | "options"
+    )
+}
+
+fn native_library_loading_call(call_path: &str) -> bool {
+    matches!(
+        call_path,
+        "ctypes.cdll"
+            | "ctypes.pydll"
+            | "ctypes.windll"
+            | "ctypes.cdll.loadlibrary"
+            | "ctypes.pydll.loadlibrary"
+            | "ctypes.windll.loadlibrary"
+            | "ctypes.cdll.load_library"
+            | "ctypes.pydll.load_library"
+            | "ctypes.windll.load_library"
+    ) || (call_path.starts_with("ctypes.")
+        && (call_path.ends_with(".loadlibrary") || call_path.ends_with(".load_library")))
 }
 
 fn suspicious_dependency_findings(
@@ -529,6 +1138,19 @@ mod tests {
                         contents: b"import sitecustomize".to_vec(),
                     },
                     WheelArchiveEntry {
+                        path: "demo_pkg/loader.py".into(),
+                        contents: br#"
+import requests as http
+from subprocess import Popen
+
+def run(payload):
+    eval(payload)
+    Popen(["sh", "-c", payload])
+    http.get("https://example.com/bootstrap")
+"#
+                        .to_vec(),
+                    },
+                    WheelArchiveEntry {
                         path: "demo_pkg-0.1.0.dist-info/METADATA".into(),
                         contents: br#"Name: demo-pkg
 Requires-Dist: pip>=24
@@ -552,7 +1174,7 @@ Requires-Dist: helper @ https://example.com/helper.whl
             })
             .expect("audit report");
 
-        assert_eq!(report.scanned_file_count, 5);
+        assert_eq!(report.scanned_file_count, 6);
         assert_eq!(report.virus_scan.signature_rule_count, 1);
         assert_eq!(report.virus_scan.match_count, 1);
         assert!(
@@ -577,6 +1199,12 @@ Requires-Dist: helper @ https://example.com/helper.whl
             report
                 .findings
                 .iter()
+                .any(|finding| finding.kind == WheelAuditFindingKind::PythonAstSuspiciousBehavior)
+        );
+        assert!(
+            report
+                .findings
+                .iter()
                 .any(|finding| finding.kind == WheelAuditFindingKind::SuspiciousDependency)
         );
         assert!(
@@ -585,5 +1213,32 @@ Requires-Dist: helper @ https://example.com/helper.whl
                 .iter()
                 .any(|finding| finding.kind == WheelAuditFindingKind::VirusSignatureMatch)
         );
+    }
+
+    #[test]
+    fn python_ast_audit_resolves_aliases_and_risky_calls() {
+        let findings = python_ast_findings(&[WheelArchiveEntry {
+            path: "demo_pkg/worker.py".into(),
+            contents: br#"
+import ctypes
+from urllib.request import urlopen as open_url
+from pickle import loads
+from os import system as run_shell
+
+def bootstrap(payload):
+    open_url("https://example.com/payload")
+    loads(payload)
+    run_shell("whoami")
+    ctypes.CDLL("libnative.so")
+"#
+            .to_vec(),
+        }]);
+
+        assert_eq!(findings.len(), 1);
+        let evidence = findings[0].evidence.join("\n");
+        assert!(evidence.contains("network call: urllib.request.urlopen"));
+        assert!(evidence.contains("unsafe deserialization call: pickle.loads"));
+        assert!(evidence.contains("process execution call: os.system"));
+        assert!(evidence.contains("native library loading call: ctypes.cdll"));
     }
 }

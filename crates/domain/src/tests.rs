@@ -28,6 +28,23 @@ fn rejects_bad_tenant_slug() {
 
 #[test]
 fn validates_artifact_filename() {
+    assert_eq!(
+        ArtifactKind::from_filename("demo-1.0.0-py3-none-any.whl").expect("wheel"),
+        ArtifactKind::Wheel
+    );
+    for filename in [
+        "demo-1.0.0.tar.gz",
+        "demo-1.0.0.tar.bz2",
+        "demo-1.0.0.tar.xz",
+        "demo-1.0.0.tgz",
+        "demo-1.0.0.zip",
+    ] {
+        assert_eq!(
+            ArtifactKind::from_filename(filename).expect("source distribution"),
+            ArtifactKind::SourceDistribution
+        );
+    }
+
     let error = ArtifactKind::from_filename("README.txt").expect_err("invalid artifact");
     assert!(matches!(
         error,

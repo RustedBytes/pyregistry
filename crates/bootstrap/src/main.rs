@@ -199,12 +199,51 @@ async fn serve(settings: Settings, config_source: String) -> anyhow::Result<()> 
     let router = router(state).layer(TraceLayer::new_for_http());
 
     info!("pyregistry listening on http://{}", settings.bind_address);
-    if let Err(error) = axum::serve(listener, router).await {
+    if let Err(error) = axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         error!("axum server terminated with an error: {error}");
         return Err(error).context("axum server failed");
     }
 
+    info!("pyregistry server shutdown complete");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => "SIGINT",
+            Err(error) => {
+                error!("failed to listen for Ctrl+C/SIGINT: {error}");
+                std::future::pending::<&'static str>().await
+            }
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+                "SIGTERM"
+            }
+            Err(error) => {
+                error!("failed to listen for SIGTERM: {error}");
+                std::future::pending::<&'static str>().await
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<&'static str>();
+
+    let received_signal = tokio::select! {
+        signal = ctrl_c => signal,
+        signal = terminate => signal,
+    };
+    info!("received {received_signal}; starting graceful HTTP shutdown");
 }
 
 fn init_logging(logging: &LoggingConfig) {
@@ -343,6 +382,7 @@ fn print_wheel_audit_report(report: &WheelAuditReport) {
         WheelAuditFindingKind::UnexpectedExecutable,
         WheelAuditFindingKind::NetworkString,
         WheelAuditFindingKind::PostInstallClue,
+        WheelAuditFindingKind::PythonAstSuspiciousBehavior,
         WheelAuditFindingKind::SuspiciousDependency,
         WheelAuditFindingKind::VirusSignatureMatch,
     ] {
@@ -400,6 +440,7 @@ fn audit_heading(kind: WheelAuditFindingKind) -> &'static str {
         WheelAuditFindingKind::UnexpectedExecutable => "Unexpected executables or shell scripts",
         WheelAuditFindingKind::NetworkString => "Network-related strings inside binaries",
         WheelAuditFindingKind::PostInstallClue => "Post-install behavior clues",
+        WheelAuditFindingKind::PythonAstSuspiciousBehavior => "Python AST suspicious behavior",
         WheelAuditFindingKind::SuspiciousDependency => "Suspicious dependencies in METADATA",
         WheelAuditFindingKind::VirusSignatureMatch => "YARA virus signature matches",
     }

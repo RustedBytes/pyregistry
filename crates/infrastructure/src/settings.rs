@@ -19,6 +19,7 @@ pub struct Settings {
     pub database_store: DatabaseStoreKind,
     pub artifact_storage: ArtifactStorageConfig,
     pub pypi: PypiConfig,
+    pub sqlite: Option<SqliteConfig>,
     pub postgres: Option<PostgresConfig>,
     pub security: SecurityConfig,
     pub logging: LoggingConfig,
@@ -31,7 +32,7 @@ impl Settings {
             .ok()
             .map(|raw| DatabaseStoreKind::parse(&raw))
             .transpose()?
-            .unwrap_or(DatabaseStoreKind::InMemory);
+            .unwrap_or(DatabaseStoreKind::Sqlite);
         let blob_root = std::env::var("BLOB_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(".pyregistry/blobs"));
@@ -45,6 +46,12 @@ impl Settings {
                 min_connections: read_env_u32("POSTGRES_MIN_CONNECTIONS", 2),
                 acquire_timeout_seconds: read_env_u64("POSTGRES_ACQUIRE_TIMEOUT_SECONDS", 10),
             });
+        let sqlite = Some(SqliteConfig {
+            path: std::env::var("SQLITE_PATH")
+                .or_else(|_| std::env::var("SQLITE_DATABASE_PATH"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| default_sqlite_config().path),
+        });
         let logging = LoggingConfig {
             filter: std::env::var("LOG_FILTER").unwrap_or_else(|_| "info".into()),
             module_path: read_env_bool("LOG_MODULE_PATH", true),
@@ -90,7 +97,12 @@ impl Settings {
                 base_url: std::env::var("PYPI_BASE_URL")
                     .or_else(|_| std::env::var("PYPI_URL"))
                     .unwrap_or_else(|_| default_pypi_config().base_url),
+                mirror_download_concurrency: read_env_usize(
+                    "PYPI_MIRROR_DOWNLOAD_CONCURRENCY",
+                    default_mirror_download_concurrency(),
+                ),
             },
+            sqlite,
             postgres,
             security: SecurityConfig {
                 yara_rules_path: std::env::var("YARA_RULES_PATH")
@@ -112,9 +124,10 @@ impl Settings {
             superadmin_email: "admin@pyregistry.local".into(),
             superadmin_password: "change-me-now".into(),
             cookie_secret: random_cookie_secret(),
-            database_store: DatabaseStoreKind::InMemory,
+            database_store: DatabaseStoreKind::Sqlite,
             artifact_storage: default_artifact_storage_config(".pyregistry/blobs"),
             pypi: default_pypi_config(),
+            sqlite: Some(default_sqlite_config()),
             postgres: Some(default_postgres_config()),
             security: default_security_config(),
             logging: default_logging_config(),
@@ -206,13 +219,16 @@ impl Settings {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, postgres={}, security={}, logging={}, oidc_issuers={}",
+            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, security={}, logging={}, oidc_issuers={}",
             self.bind_address,
             self.blob_root.display(),
             self.superadmin_email,
             self.database_store.as_str(),
             self.artifact_storage.log_safe_summary(),
             self.pypi.log_safe_summary(),
+            self.sqlite
+                .as_ref()
+                .map_or_else(|| "disabled".to_string(), SqliteConfig::log_safe_summary),
             self.postgres
                 .as_ref()
                 .map_or_else(|| "disabled".to_string(), PostgresConfig::log_safe_summary),
@@ -229,9 +245,26 @@ impl Settings {
                     .into(),
             ));
         }
+        if matches!(self.database_store, DatabaseStoreKind::Sqlite) && self.sqlite.is_none() {
+            return Err(SettingsError::InvalidDatabaseStore(
+                "database_store `sqlite` requires a [sqlite] config section or SQLITE_PATH".into(),
+            ));
+        }
+        if let Some(sqlite) = &self.sqlite
+            && sqlite.path.as_os_str().is_empty()
+        {
+            return Err(SettingsError::InvalidSqliteConfig(
+                "sqlite path must not be empty".into(),
+            ));
+        }
         if self.artifact_storage.opendal.scheme.trim().is_empty() {
             return Err(SettingsError::InvalidArtifactStorageConfig(
                 "opendal scheme must not be empty".into(),
+            ));
+        }
+        if self.pypi.mirror_download_concurrency == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "mirror_download_concurrency must be greater than zero".into(),
             ));
         }
         if self.artifact_storage.opendal.scheme == "fs"
@@ -354,6 +387,7 @@ impl OpenDalStorageConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseStoreKind {
     InMemory,
+    Sqlite,
     Pgsql,
 }
 
@@ -362,6 +396,7 @@ impl DatabaseStoreKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::InMemory => "in-memory",
+            Self::Sqlite => "sqlite",
             Self::Pgsql => "pgsql",
         }
     }
@@ -369,9 +404,10 @@ impl DatabaseStoreKind {
     fn parse(raw: &str) -> Result<Self, SettingsError> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "in-memory" | "inmemory" | "memory" | "mem" => Ok(Self::InMemory),
+            "sqlite" | "sqlite3" => Ok(Self::Sqlite),
             "pgsql" | "postgres" | "postgresql" => Ok(Self::Pgsql),
             other => Err(SettingsError::InvalidDatabaseStore(format!(
-                "unsupported database_store `{other}`; expected `in-memory` or `pgsql`"
+                "unsupported database_store `{other}`; expected `sqlite`, `in-memory`, or `pgsql`"
             ))),
         }
     }
@@ -380,12 +416,16 @@ impl DatabaseStoreKind {
 #[derive(Debug, Clone)]
 pub struct PypiConfig {
     pub base_url: String,
+    pub mirror_download_concurrency: usize,
 }
 
 impl PypiConfig {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
-        format!("base_url={}", self.base_url)
+        format!(
+            "base_url={}, mirror_download_concurrency={}",
+            self.base_url, self.mirror_download_concurrency
+        )
     }
 }
 
@@ -420,6 +460,18 @@ impl PostgresConfig {
             "enabled(endpoint={}, min_connections={}, max_connections={}, acquire_timeout_seconds={})",
             endpoint, self.min_connections, self.max_connections, self.acquire_timeout_seconds
         )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SqliteConfig {
+    pub path: PathBuf,
+}
+
+impl SqliteConfig {
+    #[must_use]
+    pub fn log_safe_summary(&self) -> String {
+        format!("enabled(path={})", self.path.display())
     }
 }
 
@@ -512,6 +564,8 @@ pub enum SettingsError {
     InvalidPypiConfig(String),
     #[error("invalid postgres config: {0}")]
     InvalidPostgresConfig(String),
+    #[error("invalid sqlite config: {0}")]
+    InvalidSqliteConfig(String),
     #[error("invalid database store config: {0}")]
     InvalidDatabaseStore(String),
     #[error("invalid artifact storage config: {0}")]
@@ -538,6 +592,7 @@ struct SettingsFile {
     database_store: Option<String>,
     artifact_storage: Option<ArtifactStorageConfigFile>,
     pypi: Option<PypiConfigFile>,
+    sqlite: Option<SqliteConfigFile>,
     postgres: Option<PostgresConfigFile>,
     security: Option<SecurityConfigFile>,
     logging: Option<LoggingConfigFile>,
@@ -560,6 +615,7 @@ struct OpenDalStorageConfigFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PypiConfigFile {
     base_url: String,
+    mirror_download_concurrency: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -568,6 +624,11 @@ struct PostgresConfigFile {
     max_connections: u32,
     min_connections: u32,
     acquire_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SqliteConfigFile {
+    path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -611,13 +672,20 @@ impl TryFrom<SettingsFile> for Settings {
                 .as_deref()
                 .map(DatabaseStoreKind::parse)
                 .transpose()?
-                .unwrap_or(DatabaseStoreKind::InMemory),
+                .unwrap_or(DatabaseStoreKind::Sqlite),
             artifact_storage,
             pypi: value
                 .pypi
                 .map(PypiConfig::try_from)
                 .transpose()?
                 .unwrap_or_else(default_pypi_config),
+            sqlite: Some(
+                value
+                    .sqlite
+                    .map(SqliteConfig::try_from)
+                    .transpose()?
+                    .unwrap_or_else(default_sqlite_config),
+            ),
             postgres: value.postgres.map(PostgresConfig::try_from).transpose()?,
             security: value
                 .security
@@ -651,6 +719,7 @@ impl From<Settings> for SettingsFile {
             database_store: Some(value.database_store.as_str().into()),
             artifact_storage: Some(value.artifact_storage.into()),
             pypi: Some(value.pypi.into()),
+            sqlite: value.sqlite.map(Into::into),
             postgres: value.postgres.map(Into::into),
             security: Some(value.security.into()),
             logging: Some(value.logging.into()),
@@ -728,8 +797,19 @@ impl TryFrom<PypiConfigFile> for PypiConfig {
         Url::parse(&base_url).map_err(|error| {
             SettingsError::InvalidPypiConfig(format!("base_url must be a valid URL: {error}"))
         })?;
+        let mirror_download_concurrency = value
+            .mirror_download_concurrency
+            .unwrap_or_else(default_mirror_download_concurrency);
+        if mirror_download_concurrency == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "mirror_download_concurrency must be greater than zero".into(),
+            ));
+        }
 
-        Ok(Self { base_url })
+        Ok(Self {
+            base_url,
+            mirror_download_concurrency,
+        })
     }
 }
 
@@ -737,6 +817,7 @@ impl From<PypiConfig> for PypiConfigFile {
     fn from(value: PypiConfig) -> Self {
         Self {
             base_url: value.base_url,
+            mirror_download_concurrency: Some(value.mirror_download_concurrency),
         }
     }
 }
@@ -778,6 +859,26 @@ impl From<PostgresConfig> for PostgresConfigFile {
             min_connections: value.min_connections,
             acquire_timeout_seconds: value.acquire_timeout_seconds,
         }
+    }
+}
+
+impl TryFrom<SqliteConfigFile> for SqliteConfig {
+    type Error = SettingsError;
+
+    fn try_from(value: SqliteConfigFile) -> Result<Self, Self::Error> {
+        if value.path.as_os_str().is_empty() {
+            return Err(SettingsError::InvalidSqliteConfig(
+                "path must not be empty".into(),
+            ));
+        }
+
+        Ok(Self { path: value.path })
+    }
+}
+
+impl From<SqliteConfig> for SqliteConfigFile {
+    fn from(value: SqliteConfig) -> Self {
+        Self { path: value.path }
     }
 }
 
@@ -883,7 +984,12 @@ fn default_oidc_issuers() -> Vec<OidcIssuerConfig> {
 fn default_pypi_config() -> PypiConfig {
     PypiConfig {
         base_url: "https://pypi.org".into(),
+        mirror_download_concurrency: default_mirror_download_concurrency(),
     }
+}
+
+fn default_mirror_download_concurrency() -> usize {
+    4
 }
 
 fn default_artifact_storage_config(root: impl AsRef<str>) -> ArtifactStorageConfig {
@@ -937,6 +1043,12 @@ fn default_postgres_config() -> PostgresConfig {
     }
 }
 
+fn default_sqlite_config() -> SqliteConfig {
+    SqliteConfig {
+        path: PathBuf::from(".pyregistry/pyregistry.sqlite3"),
+    }
+}
+
 fn default_security_config() -> SecurityConfig {
     SecurityConfig {
         yara_rules_path: PathBuf::from("supplied/signature-base/yara"),
@@ -963,6 +1075,14 @@ fn read_env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn read_env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value > 0)
         .unwrap_or(default)
 }
 
@@ -1246,6 +1366,14 @@ mod tests {
         );
         assert_eq!(round_trip.pypi.base_url, original.pypi.base_url);
         assert_eq!(
+            round_trip.pypi.mirror_download_concurrency,
+            original.pypi.mirror_download_concurrency
+        );
+        assert_eq!(
+            round_trip.sqlite.as_ref().map(|sqlite| &sqlite.path),
+            original.sqlite.as_ref().map(|sqlite| &sqlite.path)
+        );
+        assert_eq!(
             round_trip
                 .postgres
                 .as_ref()
@@ -1275,9 +1403,28 @@ mod tests {
         assert_eq!(round_trip.bind_address, original.bind_address);
         assert_eq!(round_trip.database_store, original.database_store);
         assert_eq!(
+            round_trip.sqlite.as_ref().map(|sqlite| &sqlite.path),
+            original.sqlite.as_ref().map(|sqlite| &sqlite.path)
+        );
+        assert_eq!(
             round_trip.artifact_storage.opendal.options.get("root"),
             original.artifact_storage.opendal.options.get("root")
         );
+        assert_eq!(
+            round_trip.pypi.mirror_download_concurrency,
+            original.pypi.mirror_download_concurrency
+        );
+    }
+
+    #[test]
+    fn rejects_zero_mirror_download_concurrency() {
+        let error = PypiConfig::try_from(PypiConfigFile {
+            base_url: "https://pypi.org".into(),
+            mirror_download_concurrency: Some(0),
+        })
+        .expect_err("zero concurrency should fail");
+
+        assert!(matches!(error, SettingsError::InvalidPypiConfig(_)));
     }
 
     #[test]
@@ -1325,7 +1472,9 @@ mod tests {
             }),
             pypi: Some(PypiConfigFile {
                 base_url: "https://pypi.org".into(),
+                mirror_download_concurrency: Some(default_mirror_download_concurrency()),
             }),
+            sqlite: Some(default_sqlite_config().into()),
             postgres: Some(default_postgres_config().into()),
             security: Some(default_security_config().into()),
             logging: Some(LoggingConfigFile {
@@ -1399,7 +1548,9 @@ mod tests {
             }),
             pypi: Some(PypiConfigFile {
                 base_url: "https://pypi.org".into(),
+                mirror_download_concurrency: Some(default_mirror_download_concurrency()),
             }),
+            sqlite: Some(default_sqlite_config().into()),
             postgres: None,
             security: Some(default_security_config().into()),
             logging: Some(LoggingConfigFile {

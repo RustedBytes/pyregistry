@@ -24,14 +24,15 @@ Implemented today:
 - PEP 592-style yanking and local package purge flows.
 - Provenance storage and trusted-publishing attestation plumbing.
 - OIDC trusted publishing token minting for configured issuers.
+- SQLite metadata store by default, with in-memory available for throwaway runs.
 - OpenDAL artifact storage with filesystem and S3/MinIO configuration.
-- Wheel audit CLI and UI modal with heuristic checks plus YARA virus signatures.
+- Wheel audit CLI and UI modal with RustPython AST checks, heuristics, and YARA virus signatures.
 - PySentry-backed known vulnerability checks for package versions.
 
 Important limitations:
 
-- The default metadata store is in-memory, so data is lost when the process
-  exits and a separate CLI process will not see packages from a running server.
+- SQLite is the default metadata store. The `in-memory` store is still available
+  for throwaway development runs.
 - `database_store = "pgsql"` is accepted in config, but the Postgres metadata
   adapter is not implemented yet.
 - The UI is intentionally small and admin-focused.
@@ -45,8 +46,9 @@ The workspace keeps dependency direction pointed inward:
 - `crates/domain`: pure entities, value objects, invariants, and domain errors.
 - `crates/application`: use cases, commands, DTOs, and ports.
 - `crates/web`: Axum handlers, Askama templates, presenters, and web auth.
-- `crates/infrastructure`: config, logging, in-memory store, OpenDAL storage,
-  PyPI mirror client, OIDC verification, hashing, PySentry, YARA-X, and wiring.
+- `crates/infrastructure`: config, logging, SQLite and in-memory stores,
+  OpenDAL storage, PyPI mirror client, OIDC verification, hashing, PySentry,
+  YARA-X, and wiring.
 - `crates/bootstrap`: binary entrypoint and CLI command dispatch.
 
 The domain crate has no dependency on web frameworks, storage backends, SQL
@@ -56,6 +58,8 @@ drivers, serialization formats, or config loading.
 
 - Rust stable with Edition 2024 support. `yara-x` currently requires Rust 1.89+
   and this repository has been tested with a newer stable toolchain.
+- `cargo-nextest` for the workspace test runner:
+  `cargo install cargo-nextest --locked`
 - Docker Compose, optional, for local Postgres, MinIO, and the test JWKS server.
 - Python tooling such as `pip`, `uv`, and `twine`, optional, for compatibility
   smoke tests.
@@ -66,8 +70,8 @@ Build and test:
 
 ```bash
 cargo fmt
-cargo check
-cargo test
+cargo check --workspace
+cargo nextest run --workspace
 ```
 
 Generate a local config:
@@ -143,7 +147,7 @@ blob_root = ".pyregistry/blobs"
 superadmin_email = "admin@pyregistry.local"
 superadmin_password = "change-me-now"
 cookie_secret = "replace-me-with-a-long-random-string"
-database_store = "in-memory"
+database_store = "sqlite"
 
 [artifact_storage]
 backend = "opendal"
@@ -156,6 +160,10 @@ root = ".pyregistry/blobs"
 
 [pypi]
 base_url = "https://pypi.org"
+mirror_download_concurrency = 4
+
+[sqlite]
+path = ".pyregistry/pyregistry.sqlite3"
 
 [security]
 yara_rules_path = "supplied/signature-base/yara"
@@ -193,6 +201,7 @@ Useful environment variables:
 - `BIND_ADDRESS`
 - `BLOB_ROOT`
 - `DATABASE_STORE`
+- `SQLITE_PATH` or `SQLITE_DATABASE_PATH`
 - `DATABASE_URL` or `POSTGRES_URL`
 - `POSTGRES_MAX_CONNECTIONS`
 - `POSTGRES_MIN_CONNECTIONS`
@@ -226,6 +235,7 @@ file is not present locally. The audit checks:
 - Unexpected executables or shell scripts.
 - Network-related strings inside binaries.
 - Post-install behavior clues in package contents.
+- Suspicious Python imports and runtime calls using RustPython AST analysis.
 - Suspicious dependencies in `METADATA`.
 - YARA virus signature matches using the configured rule directory.
 
@@ -295,7 +305,8 @@ Pyregistry has two separate security scan paths:
 
 - Known vulnerability checks use `pysentry` and the PyPA advisory source. Package
   pages show a release-file summary, and `check-registry` exposes a CLI view.
-- Wheel content checks use built-in heuristics plus VirusTotal `yara-x` over the
+- Wheel content checks use RustPython AST analysis for Python files, built-in
+  heuristics for package layout/binaries, and VirusTotal `yara-x` over the
   configured YARA rule directory. The same audit output is available from the
   `audit-wheel` CLI and the package page "Wheel scan" modal.
 
@@ -314,9 +325,12 @@ The upstream base URL is configurable:
 ```toml
 [pypi]
 base_url = "https://pypi.org"
+mirror_download_concurrency = 4
 ```
 
 For an internal PyPI-compatible mirror, set `base_url` to that service instead.
+Increase `mirror_download_concurrency` to cache large projects faster, or lower
+it if your upstream mirror or object storage needs gentler traffic.
 
 ## Trusted Publishing
 
@@ -343,8 +357,15 @@ Run the main checks before handing off changes:
 
 ```bash
 cargo fmt
-cargo check
-cargo test
+cargo check --workspace
+cargo nextest run --workspace
+```
+
+Use the CI-oriented Nextest profile when you want retries for potentially flaky
+integration checks:
+
+```bash
+cargo nextest run --workspace --profile ci
 ```
 
 The first full build after adding YARA-X can take longer because the dependency

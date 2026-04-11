@@ -2,6 +2,7 @@ use crate::{
     ApplicationError, MirroredProjectSnapshot, ProvenanceDescriptor, PyregistryApp,
     SimpleArtifactLink, SimpleProject, SimpleProjectPage,
 };
+use futures_util::{StreamExt, stream};
 use log::{debug, info, warn};
 use pyregistry_domain::{
     Artifact, ArtifactId, AttestationBundle, AttestationSource, DigestSet, Project, ProjectId,
@@ -246,7 +247,6 @@ impl PyregistryApp {
         snapshot: MirroredProjectSnapshot,
     ) -> Result<Option<Project>, ApplicationError> {
         let artifact_total = snapshot.artifacts.len();
-        let mut cached_artifact_count = 0usize;
         let now = self.clock.now();
         let canonical_name = ProjectName::new(snapshot.canonical_name)?;
         let mut project = self
@@ -270,6 +270,7 @@ impl PyregistryApp {
         project.updated_at = now;
         self.store.save_project(project.clone()).await?;
 
+        let mut cache_candidates = Vec::new();
         for mirrored in snapshot.artifacts {
             let version = ReleaseVersion::new(mirrored.version.clone())?;
             let release = self
@@ -294,17 +295,7 @@ impl PyregistryApp {
                     artifact.upstream_url = Some(mirrored.download_url.clone());
                     self.store.save_artifact(artifact.clone()).await?;
                 }
-                if self
-                    .cache_mirrored_artifact_bytes(
-                        tenant_slug,
-                        project.name.normalized(),
-                        &version,
-                        &artifact,
-                    )
-                    .await?
-                {
-                    cached_artifact_count += 1;
-                }
+                cache_candidates.push(MirroredArtifactCacheCandidate { version, artifact });
                 continue;
             }
 
@@ -341,15 +332,16 @@ impl PyregistryApp {
                     .await?;
             }
             self.store.save_artifact(artifact.clone()).await?;
-            self.cache_mirrored_artifact_bytes(
+            cache_candidates.push(MirroredArtifactCacheCandidate { version, artifact });
+        }
+
+        let cached_artifact_count = self
+            .cache_mirrored_artifacts_parallel(
                 tenant_slug,
                 project.name.normalized(),
-                &version,
-                &artifact,
+                cache_candidates,
             )
             .await?;
-            cached_artifact_count += 1;
-        }
 
         info!(
             "stored mirrored project `{}` for tenant `{tenant_slug}` with {} artifact record(s), {} eagerly cached",
@@ -358,6 +350,46 @@ impl PyregistryApp {
             cached_artifact_count
         );
         Ok(Some(project))
+    }
+
+    async fn cache_mirrored_artifacts_parallel(
+        &self,
+        tenant_slug: &str,
+        normalized_project_name: &str,
+        candidates: Vec<MirroredArtifactCacheCandidate>,
+    ) -> Result<usize, ApplicationError> {
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        let candidate_count = candidates.len();
+        let concurrency = self.mirror_download_concurrency.min(candidate_count).max(1);
+        info!(
+            "caching {candidate_count} mirrored artifact payload(s) for tenant `{tenant_slug}` project `{normalized_project_name}` with concurrency={concurrency}"
+        );
+
+        let mut downloads = stream::iter(candidates.into_iter().map(|candidate| async move {
+            self.cache_mirrored_artifact_bytes(
+                tenant_slug,
+                normalized_project_name,
+                &candidate.version,
+                &candidate.artifact,
+            )
+            .await
+        }))
+        .buffer_unordered(concurrency);
+
+        let mut cached_artifact_count = 0usize;
+        while let Some(result) = downloads.next().await {
+            if result? {
+                cached_artifact_count += 1;
+            }
+        }
+
+        info!(
+            "cached {cached_artifact_count} of {candidate_count} mirrored artifact payload(s) for tenant `{tenant_slug}` project `{normalized_project_name}`"
+        );
+        Ok(cached_artifact_count)
     }
 
     async fn cache_mirrored_artifact_bytes(
@@ -408,6 +440,11 @@ impl PyregistryApp {
     }
 }
 
+struct MirroredArtifactCacheCandidate {
+    version: ReleaseVersion,
+    artifact: Artifact,
+}
+
 fn validate_mirrored_artifact_payload(
     artifact: &Artifact,
     bytes: &[u8],
@@ -431,3 +468,6 @@ fn validate_mirrored_artifact_payload(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

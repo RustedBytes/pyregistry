@@ -827,6 +827,7 @@ fn format_wheel_audit_report_text(report: &WheelAuditReport) -> String {
         WheelAuditFindingKind::UnexpectedExecutable,
         WheelAuditFindingKind::NetworkString,
         WheelAuditFindingKind::PostInstallClue,
+        WheelAuditFindingKind::PythonAstSuspiciousBehavior,
         WheelAuditFindingKind::SuspiciousDependency,
         WheelAuditFindingKind::VirusSignatureMatch,
     ] {
@@ -894,6 +895,7 @@ fn audit_heading(kind: WheelAuditFindingKind) -> &'static str {
         WheelAuditFindingKind::UnexpectedExecutable => "Unexpected executables or shell scripts",
         WheelAuditFindingKind::NetworkString => "Network-related strings inside binaries",
         WheelAuditFindingKind::PostInstallClue => "Post-install behavior clues",
+        WheelAuditFindingKind::PythonAstSuspiciousBehavior => "Python AST suspicious behavior",
         WheelAuditFindingKind::SuspiciousDependency => "Suspicious dependencies in METADATA",
         WheelAuditFindingKind::VirusSignatureMatch => "YARA virus signature matches",
     }

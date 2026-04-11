@@ -22,6 +22,7 @@ pub struct PyregistryApp {
     pub(crate) wheel_virus_scanner: Arc<dyn WheelVirusScanner>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) ids: Arc<dyn IdGenerator>,
+    pub(crate) mirror_download_concurrency: usize,
 }
 
 impl PyregistryApp {
@@ -40,6 +41,7 @@ impl PyregistryApp {
         wheel_virus_scanner: Arc<dyn WheelVirusScanner>,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdGenerator>,
+        mirror_download_concurrency: usize,
     ) -> Self {
         Self {
             store,
@@ -54,6 +56,7 @@ impl PyregistryApp {
             wheel_virus_scanner,
             clock,
             ids,
+            mirror_download_concurrency: mirror_download_concurrency.max(1),
         }
     }
 

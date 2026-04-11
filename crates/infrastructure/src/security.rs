@@ -5,7 +5,7 @@ use pyregistry_application::{
     VulnerabilityScanner,
 };
 use pysentry::{
-    AuditCache, MatcherConfig, PackageName, SeverityLevel, Version, VulnerabilityMatcher,
+    AuditCache, MatcherConfig, PackageName, Severity, SeverityLevel, Version, VulnerabilityMatcher,
     VulnerabilitySource, VulnerabilitySourceType,
     config::HttpConfig,
     dependency::scanner::{DependencySource, ScannedDependency},
@@ -169,10 +169,12 @@ impl VulnerabilityScanner for PySentryVulnerabilityScanner {
 fn map_vulnerability(
     value: pysentry::vulnerability::database::VulnerabilityMatch,
 ) -> PackageVulnerability {
+    let severity = severity_label(value.vulnerability.severity, value.vulnerability.cvss_score);
+
     PackageVulnerability {
         id: value.vulnerability.id,
         summary: value.vulnerability.summary,
-        severity: value.vulnerability.severity.to_string(),
+        severity,
         fixed_versions: value
             .vulnerability
             .fixed_versions
@@ -183,6 +185,18 @@ fn map_vulnerability(
         source: value.vulnerability.source,
         cvss_score: value.vulnerability.cvss_score,
     }
+}
+
+fn severity_label(severity: Severity, cvss_score: Option<f32>) -> String {
+    let effective_severity = if matches!(severity, Severity::Unknown) {
+        cvss_score
+            .map(Severity::from_cvss_score)
+            .unwrap_or(severity)
+    } else {
+        severity
+    };
+
+    effective_severity.to_string()
 }
 
 fn query_key(query: &PackageVulnerabilityQuery) -> (String, String) {
@@ -215,5 +229,19 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| { error.contains("invalid package version for PySentry") })
         );
+    }
+
+    #[test]
+    fn derives_unknown_pysentry_severity_from_cvss_score() {
+        assert_eq!(severity_label(Severity::Unknown, Some(9.8)), "CRITICAL");
+        assert_eq!(severity_label(Severity::Unknown, Some(7.5)), "HIGH");
+        assert_eq!(severity_label(Severity::Unknown, Some(5.0)), "MEDIUM");
+        assert_eq!(severity_label(Severity::Unknown, Some(3.0)), "LOW");
+        assert_eq!(severity_label(Severity::Unknown, None), "UNKNOWN");
+    }
+
+    #[test]
+    fn keeps_explicit_pysentry_severity_over_cvss_score() {
+        assert_eq!(severity_label(Severity::High, Some(9.8)), "HIGH");
     }
 }

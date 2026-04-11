@@ -2,46 +2,21 @@ use crate::{
     ArgonPasswordHasher, ArtifactStorageBackend, DatabaseStoreKind, FileSystemObjectStorage,
     InMemoryRegistryStore, JsonAttestationSigner, OpenDalObjectStorage,
     PySentryVulnerabilityScanner, PypiMirrorClient, Settings, Sha256TokenHasher,
-    SimpleJwksOidcVerifier, YaraWheelVirusScanner, ZipWheelArchiveReader,
+    SimpleJwksOidcVerifier, SqliteRegistryStore, YaraWheelVirusScanner, ZipWheelArchiveReader,
 };
 use log::{info, warn};
 use pyregistry_application::{
-    ApplicationError, ObjectStorage, PyregistryApp, SystemClock, UuidGenerator,
+    ApplicationError, ObjectStorage, PyregistryApp, RegistryStore, SystemClock, UuidGenerator,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
 pub fn build_application(settings: &Settings) -> Result<Arc<PyregistryApp>, InfrastructureError> {
-    match settings.database_store {
-        DatabaseStoreKind::InMemory => {
-            info!(
-                "building application with in-memory registry store and filesystem blobs rooted at {}",
-                settings.blob_root.display()
-            );
-            if let Some(postgres) = &settings.postgres {
-                warn!(
-                    "postgres config is present ({}) but database_store is `in-memory`, so postgres metadata storage will not be used",
-                    postgres.log_safe_summary()
-                );
-            }
-        }
-        DatabaseStoreKind::Pgsql => {
-            let postgres = settings
-                .postgres
-                .as_ref()
-                .ok_or(InfrastructureError::PostgresConfigurationRequired)?;
-            return Err(InfrastructureError::PostgresStoreNotImplemented(
-                postgres.log_safe_summary(),
-            ));
-        }
-    }
+    let registry_store = build_registry_store(settings)?;
     info!(
-        "using PyPI-compatible upstream base URL {}",
-        settings.pypi.base_url
-    );
-    warn!(
-        "pyregistry is running with development metadata store adapters until postgres support lands"
+        "using PyPI-compatible upstream base URL {} with mirror download concurrency {}",
+        settings.pypi.base_url, settings.pypi.mirror_download_concurrency
     );
     let object_storage = build_object_storage(settings)?;
     let mirror_client = match PypiMirrorClient::new(&settings.pypi.base_url) {
@@ -55,7 +30,7 @@ pub fn build_application(settings: &Settings) -> Result<Arc<PyregistryApp>, Infr
         }
     };
     Ok(Arc::new(PyregistryApp::new(
-        Arc::new(InMemoryRegistryStore::default()),
+        registry_store,
         object_storage,
         mirror_client,
         Arc::new(SimpleJwksOidcVerifier::new(settings.oidc_issuers.clone())),
@@ -71,7 +46,49 @@ pub fn build_application(settings: &Settings) -> Result<Arc<PyregistryApp>, Infr
         )),
         Arc::new(SystemClock),
         Arc::new(UuidGenerator),
+        settings.pypi.mirror_download_concurrency,
     )))
+}
+
+fn build_registry_store(
+    settings: &Settings,
+) -> Result<Arc<dyn RegistryStore>, InfrastructureError> {
+    match settings.database_store {
+        DatabaseStoreKind::InMemory => {
+            warn!(
+                "building application with in-memory metadata store; registry state will be lost when the process exits"
+            );
+            if let Some(postgres) = &settings.postgres {
+                warn!(
+                    "postgres config is present ({}) but database_store is `in-memory`, so postgres metadata storage will not be used",
+                    postgres.log_safe_summary()
+                );
+            }
+            Ok(Arc::new(InMemoryRegistryStore::default()))
+        }
+        DatabaseStoreKind::Sqlite => {
+            let sqlite = settings
+                .sqlite
+                .as_ref()
+                .ok_or(InfrastructureError::SqliteConfigurationRequired)?;
+            info!(
+                "building application with SQLite metadata store at {}",
+                sqlite.path.display()
+            );
+            SqliteRegistryStore::open(&sqlite.path)
+                .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
+                .map_err(|error| InfrastructureError::MetadataStoreConfiguration(error.to_string()))
+        }
+        DatabaseStoreKind::Pgsql => {
+            let postgres = settings
+                .postgres
+                .as_ref()
+                .ok_or(InfrastructureError::PostgresConfigurationRequired)?;
+            Err(InfrastructureError::PostgresStoreNotImplemented(
+                postgres.log_safe_summary(),
+            ))
+        }
+    }
 }
 
 fn pysentry_cache_dir(settings: &Settings) -> PathBuf {
@@ -152,12 +169,16 @@ pub async fn seed_application(
 
 #[derive(Debug, Error)]
 pub enum InfrastructureError {
+    #[error("database_store `sqlite` requires sqlite metadata settings")]
+    SqliteConfigurationRequired,
     #[error("database_store `pgsql` requires postgres connection settings")]
     PostgresConfigurationRequired,
     #[error(
         "database_store `pgsql` is configured, but the postgres metadata adapter is not implemented yet ({0})"
     )]
     PostgresStoreNotImplemented(String),
+    #[error("metadata store is not configured correctly: {0}")]
+    MetadataStoreConfiguration(String),
     #[error("artifact object storage is not configured correctly: {0}")]
     ObjectStorageConfiguration(String),
 }

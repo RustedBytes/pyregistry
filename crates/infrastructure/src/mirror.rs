@@ -174,6 +174,7 @@ struct PypiDigests {
 #[derive(Debug, Deserialize)]
 struct PypiReleaseFile {
     filename: String,
+    packagetype: Option<String>,
     size: u64,
     url: String,
     digests: PypiDigests,
@@ -226,8 +227,18 @@ impl MirrorClient for PypiMirrorClient {
             .map_err(|error| ApplicationError::External(error.to_string()))?;
 
         let mut artifacts = Vec::new();
+        let mut skipped_file_count = 0usize;
         for (version, files) in payload.releases {
             for file in files {
+                if !is_mirrorable_distribution(&file) {
+                    skipped_file_count += 1;
+                    debug!(
+                        "skipping unsupported PyPI release file `{}` with package type {:?}",
+                        file.filename, file.packagetype
+                    );
+                    continue;
+                }
+
                 artifacts.push(MirroredArtifactSnapshot {
                     filename: file.filename,
                     version: version.clone(),
@@ -241,9 +252,10 @@ impl MirrorClient for PypiMirrorClient {
         }
 
         debug!(
-            "fetched PyPI project `{}` with {} artifact(s)",
+            "fetched PyPI project `{}` with {} mirrorable artifact(s), skipped {} unsupported file(s)",
             payload.info.name,
-            artifacts.len()
+            artifacts.len(),
+            skipped_file_count
         );
         Ok(Some(MirroredProjectSnapshot {
             canonical_name: payload.info.name,
@@ -271,10 +283,34 @@ impl MirrorClient for PypiMirrorClient {
     }
 }
 
+fn is_mirrorable_distribution(file: &PypiReleaseFile) -> bool {
+    if let Some(package_type) = file.packagetype.as_deref() {
+        return matches!(
+            package_type.trim().to_ascii_lowercase().as_str(),
+            "bdist_wheel" | "sdist"
+        );
+    }
+
+    // Some private PyPI-compatible mirrors omit `packagetype`, so fall back to
+    // filename shape while keeping legacy installers like .exe and .egg out.
+    is_mirrorable_distribution_filename(&file.filename)
+}
+
+fn is_mirrorable_distribution_filename(filename: &str) -> bool {
+    filename.ends_with(".whl")
+        || filename.ends_with(".tar.gz")
+        || filename.ends_with(".tar.bz2")
+        || filename.ends_with(".tar.xz")
+        || filename.ends_with(".tgz")
+        || filename.ends_with(".zip")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PypiMirrorClient;
-    use super::{find_artifact_by_filename, temp_download_path};
+    use super::{
+        PypiDigests, PypiMirrorClient, PypiReleaseFile, find_artifact_by_filename,
+        is_mirrorable_distribution, is_mirrorable_distribution_filename, temp_download_path,
+    };
     use pyregistry_application::MirroredArtifactSnapshot;
     use std::path::Path;
 
@@ -326,5 +362,48 @@ mod tests {
             .expect("metadata URL");
 
         assert_eq!(url.as_str(), "https://mirror.example/pypi/demo-pkg/json");
+    }
+
+    #[test]
+    fn filters_legacy_pypi_installers_from_mirroring() {
+        let wheel = release_file(
+            "pandas-2.3.3-cp314-cp314-manylinux.whl",
+            Some("bdist_wheel"),
+        );
+        let sdist = release_file("pandas-2.3.3.tar.gz", Some("sdist"));
+        let legacy_installer = release_file("pandas-0.1.win32-py2.5.exe", Some("bdist_wininst"));
+        let egg = release_file("pandas-0.7.0-py2.7.egg", Some("bdist_egg"));
+
+        assert!(is_mirrorable_distribution(&wheel));
+        assert!(is_mirrorable_distribution(&sdist));
+        assert!(!is_mirrorable_distribution(&legacy_installer));
+        assert!(!is_mirrorable_distribution(&egg));
+    }
+
+    #[test]
+    fn falls_back_to_safe_filename_extensions_when_package_type_is_missing() {
+        assert!(is_mirrorable_distribution_filename("demo-1.0.0.tar.gz"));
+        assert!(is_mirrorable_distribution_filename("demo-1.0.0.tar.bz2"));
+        assert!(is_mirrorable_distribution_filename("demo-1.0.0.tar.xz"));
+        assert!(is_mirrorable_distribution_filename("demo-1.0.0.tgz"));
+        assert!(is_mirrorable_distribution_filename("demo-1.0.0.zip"));
+        assert!(is_mirrorable_distribution_filename(
+            "demo-1.0.0-py3-none-any.whl"
+        ));
+        assert!(!is_mirrorable_distribution_filename("demo-1.0.0.exe"));
+        assert!(!is_mirrorable_distribution_filename("demo-1.0.0.egg"));
+    }
+
+    fn release_file(filename: &str, packagetype: Option<&str>) -> PypiReleaseFile {
+        PypiReleaseFile {
+            filename: filename.into(),
+            packagetype: packagetype.map(str::to_string),
+            size: 0,
+            url: "https://files.example.test/demo".into(),
+            digests: PypiDigests {
+                sha256: "0".repeat(64),
+                blake2b_256: None,
+            },
+        }
     }
 }

@@ -1,0 +1,14 @@
+[profile.default]
+failure-output = "immediate-final"
+fail-fast = true
+final-status-level = "slow"
+slow-timeout = { period = "60s", terminate-after = 2 }
+status-level = "fail"
+
+[profile.ci]
+failure-output = "immediate-final"
+fail-fast = false
+final-status-level = "slow"
+retries = { count = 1, backoff = "fixed", delay = "5s" }
+slow-timeout = { period = "60s", terminate-after = 2 }
+status-level = "fail"

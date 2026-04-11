@@ -124,7 +124,12 @@ impl ArtifactKind {
             return Ok(Self::Wheel);
         }
 
-        if filename.ends_with(".tar.gz") || filename.ends_with(".zip") {
+        if filename.ends_with(".tar.gz")
+            || filename.ends_with(".tar.bz2")
+            || filename.ends_with(".tar.xz")
+            || filename.ends_with(".tgz")
+            || filename.ends_with(".zip")
+        {
             return Ok(Self::SourceDistribution);
         }
 
