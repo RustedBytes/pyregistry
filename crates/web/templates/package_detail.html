@@ -5,133 +5,243 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ details.project_name }} - Pyregistry</title>
     <style>
+      :root {
+        --bg: #f6f7f9;
+        --surface: #ffffff;
+        --surface-soft: #eef7f5;
+        --ink: #171c24;
+        --muted: #667085;
+        --line: #d8dee8;
+        --accent: #0f766e;
+        --accent-strong: #0b5f59;
+        --focus: #2563eb;
+        --danger: #b42318;
+        --danger-bg: #fff4f3;
+        --warn: #b45309;
+        --warn-bg: #fff7ed;
+        --code-bg: #111827;
+      }
+      * {
+        box-sizing: border-box;
+      }
       body {
         margin: 0;
-        font-family: "Avenir Next", "Segoe UI", sans-serif;
-        background: #f7faf7;
-        color: #16211c;
+        font-family: Inter, "Avenir Next", "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
       }
-      main {
-        max-width: 980px;
+      a {
+        color: var(--accent-strong);
+        font-weight: 700;
+      }
+      a:focus-visible,
+      button:focus-visible,
+      input:focus,
+      summary:focus-visible {
+        outline: 3px solid rgba(37, 99, 235, 0.22);
+        outline-offset: 2px;
+      }
+      .shell {
+        width: min(1120px, calc(100vw - 40px));
         margin: 0 auto;
-        padding: 24px;
+        padding: 22px 0 60px;
       }
-      section {
-        background: white;
-        border: 1px solid #d9e3dc;
-        border-radius: 18px;
-        padding: 22px;
-        margin-bottom: 18px;
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        padding: 8px 0 24px;
       }
-      .install-section {
-        background: transparent;
-        border: 0;
-        padding: 0;
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        color: var(--ink);
+        text-decoration: none;
       }
-      form { display: inline-block; margin-right: 8px; margin-top: 8px; }
-      button {
-        border: 0;
-        border-radius: 999px;
-        padding: 10px 14px;
-        background: #166040;
-        color: white;
-        cursor: pointer;
+      .brand-mark {
+        width: 40px;
+        height: 40px;
+        border-radius: 8px;
+        box-shadow: 0 10px 24px rgba(15, 118, 110, 0.18);
       }
+      .brand strong,
+      .brand span {
+        display: block;
+      }
+      .brand span {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      .package-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(260px, 0.35fr);
+        gap: 24px;
+        align-items: end;
+        padding: 34px 0 30px;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+      .eyebrow {
+        margin: 0 0 10px;
+        color: var(--accent-strong);
+        font-size: 0.86rem;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+      h1 {
+        margin-bottom: 12px;
+        font-size: 2.9rem;
+        line-height: 1.05;
+        overflow-wrap: anywhere;
+      }
+      h2 {
+        margin-bottom: 16px;
+        font-size: 1.25rem;
+      }
+      h3 {
+        margin-bottom: 8px;
+      }
+      .lede {
+        max-width: 760px;
+        margin-bottom: 12px;
+        color: #3f4753;
+        font-size: 1.05rem;
+        line-height: 1.6;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .meta-panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 16px;
+      }
+      .meta-line {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 9px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .meta-line:last-child {
+        border-bottom: 0;
+      }
+      .section-block {
+        padding: 28px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .status-panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 18px;
+      }
+      .security-card {
+        border-color: #f2c9a7;
+        background: var(--warn-bg);
+      }
+      .security-ok {
+        border-color: #9ed5cd;
+        background: var(--surface-soft);
+      }
+      form {
+        display: inline-block;
+        margin: 0;
+      }
+      button,
       .button-link {
         display: inline-flex;
         align-items: center;
-        border-radius: 999px;
+        justify-content: center;
+        min-height: 40px;
+        border: 0;
+        border-radius: 8px;
         padding: 10px 14px;
-        background: #166040;
-        color: white;
+        background: var(--accent);
+        color: #ffffff;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 800;
         text-decoration: none;
       }
-      .danger { background: #a33434; }
-      .warning {
-        background: #b86720;
+      button:hover,
+      .button-link:hover {
+        background: var(--accent-strong);
       }
-      .secondary {
-        background: #eef5f0;
-        color: #244135;
-        border: 1px solid #c8d8ce;
+      .danger {
+        background: var(--danger);
+      }
+      .danger:hover {
+        background: #8a1d14;
+      }
+      .warning {
+        background: var(--warn);
+      }
+      .warning:hover {
+        background: #92400e;
+      }
+      .secondary,
+      .back-link,
+      .modal-close {
+        border: 1px solid var(--line);
+        background: #ffffff;
+        color: var(--ink);
+      }
+      .secondary:hover,
+      .back-link:hover,
+      .modal-close:hover {
+        background: var(--surface-soft);
+      }
+      .back-link {
+        text-decoration: none;
       }
       input {
-        border-radius: 12px;
-        border: 1px solid #c9d6ce;
+        width: 100%;
+        min-height: 42px;
+        border-radius: 8px;
+        border: 1px solid #c6ced9;
         padding: 10px 12px;
+        background: #ffffff;
+        color: var(--ink);
+        font: inherit;
       }
-      .muted { color: #596860; }
       label {
         display: grid;
         gap: 6px;
-        color: #415249;
+        color: #3f4753;
         font-size: 0.92rem;
-      }
-      .release {
-        border-top: 1px solid #e1e9e4;
-        padding-top: 18px;
-        margin-top: 18px;
-      }
-      .release-head {
-        display: flex;
-        gap: 14px;
-        justify-content: space-between;
-        align-items: flex-start;
-        flex-wrap: wrap;
-      }
-      .release-meta {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
-        margin-top: 8px;
+        font-weight: 700;
       }
       .pill {
         display: inline-flex;
         align-items: center;
-        border-radius: 999px;
-        background: #eef5f0;
-        color: #244135;
-        padding: 6px 10px;
-        font-size: 0.92rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #ffffff;
+        color: var(--ink);
+        padding: 5px 9px;
+        font-size: 0.9rem;
+        font-weight: 700;
       }
       .pill-yanked {
-        background: #fff0df;
-        color: #7a3f12;
-      }
-      .release-actions {
-        display: grid;
-        gap: 10px;
-        min-width: min(360px, 100%);
-      }
-      .release-actions form {
-        margin: 0;
-      }
-      .yank-card {
-        border: 1px solid #d9e3dc;
-        border-radius: 16px;
-        background: #fbfdfb;
-        padding: 12px;
-      }
-      .yank-card p {
-        margin: 6px 0 0;
-      }
-      .yank-card.yanked {
-        border-color: #e0bd83;
-        background: #fff8ed;
-      }
-      .yank-form {
-        display: grid;
-        gap: 10px;
-        margin-top: 10px;
-      }
-      .danger-form {
-        display: inline-block;
+        border-color: #f2c9a7;
+        background: var(--warn-bg);
+        color: var(--warn);
       }
       details {
         margin-top: 14px;
-        border: 1px solid #d9e3dc;
-        border-radius: 16px;
-        background: #fbfdfb;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
         overflow: hidden;
       }
       summary {
@@ -142,21 +252,99 @@
         justify-content: space-between;
         align-items: center;
         gap: 12px;
-        font-weight: 600;
+        font-weight: 800;
       }
-      summary::-webkit-details-marker { display: none; }
+      summary::-webkit-details-marker {
+        display: none;
+      }
       .summary-meta {
-        color: #596860;
-        font-weight: 500;
-        font-size: 0.95rem;
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 0.94rem;
+      }
+      .install-content {
+        padding: 0 16px 16px;
+      }
+      .install-grid {
+        display: grid;
+        gap: 14px;
+      }
+      pre {
+        margin: 0;
+        padding: 14px 16px;
+        border-radius: 8px;
+        background: var(--code-bg);
+        color: #f9fafb;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      code {
+        font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 0.94rem;
+      }
+      .publisher-list {
+        display: grid;
+        gap: 10px;
+      }
+      .publisher {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 14px;
+      }
+      .release {
+        padding: 22px 0;
+        border-top: 1px solid var(--line);
+      }
+      .release:first-of-type {
+        border-top: 0;
+      }
+      .release-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+        gap: 20px;
+        align-items: start;
+      }
+      .release-meta {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+      }
+      .release-actions {
+        display: grid;
+        gap: 10px;
+      }
+      .yank-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 13px;
+      }
+      .yank-card p {
+        margin: 6px 0 0;
+      }
+      .yank-card.yanked,
+      .security-warning {
+        border-color: #f2c9a7;
+        background: var(--warn-bg);
+      }
+      .yank-form {
+        display: grid;
+        gap: 10px;
+        margin-top: 10px;
+      }
+      .danger-form {
+        display: inline-block;
       }
       .files {
         padding: 0 16px 16px;
       }
       .file {
-        border-top: 1px solid #e6ede8;
-        padding-top: 14px;
-        margin-top: 14px;
+        border-top: 1px solid var(--line);
+        padding-top: 16px;
+        margin-top: 16px;
       }
       .file:first-child {
         border-top: 0;
@@ -171,17 +359,15 @@
         flex-wrap: wrap;
       }
       .file-name {
-        font-weight: 700;
+        font-weight: 800;
+        overflow-wrap: anywhere;
       }
       .file-actions {
         display: flex;
         flex-wrap: wrap;
         gap: 8px;
         align-items: center;
-        margin-top: 10px;
-      }
-      .file-actions form {
-        margin-right: 0;
+        margin-top: 12px;
       }
       .file-governance {
         display: grid;
@@ -193,42 +379,15 @@
         grid-template-columns: minmax(180px, 1fr) auto;
         align-items: end;
       }
-      @media (max-width: 720px) {
-        .file-governance .yank-form {
-          grid-template-columns: 1fr;
-        }
-      }
-      .install-grid {
-        display: grid;
-        gap: 14px;
-      }
-      .install-panel {
-        margin-top: 0;
-      }
-      .install-content {
-        padding: 0 16px 16px;
-      }
-      .security-card {
-        border-color: #d7b46a;
-        background: #fffaf0;
-      }
-      .security-ok {
-        border-color: #bad6c5;
-        background: #f4fbf6;
-      }
-      .security-warning {
-        border: 1px solid #e2b6a6;
-        background: #fff4ef;
-        border-radius: 14px;
+      .security-warning,
+      .security-muted {
+        border: 1px solid var(--line);
+        border-radius: 8px;
         padding: 12px 14px;
         margin-top: 12px;
       }
       .security-muted {
-        border: 1px solid #d9e3dc;
-        background: #fbfdfb;
-        border-radius: 14px;
-        padding: 12px 14px;
-        margin-top: 12px;
+        background: var(--surface);
       }
       .vuln-list {
         margin: 10px 0 0;
@@ -239,17 +398,17 @@
       }
       dialog {
         border: 0;
-        border-radius: 22px;
+        border-radius: 8px;
         padding: 0;
         width: min(860px, calc(100vw - 28px));
-        box-shadow: 0 24px 80px rgba(18, 32, 25, 0.28);
+        box-shadow: 0 24px 80px rgba(23, 28, 36, 0.24);
       }
       dialog::backdrop {
-        background: rgba(14, 22, 18, 0.45);
+        background: rgba(23, 28, 36, 0.48);
       }
       .modal-shell {
         padding: 22px;
-        background: #fbfdfb;
+        background: var(--bg);
       }
       .modal-head {
         display: flex;
@@ -261,63 +420,90 @@
       .modal-head p {
         margin: 6px 0 0;
       }
-      .modal-close {
-        background: #eef5f0;
-        color: #244135;
-      }
       .scan-status {
         margin-bottom: 12px;
       }
-      pre {
-        margin: 0;
-        padding: 14px 16px;
-        border-radius: 14px;
-        background: #122019;
-        color: #eef7f2;
-        overflow-x: auto;
-        white-space: pre-wrap;
-        word-break: break-word;
+      @media (max-width: 820px) {
+        .package-header,
+        .release-head {
+          grid-template-columns: 1fr;
+        }
       }
-      code {
-        font-family: "SFMono-Regular", "Menlo", monospace;
-        font-size: 0.94rem;
+      @media (max-width: 640px) {
+        .shell {
+          width: min(100% - 28px, 1120px);
+          padding-top: 14px;
+        }
+        .topbar {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        h1 {
+          font-size: 2.1rem;
+        }
+        summary {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .file-governance .yank-form {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
   <body>
-    <main>
-      <section>
-        <p><a href="/admin/t/{{ details.tenant_slug }}/packages">Back to packages</a></p>
-        <p class="muted">{{ details.source }} package</p>
-        <h1>{{ details.project_name }}</h1>
-        <p>{{ details.summary }}</p>
-        <p class="muted">{{ details.normalized_name }}</p>
+    <main class="shell">
+      <nav class="topbar" aria-label="Package">
+        <a class="brand" href="/admin/dashboard">
+          <img class="brand-mark" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230f766e'/%3E%3Cpath d='M14 20l18-10 18 10v24L32 54 14 44z' fill='%23fff'/%3E%3Cpath d='M32 10v20l18-10M32 30L14 20M32 30v24' fill='none' stroke='%23171c24' stroke-width='3' stroke-linejoin='round' opacity='.34'/%3E%3C/svg%3E">
+          <span>
+            <strong>Pyregistry</strong>
+            <span>Package detail</span>
+          </span>
+        </a>
+        <a class="button-link back-link" href="/admin/t/{{ details.tenant_slug }}/packages">Back to packages</a>
+      </nav>
+
+      <header class="package-header">
+        <div>
+          <p class="eyebrow">{{ details.source }} package</p>
+          <h1>{{ details.project_name }}</h1>
+          <p class="lede">{{ details.summary }}</p>
+          <p class="muted">{{ details.normalized_name }}</p>
+        </div>
+        <aside class="meta-panel" aria-label="Package summary">
+          <div class="meta-line"><span class="muted">Tenant</span><strong>{{ details.tenant_slug }}</strong></div>
+          <div class="meta-line"><span class="muted">Releases</span><strong>{{ details.releases.len() }}</strong></div>
+          <div class="meta-line"><span class="muted">Publishers</span><strong>{{ details.trusted_publishers.len() }}</strong></div>
+        </aside>
+      </header>
+
+      <section class="section-block">
+        <div class="status-panel {% if details.security.vulnerable_file_count > 0 %}security-card{% else %}security-ok{% endif %}">
+          <h2>Known Vulnerabilities</h2>
+          {% match details.security.scan_error %}
+          {% when Some with (error) %}
+          <p class="security-warning">PySentry scan did not complete for every release file: {{ error }}</p>
+          {% when None %}
+          {% endmatch %}
+
+          {% if details.security.vulnerable_file_count > 0 %}
+          <p>
+            PySentry found <strong>{{ details.security.vulnerability_count }}</strong> advisory match{% if details.security.vulnerability_count != 1 %}es{% endif %}
+            across <strong>{{ details.security.vulnerable_file_count }}</strong> vulnerable release file{% if details.security.vulnerable_file_count != 1 %}s{% endif %}.
+          </p>
+          {% match details.security.highest_severity %}
+          {% when Some with (severity) %}
+          <p class="muted">Highest severity: {{ severity }}</p>
+          {% when None %}
+          {% endmatch %}
+          {% else %}
+          <p>PySentry found no known vulnerabilities in {{ details.security.scanned_file_count }} scanned release file{% if details.security.scanned_file_count != 1 %}s{% endif %}.</p>
+          {% endif %}
+        </div>
       </section>
 
-      <section class="{% if details.security.vulnerable_file_count > 0 %}security-card{% else %}security-ok{% endif %}">
-        <h2>Known Vulnerabilities</h2>
-        {% match details.security.scan_error %}
-        {% when Some with (error) %}
-        <p class="security-warning">PySentry scan did not complete for every release file: {{ error }}</p>
-        {% when None %}
-        {% endmatch %}
-
-        {% if details.security.vulnerable_file_count > 0 %}
-        <p>
-          PySentry found <strong>{{ details.security.vulnerability_count }}</strong> advisory match{% if details.security.vulnerability_count != 1 %}es{% endif %}
-          across <strong>{{ details.security.vulnerable_file_count }}</strong> vulnerable release file{% if details.security.vulnerable_file_count != 1 %}s{% endif %}.
-        </p>
-        {% match details.security.highest_severity %}
-        {% when Some with (severity) %}
-        <p class="muted">Highest severity: {{ severity }}</p>
-        {% when None %}
-        {% endmatch %}
-        {% else %}
-        <p>PySentry found no known vulnerabilities in {{ details.security.scanned_file_count }} scanned release file{% if details.security.scanned_file_count != 1 %}s{% endif %}.</p>
-        {% endif %}
-      </section>
-
-      <section class="install-section">
+      <section class="section-block">
         <details class="install-panel">
           <summary>
             <span>Install</span>
@@ -343,21 +529,23 @@
         </details>
       </section>
 
-      <section>
+      <section class="section-block">
         <h2>Trusted publishers</h2>
         {% if details.trusted_publishers.len() == 0 %}
         <p class="muted">No trusted publishers configured.</p>
         {% else %}
-        {% for publisher in details.trusted_publishers %}
-        <div>
-          <strong>{{ publisher.provider }}</strong>
-          <p>{{ publisher.issuer }} | audience {{ publisher.audience }}</p>
+        <div class="publisher-list">
+          {% for publisher in details.trusted_publishers %}
+          <div class="publisher">
+            <strong>{{ publisher.provider }}</strong>
+            <p class="muted">{{ publisher.issuer }} | audience {{ publisher.audience }}</p>
+          </div>
+          {% endfor %}
         </div>
-        {% endfor %}
         {% endif %}
       </section>
 
-      <section>
+      <section class="section-block">
         <h2>Releases</h2>
         <p class="muted">Yanking is reversible and tells installers to avoid a release or file when possible. Purge is irreversible and removes local artifacts.</p>
         {% for release in details.releases %}
@@ -408,7 +596,7 @@
           <details {% if release.expanded %}open{% endif %}>
             <summary>
               <span>Files</span>
-              <span class="summary-meta">{{ release.artifact_count }} file{% if release.artifact_count != 1 %}s{% endif %} · {{ release.total_size_human }}</span>
+              <span class="summary-meta">{{ release.artifact_count }} file{% if release.artifact_count != 1 %}s{% endif %} | {{ release.total_size_human }}</span>
             </summary>
             <div class="files">
               {% for artifact in release.artifacts %}

@@ -6,94 +6,238 @@
     <title>Pyregistry</title>
     <style>
       :root {
-        --bg: #f5f7f4;
+        --bg: #f6f7f9;
         --surface: #ffffff;
-        --ink: #16221c;
-        --muted: #5d6a62;
-        --accent: #1f7a4d;
-        --line: #d6dfd8;
+        --surface-soft: #eef7f5;
+        --ink: #171c24;
+        --muted: #667085;
+        --line: #d8dee8;
+        --accent: #0f766e;
+        --accent-strong: #0b5f59;
+        --focus: #2563eb;
+      }
+      * {
+        box-sizing: border-box;
       }
       body {
         margin: 0;
-        font-family: "Iowan Old Style", "Palatino Linotype", serif;
-        background: radial-gradient(circle at top left, #eef6ea, var(--bg));
+        font-family: Inter, "Avenir Next", "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
         color: var(--ink);
       }
-      main {
-        max-width: 960px;
-        margin: 0 auto;
-        padding: 48px 24px 64px;
-      }
-      .hero, .panel {
-        background: rgba(255, 255, 255, 0.92);
-        border: 1px solid var(--line);
-        border-radius: 18px;
-        padding: 28px;
-        box-shadow: 0 10px 30px rgba(22, 34, 28, 0.05);
-      }
-      .hero h1 {
-        margin: 0 0 12px;
-        font-size: clamp(2rem, 4vw, 3.25rem);
-      }
-      .grid {
-        display: grid;
-        gap: 16px;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        margin: 28px 0;
-      }
-      .stat {
-        border: 1px solid var(--line);
-        border-radius: 16px;
-        padding: 18px;
-        background: #fbfcfa;
-      }
-      .stat strong {
-        display: block;
-        font-size: 1.75rem;
-        margin-bottom: 6px;
-      }
       a {
-        color: var(--accent);
+        color: var(--accent-strong);
+        font-weight: 700;
       }
-      .muted {
+      a:focus-visible,
+      button:focus-visible {
+        outline: 3px solid rgba(37, 99, 235, 0.35);
+        outline-offset: 3px;
+      }
+      .shell {
+        width: min(1120px, calc(100vw - 40px));
+        margin: 0 auto;
+        padding: 24px 0 56px;
+      }
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        padding: 10px 0 28px;
+      }
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        color: var(--ink);
+        text-decoration: none;
+      }
+      .brand-mark {
+        width: 42px;
+        height: 42px;
+        border-radius: 8px;
+        box-shadow: 0 10px 24px rgba(15, 118, 110, 0.18);
+      }
+      .brand strong {
+        display: block;
+        font-size: 1.08rem;
+      }
+      .brand span {
+        display: block;
         color: var(--muted);
+        font-size: 0.9rem;
+        font-weight: 500;
+      }
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        padding: 10px 16px;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #ffffff;
+        text-decoration: none;
+        box-shadow: 0 12px 26px rgba(15, 118, 110, 0.18);
+      }
+      .intro {
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+        gap: 32px;
+        align-items: end;
+        padding: 44px 0 34px;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+      .eyebrow {
+        margin: 0 0 12px;
+        color: var(--accent-strong);
+        font-size: 0.88rem;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      h1 {
+        max-width: 780px;
+        margin: 0;
+        font-size: 3.4rem;
+        line-height: 1.02;
+      }
+      .lede {
+        max-width: 680px;
+        margin: 18px 0 0;
+        color: #3f4753;
+        font-size: 1.12rem;
+        line-height: 1.65;
+      }
+      .status-panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 18px;
+      }
+      .status-panel h2 {
+        margin: 0 0 10px;
+        font-size: 1rem;
+      }
+      .status-panel p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .metric-grid {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        margin-top: 24px;
+      }
+      .metric {
+        min-height: 118px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 16px;
+      }
+      .metric strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 1.7rem;
+        line-height: 1.1;
+      }
+      .metric span {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+      .metric.highlight {
+        background: var(--surface-soft);
+        border-color: #9ed5cd;
+      }
+      .footer-note {
+        margin: 22px 0 0;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+      @media (max-width: 900px) {
+        .intro {
+          grid-template-columns: 1fr;
+          align-items: start;
+        }
+        .metric-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+      }
+      @media (max-width: 640px) {
+        .shell {
+          width: min(100% - 28px, 1120px);
+          padding-top: 14px;
+        }
+        .topbar {
+          align-items: flex-start;
+          flex-direction: column;
+          padding-bottom: 20px;
+        }
+        h1 {
+          font-size: 2.35rem;
+        }
+        .metric-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
       }
     </style>
   </head>
   <body>
-    <main>
-      <section class="hero">
-        <p class="muted">Internal Python package infrastructure</p>
-        <h1>Pyregistry</h1>
-        <p>A minimal multi-tenant package registry for company-internal Python packages, mirroring, trusted publishing, and provenance-aware installs.</p>
-        <div class="grid">
-          <div class="stat">
-            <strong>{{ overview.tenant_count }}</strong>
-            <span>Tenants</span>
-          </div>
-          <div class="stat">
-            <strong>{{ overview.project_count }}</strong>
-            <span>Projects</span>
-          </div>
-          <div class="stat">
-            <strong>{{ overview.release_count }}</strong>
-            <span>Releases</span>
-          </div>
-          <div class="stat">
-            <strong>{{ overview.artifact_count }}</strong>
-            <span>Artifacts</span>
-          </div>
-          <div class="stat">
-            <strong>{{ total_storage_human }}</strong>
-            <span>Stored data</span>
-          </div>
-          <div class="stat">
-            <strong>{{ overview.mirrored_project_count }}</strong>
-            <span>Mirrored projects</span>
-          </div>
+    <main class="shell">
+      <nav class="topbar" aria-label="Registry">
+        <a class="brand" href="/">
+          <img class="brand-mark" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230f766e'/%3E%3Cpath d='M14 20l18-10 18 10v24L32 54 14 44z' fill='%23fff'/%3E%3Cpath d='M32 10v20l18-10M32 30L14 20M32 30v24' fill='none' stroke='%23171c24' stroke-width='3' stroke-linejoin='round' opacity='.34'/%3E%3C/svg%3E">
+          <span>
+            <strong>Pyregistry</strong>
+            <span>Package control plane</span>
+          </span>
+        </a>
+        <a class="button" href="/admin/login">Admin sign in</a>
+      </nav>
+
+      <section class="intro">
+        <div>
+          <p class="eyebrow">Internal Python package infrastructure</p>
+          <h1>Trusted packages for teams that ship in private.</h1>
+          <p class="lede">Mirror public dependencies, publish internal releases, and keep tenant governance close to the registry data your teams rely on.</p>
         </div>
-        <p><a href="/admin/login">Admin sign in</a></p>
+        <aside class="status-panel" aria-label="Registry status">
+          <h2>Registry snapshot</h2>
+          <p>{{ overview.project_count }} projects, {{ overview.release_count }} releases, and {{ total_storage_human }} of stored package data are available across active tenants.</p>
+        </aside>
       </section>
+
+      <section class="metric-grid" aria-label="Registry metrics">
+        <div class="metric">
+          <strong>{{ overview.tenant_count }}</strong>
+          <span>Tenants</span>
+        </div>
+        <div class="metric highlight">
+          <strong>{{ overview.project_count }}</strong>
+          <span>Projects</span>
+        </div>
+        <div class="metric">
+          <strong>{{ overview.release_count }}</strong>
+          <span>Releases</span>
+        </div>
+        <div class="metric">
+          <strong>{{ overview.artifact_count }}</strong>
+          <span>Artifacts</span>
+        </div>
+        <div class="metric">
+          <strong>{{ total_storage_human }}</strong>
+          <span>Stored data</span>
+        </div>
+        <div class="metric">
+          <strong>{{ overview.mirrored_project_count }}</strong>
+          <span>Mirrored projects</span>
+        </div>
+      </section>
+
+      <p class="footer-note">Use the admin console for tenant controls, package governance, trusted publishers, mirroring, and audit history.</p>
     </main>
   </body>
 </html>

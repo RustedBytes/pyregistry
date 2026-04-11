@@ -6,91 +6,276 @@
     <title>Pyregistry Dashboard</title>
     <style>
       :root {
-        --ink: #15211d;
-        --muted: #5b6b63;
+        --bg: #f6f7f9;
         --surface: #ffffff;
-        --soft: #f3f7f1;
-        --line: #d9e2dc;
-        --accent: #176341;
+        --surface-soft: #eef7f5;
+        --ink: #171c24;
+        --muted: #667085;
+        --line: #d8dee8;
+        --accent: #0f766e;
+        --accent-strong: #0b5f59;
+        --focus: #2563eb;
+        --danger: #b42318;
       }
-      * { box-sizing: border-box; }
+      * {
+        box-sizing: border-box;
+      }
       body {
         margin: 0;
-        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        background: var(--bg);
         color: var(--ink);
-        background: linear-gradient(180deg, #f0f5ee 0%, #fcfdfc 100%);
+        font-family: Inter, "Avenir Next", "Segoe UI", system-ui, sans-serif;
       }
-      main {
-        max-width: 1120px;
+      a {
+        color: var(--accent-strong);
+        font-weight: 700;
+      }
+      a:focus-visible,
+      button:focus-visible,
+      input:focus,
+      select:focus {
+        outline: 3px solid rgba(37, 99, 235, 0.22);
+        outline-offset: 2px;
+      }
+      .shell {
+        width: min(1180px, calc(100vw - 40px));
         margin: 0 auto;
-        padding: 24px;
+        padding: 22px 0 56px;
       }
-      header, section {
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 18px;
-        padding: 22px;
-        margin-bottom: 18px;
-        box-shadow: 0 10px 24px rgba(21, 33, 29, 0.04);
-      }
-      .row {
-        display: grid;
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         gap: 18px;
-        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        padding: 8px 0 24px;
+      }
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        color: var(--ink);
+        text-decoration: none;
+      }
+      .brand-mark {
+        width: 40px;
+        height: 40px;
+        border-radius: 8px;
+        box-shadow: 0 10px 24px rgba(15, 118, 110, 0.18);
+      }
+      .brand strong,
+      .brand span {
+        display: block;
+      }
+      .brand span {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      .logout-form {
+        margin: 0;
+      }
+      button,
+      .button-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 14px;
+        background: var(--accent);
+        color: #ffffff;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 800;
+        text-decoration: none;
+      }
+      button:hover,
+      .button-link:hover {
+        background: var(--accent-strong);
+      }
+      .secondary-button {
+        border: 1px solid var(--line);
+        background: #ffffff;
+        color: var(--ink);
+      }
+      .secondary-button:hover {
+        background: #eef7f5;
+      }
+      .console-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 24px;
+        align-items: end;
+        padding: 34px 0 30px;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+      .eyebrow {
+        margin: 0 0 10px;
+        color: var(--accent-strong);
+        font-size: 0.86rem;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+      h1 {
+        margin-bottom: 12px;
+        font-size: 2.8rem;
+        line-height: 1.05;
+      }
+      h2 {
+        margin-bottom: 16px;
+        font-size: 1.25rem;
+      }
+      h3 {
+        margin-bottom: 8px;
+      }
+      .lede {
+        max-width: 760px;
+        margin-bottom: 0;
+        color: #3f4753;
+        font-size: 1.05rem;
+        line-height: 1.6;
+      }
+      .session-card {
+        min-width: 250px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 16px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .section-block {
+        padding: 28px 0;
+        border-bottom: 1px solid var(--line);
       }
       .stats {
         display: grid;
-        gap: 12px;
-        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 14px;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
       }
       .chip {
-        background: var(--soft);
-        border-radius: 12px;
-        padding: 12px;
+        min-height: 104px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 15px;
+      }
+      .chip strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 1.55rem;
+        line-height: 1.1;
+      }
+      .chip span {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+      .chip.highlight {
+        border-color: #9ed5cd;
+        background: var(--surface-soft);
+      }
+      .tenant-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .tenant-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 40px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 9px 11px;
+        color: var(--ink);
+        text-decoration: none;
+      }
+      .tenant-pill:hover {
+        border-color: #9ed5cd;
+        background: var(--surface-soft);
+      }
+      .workspace {
+        display: grid;
+        gap: 18px;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        padding: 28px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .control-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 20px;
       }
       form {
         display: grid;
-        gap: 10px;
+        gap: 11px;
       }
-      input, select, button {
-        padding: 11px 12px;
-        border-radius: 12px;
-        border: 1px solid #c9d5ce;
+      input,
+      select {
+        width: 100%;
+        min-height: 42px;
+        border: 1px solid #c6ced9;
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: #ffffff;
+        color: var(--ink);
+        font: inherit;
       }
-      button {
-        background: var(--accent);
-        color: white;
-        border: 0;
-        cursor: pointer;
+      label {
+        color: #3f4753;
+        font-weight: 700;
+      }
+      .checkbox-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 36px;
+        font-weight: 600;
+      }
+      .checkbox-label input {
+        width: auto;
+        min-height: auto;
+        margin: 0;
       }
       .search-row {
         display: grid;
-        gap: 8px;
-        grid-template-columns: 1fr auto;
+        gap: 10px;
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
       }
       table {
         width: 100%;
         border-collapse: collapse;
       }
-      th, td {
-        padding: 10px 8px;
+      th,
+      td {
+        padding: 13px 14px;
         border-bottom: 1px solid var(--line);
         text-align: left;
+        vertical-align: top;
       }
-      a { color: var(--accent); }
-      .muted { color: var(--muted); }
-      .tenant-list {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
+      th {
+        color: #3f4753;
+        font-size: 0.86rem;
+        text-transform: uppercase;
       }
-      .tenant-pill {
-        display: inline-flex;
-        gap: 8px;
-        align-items: center;
-        padding: 8px 10px;
-        border-radius: 999px;
-        background: var(--soft);
+      tr:last-child td {
+        border-bottom: 0;
       }
       .scope-grid {
         display: flex;
@@ -103,9 +288,9 @@
       }
       .job-card {
         border: 1px solid var(--line);
-        border-radius: 14px;
+        border-radius: 8px;
         padding: 14px;
-        background: #fbfdfb;
+        background: var(--surface);
       }
       .job-head {
         display: flex;
@@ -117,15 +302,18 @@
       .status-pill {
         display: inline-flex;
         align-items: center;
-        border-radius: 999px;
-        padding: 6px 10px;
-        background: var(--soft);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 5px 9px;
+        background: #ffffff;
         color: var(--ink);
-        font-size: 0.92rem;
+        font-size: 0.9rem;
+        font-weight: 700;
       }
       .status-pill.active {
-        background: #e8f3eb;
-        color: #155233;
+        border-color: #9ed5cd;
+        background: var(--surface-soft);
+        color: var(--accent-strong);
       }
       .audit-action {
         font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", monospace;
@@ -135,41 +323,92 @@
         display: flex;
         flex-wrap: wrap;
         gap: 6px;
-        margin-top: 6px;
+        margin-top: 8px;
       }
       .audit-meta span {
-        border-radius: 999px;
-        background: var(--soft);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #ffffff;
         color: var(--muted);
         padding: 4px 8px;
         font-size: 0.82rem;
       }
+      @media (max-width: 960px) {
+        .console-header {
+          grid-template-columns: 1fr;
+          align-items: start;
+        }
+        .stats {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+      }
+      @media (max-width: 640px) {
+        .shell {
+          width: min(100% - 28px, 1180px);
+          padding-top: 14px;
+        }
+        .topbar,
+        .search-row {
+          align-items: stretch;
+          grid-template-columns: 1fr;
+        }
+        .topbar {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        h1 {
+          font-size: 2.15rem;
+        }
+        .stats {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .session-card {
+          min-width: 0;
+          width: 100%;
+        }
+      }
     </style>
   </head>
   <body>
-    <main>
-      <header>
-        <p class="muted">{{ session.email }}</p>
-        <h1>Registry dashboard</h1>
-        <p>Public landing metrics, tenant-scoped search, mirroring, trusted publishers, and package governance in one minimal admin surface.</p>
-        <form method="post" action="/admin/logout">
-          <button type="submit">Sign out</button>
+    <main class="shell">
+      <nav class="topbar" aria-label="Admin">
+        <a class="brand" href="/admin/dashboard">
+          <img class="brand-mark" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230f766e'/%3E%3Cpath d='M14 20l18-10 18 10v24L32 54 14 44z' fill='%23fff'/%3E%3Cpath d='M32 10v20l18-10M32 30L14 20M32 30v24' fill='none' stroke='%23171c24' stroke-width='3' stroke-linejoin='round' opacity='.34'/%3E%3C/svg%3E">
+          <span>
+            <strong>Pyregistry</strong>
+            <span>Admin console</span>
+          </span>
+        </a>
+        <form class="logout-form" method="post" action="/admin/logout">
+          <button class="secondary-button" type="submit">Sign out</button>
         </form>
+      </nav>
+
+      <header class="console-header">
+        <div>
+          <p class="eyebrow">Registry dashboard</p>
+          <h1>Package governance without the sprawl.</h1>
+          <p class="lede">Search tenant packages, monitor mirror activity, issue scoped tokens, and manage trusted publishing from one focused console.</p>
+        </div>
+        <aside class="session-card">
+          <strong>{{ session.email }}</strong>
+          <p class="muted">Signed in admin session</p>
+        </aside>
       </header>
 
-      <section>
+      <section class="section-block">
         <h2>Registry overview</h2>
         <div class="stats">
-          <div class="chip"><strong>{{ overview.tenant_count }}</strong><br>Tenants</div>
-          <div class="chip"><strong>{{ overview.project_count }}</strong><br>Projects</div>
-          <div class="chip"><strong>{{ overview.release_count }}</strong><br>Releases</div>
-          <div class="chip"><strong>{{ overview.artifact_count }}</strong><br>Artifacts</div>
-          <div class="chip"><strong>{{ overview.mirrored_project_count }}</strong><br>Mirrored</div>
-          <div class="chip"><strong>{{ total_storage_human }}</strong><br>Total storage</div>
+          <div class="chip"><strong>{{ overview.tenant_count }}</strong><span>Tenants</span></div>
+          <div class="chip highlight"><strong>{{ overview.project_count }}</strong><span>Projects</span></div>
+          <div class="chip"><strong>{{ overview.release_count }}</strong><span>Releases</span></div>
+          <div class="chip"><strong>{{ overview.artifact_count }}</strong><span>Artifacts</span></div>
+          <div class="chip"><strong>{{ overview.mirrored_project_count }}</strong><span>Mirrored</span></div>
+          <div class="chip"><strong>{{ total_storage_human }}</strong><span>Total storage</span></div>
         </div>
       </section>
 
-      <section>
+      <section class="section-block">
         <h2>Tenants</h2>
         <div class="tenant-list">
           {% for tenant in tenants %}
@@ -181,22 +420,22 @@
         </div>
       </section>
 
-      <div class="row">
+      <div class="workspace">
         {% if session.is_superadmin %}
-        <section>
+        <section class="control-card">
           <h2>Create tenant</h2>
           <form method="post" action="/admin/tenants">
             <input type="text" name="slug" placeholder="tenant slug" required>
             <input type="text" name="display_name" placeholder="display name" required>
             <input type="email" name="admin_email" placeholder="tenant admin email" required>
             <input type="password" name="admin_password" placeholder="tenant admin password" required>
-            <label><input type="checkbox" name="mirroring_enabled" value="true"> Enable PyPI mirroring</label>
+            <label class="checkbox-label"><input type="checkbox" name="mirroring_enabled" value="true"> Enable PyPI mirroring</label>
             <button type="submit">Create tenant</button>
           </form>
         </section>
         {% endif %}
 
-        <section>
+        <section class="control-card">
           <h2>Search packages</h2>
           <form method="get" action="/admin/search">
             {% match selected_tenant %}
@@ -210,26 +449,28 @@
             </div>
           </form>
           {% if search_results.len() > 0 %}
-          <table>
-            <thead>
-              <tr><th>Package</th><th>Summary</th><th>Source</th><th>Latest</th></tr>
-            </thead>
-            <tbody>
-              {% for hit in search_results %}
-              <tr>
-                <td><a href="/admin/t/{{ hit.tenant_slug }}/packages/{{ hit.normalized_name }}">{{ hit.project_name }}</a></td>
-                <td>{{ hit.summary }}</td>
-                <td>{{ hit.source }}</td>
-                <td>
-                  {% match hit.latest_version %}
-                  {% when Some with (latest) %}{{ latest }}
-                  {% when None %}-
-                  {% endmatch %}
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Package</th><th>Summary</th><th>Source</th><th>Latest</th></tr>
+              </thead>
+              <tbody>
+                {% for hit in search_results %}
+                <tr>
+                  <td><a href="/admin/t/{{ hit.tenant_slug }}/packages/{{ hit.normalized_name }}">{{ hit.project_name }}</a></td>
+                  <td>{{ hit.summary }}</td>
+                  <td>{{ hit.source }}</td>
+                  <td>
+                    {% match hit.latest_version %}
+                    {% when Some with (latest) %}{{ latest }}
+                    {% when None %}-
+                    {% endmatch %}
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
           {% else %}
           <p class="muted">Search results appear here.</p>
           {% endif %}
@@ -238,19 +479,19 @@
 
       {% match metrics %}
       {% when Some with (tenant_metrics) %}
-      <section>
+      <section class="section-block">
         <h2>Tenant metrics: {{ tenant_metrics.tenant_slug }}</h2>
         <div class="stats">
-          <div class="chip"><strong>{{ tenant_metrics.project_count }}</strong><br>Projects</div>
-          <div class="chip"><strong>{{ tenant_metrics.release_count }}</strong><br>Releases</div>
-          <div class="chip"><strong>{{ tenant_metrics.artifact_count }}</strong><br>Artifacts</div>
-          <div class="chip"><strong>{{ tenant_metrics.token_count }}</strong><br>Tokens</div>
-          <div class="chip"><strong>{{ tenant_metrics.trusted_publisher_count }}</strong><br>Trusted publishers</div>
+          <div class="chip highlight"><strong>{{ tenant_metrics.project_count }}</strong><span>Projects</span></div>
+          <div class="chip"><strong>{{ tenant_metrics.release_count }}</strong><span>Releases</span></div>
+          <div class="chip"><strong>{{ tenant_metrics.artifact_count }}</strong><span>Artifacts</span></div>
+          <div class="chip"><strong>{{ tenant_metrics.token_count }}</strong><span>Tokens</span></div>
+          <div class="chip"><strong>{{ tenant_metrics.trusted_publisher_count }}</strong><span>Trusted publishers</span></div>
         </div>
       </section>
 
       {% if mirror_jobs.len() > 0 %}
-      <section>
+      <section class="section-block">
         <h2>Mirror jobs</h2>
         <div class="job-list">
           {% for job in mirror_jobs %}
@@ -266,62 +507,64 @@
       </section>
       {% endif %}
 
-      <section>
+      <section class="section-block">
         <h2>Audit trail</h2>
         <p class="muted">Recent user and token actions for this tenant.</p>
         {% if audit_events.len() > 0 %}
-        <table>
-          <thead>
-            <tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th></tr>
-          </thead>
-          <tbody>
-            {% for event in audit_events %}
-            <tr>
-              <td>{{ event.occurred_at }}</td>
-              <td>{{ event.actor }}</td>
-              <td><span class="audit-action">{{ event.action }}</span></td>
-              <td>
-                {% match event.target %}
-                {% when Some with (target) %}{{ target }}
-                {% when None %}
-                  {% match event.tenant_slug %}
-                  {% when Some with (tenant_slug) %}{{ tenant_slug }}
-                  {% when None %}-
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th></tr>
+            </thead>
+            <tbody>
+              {% for event in audit_events %}
+              <tr>
+                <td>{{ event.occurred_at }}</td>
+                <td>{{ event.actor }}</td>
+                <td><span class="audit-action">{{ event.action }}</span></td>
+                <td>
+                  {% match event.target %}
+                  {% when Some with (target) %}{{ target }}
+                  {% when None %}
+                    {% match event.tenant_slug %}
+                    {% when Some with (tenant_slug) %}{{ tenant_slug }}
+                    {% when None %}-
+                    {% endmatch %}
                   {% endmatch %}
-                {% endmatch %}
-                {% if event.metadata.len() > 0 %}
-                <div class="audit-meta">
-                  {% for item in event.metadata %}
-                  <span>{{ item.key }}={{ item.value }}</span>
-                  {% endfor %}
-                </div>
-                {% endif %}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+                  {% if event.metadata.len() > 0 %}
+                  <div class="audit-meta">
+                    {% for item in event.metadata %}
+                    <span>{{ item.key }}={{ item.value }}</span>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
         {% else %}
         <p class="muted">No audit events recorded yet.</p>
         {% endif %}
       </section>
 
-      <div class="row">
-        <section>
+      <div class="workspace">
+        <section class="control-card">
           <h2>Issue API token</h2>
           <form method="post" action="/admin/t/{{ tenant_metrics.tenant_slug }}/tokens">
             <input type="text" name="label" placeholder="token label" required>
             <input type="number" name="ttl_hours" placeholder="TTL hours (optional)">
             <div class="scope-grid">
-              <label><input type="checkbox" name="scopes" value="read"> Read</label>
-              <label><input type="checkbox" name="scopes" value="publish"> Publish</label>
-              <label><input type="checkbox" name="scopes" value="admin"> Admin</label>
+              <label class="checkbox-label"><input type="checkbox" name="scopes" value="read"> Read</label>
+              <label class="checkbox-label"><input type="checkbox" name="scopes" value="publish"> Publish</label>
+              <label class="checkbox-label"><input type="checkbox" name="scopes" value="admin"> Admin</label>
             </div>
             <button type="submit">Issue token</button>
           </form>
         </section>
 
-        <section>
+        <section class="control-card">
           <h2>Mirror package</h2>
           <p class="muted">Starts a background sync so the page returns immediately while artifacts download.</p>
           <form method="post" action="/admin/t/{{ tenant_metrics.tenant_slug }}/mirror-cache">
@@ -330,7 +573,7 @@
           </form>
         </section>
 
-        <section>
+        <section class="control-card">
           <h2>Trusted publisher</h2>
           <form method="post" action="/admin/t/{{ tenant_metrics.tenant_slug }}/publishers">
             <input type="text" name="project_name" placeholder="project name" required>
@@ -348,7 +591,7 @@
         </section>
       </div>
       {% when None %}
-      <section>
+      <section class="section-block">
         <p class="muted">Create or select a tenant to see tenant-level metrics and controls.</p>
       </section>
       {% endmatch %}
