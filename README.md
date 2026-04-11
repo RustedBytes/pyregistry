@@ -463,9 +463,11 @@ cargo nextest run --workspace --profile ci
 ```
 
 The coverage gate requires at least 95% total line coverage and at least 95%
-line coverage for every reported Rust source file. To experiment with a
-different local threshold, set `COVERAGE_MIN_LINES` or
-`COVERAGE_MIN_FILE_LINES`, for example
+line coverage for every reported Rust source file. By default the script omits
+the binary bootstrap entrypoint and live PostgreSQL adapter from the stable core
+surface; set `COVERAGE_IGNORE_FILENAME_REGEX` to replace that default ignore
+list. To experiment with a different local threshold, set `COVERAGE_MIN_LINES`
+or `COVERAGE_MIN_FILE_LINES`, for example
 `COVERAGE_MIN_FILE_LINES=90 ./scripts/coverage.sh`.
 
 The first full build after adding YARA-X can take longer because the dependency

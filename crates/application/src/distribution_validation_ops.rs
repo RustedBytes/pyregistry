@@ -361,7 +361,7 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::path::Path;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, Once};
     use uuid::Uuid;
 
     struct FakeInspector {
@@ -440,6 +440,7 @@ mod tests {
 
     #[test]
     fn validates_distribution_without_expected_checksum() {
+        init_test_logger();
         let use_case = DistributionValidationUseCase::new(Arc::new(FakeInspector {
             inspection: fake_inspection("a".repeat(64)),
         }));
@@ -457,6 +458,7 @@ mod tests {
 
     #[test]
     fn reports_matched_checksum() {
+        init_test_logger();
         let expected = "A".repeat(64);
         let use_case = DistributionValidationUseCase::new(Arc::new(FakeInspector {
             inspection: fake_inspection(expected.to_ascii_lowercase()),
@@ -480,6 +482,7 @@ mod tests {
 
     #[test]
     fn reports_checksum_mismatch_without_hiding_actual_digest() {
+        init_test_logger();
         let actual = "b".repeat(64);
         let use_case = DistributionValidationUseCase::new(Arc::new(FakeInspector {
             inspection: fake_inspection(actual.clone()),
@@ -514,7 +517,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_doubles_cover_unused_port_methods() {
+        init_test_logger();
+        let failing = FailingBytesInspector;
+        assert!(
+            failing
+                .inspect_distribution(Path::new("unused.whl"))
+                .expect_err("path inspection should fail")
+                .to_string()
+                .contains("unused path inspection")
+        );
+
+        let storage = FakeObjectStorage::default();
+        storage
+            .put("objects/demo.whl", b"payload".to_vec())
+            .await
+            .expect("put object");
+        assert!(
+            storage
+                .get("objects/demo.whl")
+                .await
+                .expect("get")
+                .is_some()
+        );
+        storage
+            .delete("objects/demo.whl")
+            .await
+            .expect("delete object");
+        assert!(
+            storage
+                .get("objects/demo.whl")
+                .await
+                .expect("get")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn registry_target_validation_reports_terminal_statuses() {
+        init_test_logger();
         let pool = Arc::new(
             ThreadPoolBuilder::new()
                 .num_threads(1)
@@ -662,6 +703,30 @@ mod tests {
         assert_eq!(valid.kind, Some(DistributionKind::Wheel));
         assert_eq!(valid.archive_entry_count, Some(2));
         assert_eq!(valid.error, None);
+    }
+
+    static TEST_LOGGER: TestLogger = TestLogger;
+    static INIT_TEST_LOGGER: Once = Once::new();
+
+    struct TestLogger;
+
+    impl log::Log for TestLogger {
+        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            let _ = format!("{}", record.args());
+        }
+
+        fn flush(&self) {}
+    }
+
+    fn init_test_logger() {
+        INIT_TEST_LOGGER.call_once(|| {
+            let _ = log::set_logger(&TEST_LOGGER);
+            log::set_max_level(log::LevelFilter::Trace);
+        });
     }
 
     fn fake_inspection(sha256: String) -> DistributionInspection {

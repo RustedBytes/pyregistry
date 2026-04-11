@@ -490,19 +490,22 @@ fn is_mirrorable_distribution_filename(filename: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactDownloadRetryPolicy, PypiDigests, PypiMirrorClient, PypiReleaseFile,
-        find_artifact_by_filename, is_mirrorable_distribution, is_mirrorable_distribution_filename,
-        is_retryable_status, temp_download_path,
+        ArtifactDownloadError, ArtifactDownloadRetryPolicy, PypiDigests, PypiMirrorClient,
+        PypiReleaseFile, find_artifact_by_filename, is_mirrorable_distribution,
+        is_mirrorable_distribution_filename, is_retryable_status, should_retry_download,
+        temp_download_path,
     };
     use pyregistry_application::{MirrorClient, MirroredArtifactSnapshot};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
+    use tokio::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use uuid::Uuid;
 
     #[test]
     fn finds_matching_artifact_by_exact_filename() {
@@ -543,6 +546,42 @@ mod tests {
     }
 
     #[test]
+    fn temp_download_path_uses_fallback_name_when_destination_has_no_filename() {
+        let temp_path = temp_download_path(Path::new("/"));
+
+        assert_eq!(temp_path, Path::new("/download.whl.part"));
+    }
+
+    #[test]
+    fn default_client_targets_public_pypi_and_policy_exposes_backoff() {
+        let client = PypiMirrorClient::default();
+
+        assert_eq!(
+            client
+                .project_metadata_url("demo")
+                .expect("metadata URL")
+                .as_str(),
+            "https://pypi.org/pypi/demo/json"
+        );
+        assert_eq!(
+            client.retry_policy.initial_backoff(),
+            Duration::from_millis(250)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_base_urls_and_normalizes_retry_attempts() {
+        assert!(PypiMirrorClient::new("not a URL").is_err());
+
+        let policy = ArtifactDownloadRetryPolicy::new(0, Duration::from_millis(5));
+        assert_eq!(policy.max_attempts(), 1);
+        assert_eq!(
+            policy.delay_for_attempt(usize::MAX),
+            Duration::from_millis(327_680)
+        );
+    }
+
+    #[test]
     fn builds_metadata_url_from_configured_base_url() {
         let client =
             PypiMirrorClient::new("https://mirror.example/simple/..").expect("configured base URL");
@@ -578,6 +617,17 @@ mod tests {
         assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
         assert!(!is_retryable_status(reqwest::StatusCode::NOT_FOUND));
         assert!(!is_retryable_status(reqwest::StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn classifies_artifact_download_errors_against_policy_limits() {
+        let policy = ArtifactDownloadRetryPolicy::new(2, Duration::from_millis(1));
+        let retryable = ArtifactDownloadError::retryable("temporary failure");
+        let fatal = ArtifactDownloadError::fatal("bad destination");
+
+        assert!(should_retry_download(&retryable, 1, policy));
+        assert!(!should_retry_download(&retryable, 2, policy));
+        assert!(!should_retry_download(&fatal, 1, policy));
     }
 
     #[tokio::test]
@@ -620,6 +670,257 @@ mod tests {
 
         assert_eq!(bytes, b"ok");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn artifact_byte_download_fails_fast_for_non_retryable_status() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = serve_http_responses(
+            listener,
+            vec![http_response(404, "text/plain", b"missing".to_vec())],
+        );
+        let client = PypiMirrorClient::with_retry_policy(
+            "https://pypi.org",
+            ArtifactDownloadRetryPolicy::new(3, Duration::from_millis(1)),
+        )
+        .expect("client");
+
+        let error = client
+            .fetch_artifact_bytes(&format!("http://{address}/missing.whl"))
+            .await
+            .expect_err("404 should not retry");
+
+        assert!(error.to_string().contains("HTTP 404"));
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn downloads_project_artifact_to_destination() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let metadata = pypi_metadata_response(
+            "demo",
+            &[(
+                "1.0.0",
+                "demo-1.0.0-py3-none-any.whl",
+                "bdist_wheel",
+                2,
+                &format!("http://{address}/files/demo.whl"),
+            )],
+        );
+        let server = serve_http_responses(
+            listener,
+            vec![
+                http_response(200, "application/json", metadata.into_bytes()),
+                http_response(200, "application/octet-stream", b"ok".to_vec()),
+            ],
+        );
+        let client = PypiMirrorClient::with_retry_policy(
+            &format!("http://{address}"),
+            ArtifactDownloadRetryPolicy::new(1, Duration::from_millis(1)),
+        )
+        .expect("client");
+        let destination = temp_destination("demo-1.0.0-py3-none-any.whl");
+
+        client
+            .download_project_artifact_by_filename(
+                "demo",
+                "demo-1.0.0-py3-none-any.whl",
+                &destination,
+            )
+            .await
+            .expect("artifact download");
+
+        assert_eq!(
+            fs::read(&destination).await.expect("downloaded bytes"),
+            b"ok"
+        );
+        assert!(
+            fs::metadata(temp_download_path(&destination))
+                .await
+                .is_err(),
+            "temporary sidecar should be renamed away"
+        );
+        server.await.expect("server task");
+        cleanup_destination(&destination).await;
+    }
+
+    #[tokio::test]
+    async fn artifact_file_download_retries_size_mismatch() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server_attempts = attempts.clone();
+        let metadata = pypi_metadata_response(
+            "demo",
+            &[(
+                "1.0.0",
+                "demo-1.0.0.tar.gz",
+                "sdist",
+                2,
+                &format!("http://{address}/files/demo.tar.gz"),
+            )],
+        );
+        let server = tokio::spawn(async move {
+            write_response(
+                &listener,
+                http_response(200, "application/json", metadata.into_bytes()),
+            )
+            .await;
+            for body in [b"x".to_vec(), b"ok".to_vec()] {
+                server_attempts.fetch_add(1, Ordering::SeqCst);
+                write_response(
+                    &listener,
+                    http_response(200, "application/octet-stream", body),
+                )
+                .await;
+            }
+        });
+        let client = PypiMirrorClient::with_retry_policy(
+            &format!("http://{address}"),
+            ArtifactDownloadRetryPolicy::new(2, Duration::from_millis(1)),
+        )
+        .expect("client");
+        let destination = temp_destination("demo-1.0.0.tar.gz");
+
+        client
+            .download_project_artifact_by_filename("demo", "demo-1.0.0.tar.gz", &destination)
+            .await
+            .expect("download retries after size mismatch");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            fs::read(&destination).await.expect("downloaded bytes"),
+            b"ok"
+        );
+        server.await.expect("server task");
+        cleanup_destination(&destination).await;
+    }
+
+    #[tokio::test]
+    async fn artifact_file_download_fails_fast_for_non_retryable_status() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let metadata = pypi_metadata_response(
+            "demo",
+            &[(
+                "1.0.0",
+                "demo-1.0.0-py3-none-any.whl",
+                "bdist_wheel",
+                2,
+                &format!("http://{address}/files/demo.whl"),
+            )],
+        );
+        let server = serve_http_responses(
+            listener,
+            vec![
+                http_response(200, "application/json", metadata.into_bytes()),
+                http_response(404, "text/plain", b"missing".to_vec()),
+            ],
+        );
+        let client = PypiMirrorClient::with_retry_policy(
+            &format!("http://{address}"),
+            ArtifactDownloadRetryPolicy::new(3, Duration::from_millis(1)),
+        )
+        .expect("client");
+        let destination = temp_destination("missing.whl");
+
+        let error = client
+            .download_project_artifact_by_filename(
+                "demo",
+                "demo-1.0.0-py3-none-any.whl",
+                &destination,
+            )
+            .await
+            .expect_err("404 should not retry");
+
+        assert!(error.to_string().contains("HTTP 404"));
+        assert!(fs::metadata(&destination).await.is_err());
+        assert!(
+            fs::metadata(temp_download_path(&destination))
+                .await
+                .is_err()
+        );
+        server.await.expect("server task");
+        cleanup_destination(&destination).await;
+    }
+
+    #[tokio::test]
+    async fn project_artifact_download_reports_missing_project_or_file() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = serve_http_responses(
+            listener,
+            vec![http_response(404, "text/plain", b"missing".to_vec())],
+        );
+        let client = PypiMirrorClient::with_retry_policy(
+            &format!("http://{address}"),
+            ArtifactDownloadRetryPolicy::new(1, Duration::from_millis(1)),
+        )
+        .expect("client");
+
+        assert!(matches!(
+            client
+                .download_project_artifact_by_filename(
+                    "missing",
+                    "missing-1.0.0-py3-none-any.whl",
+                    &temp_destination("unused.whl"),
+                )
+                .await,
+            Err(pyregistry_application::ApplicationError::NotFound(_))
+        ));
+        server.await.expect("server task");
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let metadata = pypi_metadata_response(
+            "demo",
+            &[(
+                "1.0.0",
+                "demo-1.0.0-py3-none-any.whl",
+                "bdist_wheel",
+                2,
+                &format!("http://{address}/files/demo.whl"),
+            )],
+        );
+        let server = serve_http_responses(
+            listener,
+            vec![http_response(
+                200,
+                "application/json",
+                metadata.into_bytes(),
+            )],
+        );
+        let client = PypiMirrorClient::with_retry_policy(
+            &format!("http://{address}"),
+            ArtifactDownloadRetryPolicy::new(1, Duration::from_millis(1)),
+        )
+        .expect("client");
+
+        assert!(matches!(
+            client
+                .download_project_artifact_by_filename(
+                    "demo",
+                    "demo-1.0.0.zip",
+                    &temp_destination("unused.zip"),
+                )
+                .await,
+            Err(pyregistry_application::ApplicationError::NotFound(_))
+        ));
         server.await.expect("server task");
     }
 
@@ -783,6 +1084,84 @@ mod tests {
                 sha256: "0".repeat(64),
                 blake2b_256: None,
             },
+        }
+    }
+
+    fn pypi_metadata_response(
+        project_name: &str,
+        files: &[(&str, &str, &str, u64, &str)],
+    ) -> String {
+        let mut releases = serde_json::Map::new();
+        for (version, filename, package_type, size, url) in files {
+            releases.insert(
+                (*version).to_string(),
+                serde_json::json!([{
+                    "filename": filename,
+                    "packagetype": package_type,
+                    "size": size,
+                    "url": url,
+                    "digests": {
+                        "sha256": "0".repeat(64),
+                        "blake2b_256": null
+                    }
+                }]),
+            );
+        }
+        serde_json::json!({
+            "info": {
+                "name": project_name,
+                "summary": "Demo package",
+                "description": "Demo package"
+            },
+            "releases": releases
+        })
+        .to_string()
+    }
+
+    fn http_response(status: u16, content_type: &str, body: Vec<u8>) -> String {
+        let reason = match status {
+            200 => "OK",
+            404 => "Not Found",
+            503 => "Service Unavailable",
+            _ => "Status",
+        };
+        format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8(body).expect("test response body is utf8")
+        )
+    }
+
+    fn serve_http_responses(
+        listener: TcpListener,
+        responses: Vec<String>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            for response in responses {
+                write_response(&listener, response).await;
+            }
+        })
+    }
+
+    async fn write_response(listener: &TcpListener, response: String) {
+        let (mut socket, _) = listener.accept().await.expect("accept request");
+        let mut buffer = [0_u8; 2048];
+        let _ = socket.read(&mut buffer).await.expect("read request");
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+    }
+
+    fn temp_destination(filename: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("pyregistry-mirror-{}", Uuid::new_v4()))
+            .join(filename)
+    }
+
+    async fn cleanup_destination(destination: &Path) {
+        if let Some(parent) = destination.parent() {
+            let _ = fs::remove_dir_all(parent).await;
         }
     }
 }

@@ -207,6 +207,7 @@ mod tests {
     use super::*;
     use crate::{OpenDalStorageConfig, PostgresConfig, SqliteConfig};
     use std::collections::BTreeMap;
+    use std::sync::Once;
     use uuid::Uuid;
 
     fn in_memory_settings() -> Settings {
@@ -214,11 +215,20 @@ mod tests {
         settings.database_store = DatabaseStoreKind::InMemory;
         settings.blob_root =
             std::env::temp_dir().join(format!("pyregistry-wiring-{}", Uuid::new_v4()));
+        let yara_rules_path = settings.blob_root.join("yara-rules");
+        std::fs::create_dir_all(&yara_rules_path).expect("create test YARA rules dir");
+        std::fs::write(
+            yara_rules_path.join("pyregistry-test.yar"),
+            "rule PyregistryWiringTest { condition: false }",
+        )
+        .expect("write test YARA rule");
+        settings.security.yara_rules_path = yara_rules_path;
         settings
     }
 
     #[tokio::test]
     async fn builds_application_with_in_memory_store_and_filesystem_storage() {
+        init_test_logger();
         let settings = in_memory_settings();
 
         let app = build_application(&settings).await.expect("application");
@@ -236,7 +246,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_application_falls_back_when_pypi_base_url_is_invalid() {
+        init_test_logger();
+        let mut settings = in_memory_settings();
+        settings.pypi.base_url = "not a URL".into();
+
+        let app = build_application(&settings)
+            .await
+            .expect("application with fallback PyPI client");
+
+        assert_eq!(
+            app.get_registry_overview()
+                .await
+                .expect("overview")
+                .tenant_count,
+            0
+        );
+        let _ = std::fs::remove_dir_all(settings.blob_root);
+    }
+
+    #[tokio::test]
     async fn seed_application_creates_superadmin_and_bootstrap_tenant_once() {
+        init_test_logger();
         let settings = in_memory_settings();
         let app = build_application(&settings).await.expect("application");
 
@@ -257,6 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_registry_store_requires_selected_database_configuration() {
+        init_test_logger();
         let mut sqlite_settings = in_memory_settings();
         sqlite_settings.database_store = DatabaseStoreKind::Sqlite;
         sqlite_settings.sqlite = None;
@@ -276,6 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_registry_store_opens_sqlite_metadata_store() {
+        init_test_logger();
         let path =
             std::env::temp_dir().join(format!("pyregistry-wiring-{}.sqlite", Uuid::new_v4()));
         let mut settings = in_memory_settings();
@@ -299,6 +332,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_registry_store_reports_postgres_connection_errors() {
+        init_test_logger();
         let mut settings = in_memory_settings();
         settings.database_store = DatabaseStoreKind::Pgsql;
         settings.postgres = Some(PostgresConfig {
@@ -316,6 +350,7 @@ mod tests {
 
     #[test]
     fn build_object_storage_uses_filesystem_or_reports_opendal_config_errors() {
+        init_test_logger();
         let settings = in_memory_settings();
         let storage = build_object_storage(&settings).expect("filesystem storage");
         assert!(Arc::strong_count(&storage) >= 1);
@@ -335,6 +370,7 @@ mod tests {
 
     #[test]
     fn pysentry_cache_dir_is_sibling_to_blob_root_parent() {
+        init_test_logger();
         let mut settings = in_memory_settings();
         settings.blob_root = PathBuf::from("/tmp/pyregistry/blobs");
 
@@ -342,5 +378,29 @@ mod tests {
             pysentry_cache_dir(&settings),
             PathBuf::from("/tmp/pyregistry/pysentry-cache")
         );
+    }
+
+    static TEST_LOGGER: TestLogger = TestLogger;
+    static INIT_TEST_LOGGER: Once = Once::new();
+
+    struct TestLogger;
+
+    impl log::Log for TestLogger {
+        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            let _ = format!("{}", record.args());
+        }
+
+        fn flush(&self) {}
+    }
+
+    fn init_test_logger() {
+        INIT_TEST_LOGGER.call_once(|| {
+            let _ = log::set_logger(&TEST_LOGGER);
+            log::set_max_level(log::LevelFilter::Trace);
+        });
     }
 }

@@ -3,12 +3,13 @@ use crate::{
     AttestationSigner, CancellationSignal, Clock, CreateTenantCommand, DeletionCommand,
     DistributionFileInspector, DistributionInspection, DistributionKind, IdGenerator,
     IssueApiTokenCommand, MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot,
-    ObjectStorage, OidcVerifier, PackageVulnerabilityQuery, PackageVulnerabilityReport,
-    PasswordHasher, RecordAuditEventCommand, RegisterTrustedPublisherCommand,
-    RegistryDistributionValidationStatus, RegistryOverview, RegistryStore, SearchHit, TokenHasher,
-    UploadArtifactCommand, ValidateRegistryDistributionsCommand, VulnerabilityScanner,
-    WheelArchiveReader, WheelArchiveSnapshot, WheelSourceSecurityScanResult,
-    WheelSourceSecurityScanner, WheelVirusScanResult, WheelVirusScanner,
+    ObjectStorage, OidcVerifier, PackageArtifactDetails, PackageReleaseDetails,
+    PackageVulnerability, PackageVulnerabilityQuery, PackageVulnerabilityReport, PasswordHasher,
+    RecordAuditEventCommand, RegisterTrustedPublisherCommand, RegistryDistributionValidationStatus,
+    RegistryOverview, RegistryStore, SearchHit, TokenHasher, UploadArtifactCommand,
+    ValidateRegistryDistributionsCommand, VulnerabilityScanner, WheelArchiveReader,
+    WheelArchiveSnapshot, WheelSourceSecurityScanResult, WheelSourceSecurityScanner,
+    WheelVirusScanResult, WheelVirusScanner,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -22,7 +23,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, Once,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
@@ -115,6 +116,68 @@ async fn refresh_mirrored_projects_stops_before_work_when_cancelled() {
 }
 
 #[tokio::test]
+async fn mirror_resolution_reports_local_disabled_missing_and_failed_paths() {
+    let local_store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true));
+    let local_mirror = Arc::new(FakeMirrorClient::with_artifact_count(1));
+    let local_app = test_app(
+        local_store,
+        Arc::new(FakeObjectStorage::default()),
+        local_mirror.clone(),
+        1,
+    );
+
+    let local_project = local_app
+        .resolve_project_from_mirror("acme", "internal")
+        .await
+        .expect("local project resolution")
+        .expect("local project");
+    assert!(matches!(local_project.source, ProjectSource::Local));
+    assert_eq!(local_mirror.project_fetch_count(), 0);
+
+    let disabled_app = test_app(
+        Arc::new(FakeRegistryStore::with_tenant(false, false)),
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(FakeMirrorClient::with_artifact_count(1)),
+        1,
+    );
+    assert!(
+        disabled_app
+            .resolve_project_from_mirror("acme", "upstream")
+            .await
+            .expect("disabled mirror lookup")
+            .is_none()
+    );
+
+    let missing_app = test_app_with_mirror(
+        Arc::new(FakeRegistryStore::with_mirrored_tenant()),
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(MissingMirrorClient),
+        1,
+    );
+    assert!(
+        missing_app
+            .resolve_project_from_mirror("acme", "missing")
+            .await
+            .expect("missing upstream lookup")
+            .is_none()
+    );
+
+    let failing_app = test_app_with_mirror(
+        Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true)),
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(FailingMirrorClient),
+        1,
+    );
+    let report = failing_app
+        .refresh_mirrored_projects()
+        .await
+        .expect("failed refresh report");
+    assert_eq!(report.failed_project_count, 1);
+    assert_eq!(report.failures[0].project_name, "demo");
+    assert!(report.failures[0].error.contains("upstream offline"));
+}
+
+#[tokio::test]
 async fn mirrored_artifact_download_refetches_and_recaches_missing_payload() {
     let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
     let storage = Arc::new(FakeObjectStorage::default());
@@ -142,6 +205,40 @@ async fn mirrored_artifact_download_refetches_and_recaches_missing_payload() {
     assert_eq!(bytes, b"artifact-0");
     assert_eq!(mirror.fetch_count(), 2);
     assert_eq!(storage.object_count(), 1);
+}
+
+#[tokio::test]
+async fn mirrored_project_preserves_provenance_and_skips_already_cached_payloads() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_single_artifact(
+        "https://files.example.test/demo-1.0.0.tar.gz",
+        b"source archive".to_vec(),
+        Some(r#"{"source":"pypi"}"#.into()),
+    ));
+    let app = test_app(store, storage.clone(), mirror.clone(), 4);
+
+    app.resolve_project_from_mirror("acme", "demo")
+        .await
+        .expect("first mirror resolution")
+        .expect("mirrored project");
+    assert_eq!(mirror.fetch_count(), 1);
+    assert_eq!(storage.object_count(), 2);
+
+    let provenance = app
+        .get_provenance("acme", "demo", "1.0.0", "demo-1.0.0.tar.gz")
+        .await
+        .expect("mirrored provenance");
+    assert_eq!(provenance.source, "mirrored");
+    assert_eq!(provenance.payload, r#"{"source":"pypi"}"#);
+
+    app.resolve_project_from_mirror("acme", "demo")
+        .await
+        .expect("second mirror resolution")
+        .expect("mirrored project");
+    assert_eq!(mirror.project_fetch_count(), 2);
+    assert_eq!(mirror.fetch_count(), 1);
+    assert_eq!(storage.object_count(), 2);
 }
 
 #[tokio::test]
@@ -396,6 +493,19 @@ async fn validate_registry_distributions_reports_checksum_and_missing_blob_failu
             && item.status == RegistryDistributionValidationStatus::Valid
             && item.kind == Some(DistributionKind::SourceZip)
     }));
+
+    assert!(matches!(
+        app.validate_registry_distributions(
+            Arc::new(FakeDistributionInspector),
+            ValidateRegistryDistributionsCommand {
+                tenant_slug: Some("acme".into()),
+                project_name: Some("missing".into()),
+                parallelism: 1,
+            },
+        )
+        .await,
+        Err(ApplicationError::NotFound(_))
+    ));
 }
 
 #[tokio::test]
@@ -464,6 +574,182 @@ async fn validate_registry_distributions_inspects_files_in_parallel() {
         inspector.max_active() <= 2,
         "validation should respect the configured worker bound"
     );
+}
+
+#[tokio::test]
+async fn package_security_attachment_handles_scanner_edge_cases() {
+    let clean_app = test_app_with_vulnerability_scanner(Arc::new(ScenarioVulnerabilityScanner {
+        scenario: VulnerabilityScenario::MissingReport,
+    }));
+    let mut empty_release = vec![package_release("1.0.0", Vec::new())];
+    let summary = clean_app
+        .attach_package_security("Demo", "demo", &mut empty_release)
+        .await;
+    assert_eq!(summary.scanned_file_count, 0);
+    assert_eq!(summary.scan_error, None);
+
+    let failing_app = test_app_with_vulnerability_scanner(Arc::new(ScenarioVulnerabilityScanner {
+        scenario: VulnerabilityScenario::ScannerError,
+    }));
+    let mut releases = vec![package_release(
+        "1.0.0",
+        vec![package_artifact("demo-1.0.0-py3-none-any.whl")],
+    )];
+    let summary = failing_app
+        .attach_package_security("Demo", "demo", &mut releases)
+        .await;
+    assert_eq!(summary.scanned_file_count, 0);
+    assert!(
+        summary
+            .scan_error
+            .as_deref()
+            .is_some_and(|error| error.contains("offline"))
+    );
+    assert!(!releases[0].artifacts[0].security.scanned);
+
+    let missing_app = test_app_with_vulnerability_scanner(Arc::new(ScenarioVulnerabilityScanner {
+        scenario: VulnerabilityScenario::MissingReport,
+    }));
+    let mut releases = vec![package_release(
+        "1.0.0",
+        vec![package_artifact("demo-1.0.0-py3-none-any.whl")],
+    )];
+    let summary = missing_app
+        .attach_package_security("Demo", "demo", &mut releases)
+        .await;
+    assert_eq!(summary.scanned_file_count, 0);
+    assert!(
+        summary
+            .scan_error
+            .as_deref()
+            .is_some_and(|error| error.contains("did not return"))
+    );
+
+    let version_error_app =
+        test_app_with_vulnerability_scanner(Arc::new(ScenarioVulnerabilityScanner {
+            scenario: VulnerabilityScenario::VersionError,
+        }));
+    let mut releases = vec![package_release(
+        "1.0.0",
+        vec![package_artifact("demo-1.0.0-py3-none-any.whl")],
+    )];
+    let summary = version_error_app
+        .attach_package_security("Demo", "demo", &mut releases)
+        .await;
+    assert_eq!(summary.scanned_file_count, 0);
+    assert!(
+        summary
+            .scan_error
+            .as_deref()
+            .is_some_and(|error| error.contains("1.0.0"))
+    );
+
+    let vulnerable_app =
+        test_app_with_vulnerability_scanner(Arc::new(ScenarioVulnerabilityScanner {
+            scenario: VulnerabilityScenario::Vulnerable,
+        }));
+    let mut releases = vec![package_release(
+        "1.0.0",
+        vec![
+            package_artifact("demo-1.0.0-py3-none-any.whl"),
+            package_artifact("demo-1.0.0.tar.gz"),
+        ],
+    )];
+    let summary = vulnerable_app
+        .attach_package_security("Demo", "demo", &mut releases)
+        .await;
+    assert_eq!(summary.scanned_file_count, 2);
+    assert_eq!(summary.vulnerable_file_count, 2);
+    assert_eq!(summary.vulnerability_count, 2);
+    assert_eq!(summary.highest_severity.as_deref(), Some("HIGH"));
+    assert_eq!(releases[0].artifacts[0].security.vulnerability_count, 1);
+}
+
+#[tokio::test]
+async fn admin_and_publish_use_cases_report_missing_expired_and_oidc_edges() {
+    let app = test_app(
+        Arc::new(FakeRegistryStore::default()),
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(FakeMirrorClient::with_artifact_count(0)),
+        1,
+    );
+
+    let overview = app.get_registry_overview().await.expect("overview");
+    assert_eq!(overview.tenant_count, 0);
+    assert!(app.list_tenants().await.expect("tenants").is_empty());
+    assert!(matches!(
+        app.login_admin("missing@example.test", "secret").await,
+        Err(ApplicationError::Unauthorized(_))
+    ));
+    assert!(matches!(
+        app.get_tenant_dashboard("missing").await,
+        Err(ApplicationError::NotFound(_))
+    ));
+
+    app.create_tenant(CreateTenantCommand {
+        slug: "acme".into(),
+        display_name: "Acme".into(),
+        mirroring_enabled: false,
+        admin_email: "admin@acme.test".into(),
+        admin_password: "tenant-secret".into(),
+    })
+    .await
+    .expect("tenant");
+    assert_eq!(app.list_tenants().await.expect("tenants").len(), 1);
+    assert!(
+        app.list_tenant_packages("acme")
+            .await
+            .expect("packages")
+            .is_empty()
+    );
+
+    let expired = app
+        .issue_api_token(IssueApiTokenCommand {
+            tenant_slug: "acme".into(),
+            label: "expired".into(),
+            scopes: vec![TokenScope::Read],
+            ttl_hours: Some(-1),
+        })
+        .await
+        .expect("expired token");
+    assert!(matches!(
+        app.authenticate_tenant_token("acme", &expired.secret, TokenScope::Read)
+            .await,
+        Err(ApplicationError::Unauthorized(_))
+    ));
+    app.revoke_api_token("acme", "does-not-exist")
+        .await
+        .expect("missing token revocation is idempotent");
+
+    assert!(matches!(
+        app.mint_oidc_publish_token(MintOidcPublishTokenCommand {
+            tenant_slug: "acme".into(),
+            project_name: "demo-pkg".into(),
+            oidc_token: "fixture.jwt".into(),
+        })
+        .await,
+        Err(ApplicationError::Unauthorized(_))
+    ));
+
+    app.register_trusted_publisher(RegisterTrustedPublisherCommand {
+        tenant_slug: "acme".into(),
+        project_name: "demo-pkg".into(),
+        provider: TrustedPublisherProvider::GitHubActions,
+        issuer: "https://token.actions.githubusercontent.com".into(),
+        audience: "pyregistry".into(),
+        claim_rules: BTreeMap::from([("repository".into(), "another/repo".into())]),
+    })
+    .await
+    .expect("mismatched trusted publisher");
+    assert!(matches!(
+        app.mint_oidc_publish_token(MintOidcPublishTokenCommand {
+            tenant_slug: "acme".into(),
+            project_name: "demo-pkg".into(),
+            oidc_token: "fixture.jwt".into(),
+        })
+        .await,
+        Err(ApplicationError::Unauthorized(_))
+    ));
 }
 
 #[tokio::test]
@@ -858,6 +1144,48 @@ fn test_app(
     mirror: Arc<FakeMirrorClient>,
     mirror_download_concurrency: usize,
 ) -> PyregistryApp {
+    test_app_with_ports(
+        store,
+        storage,
+        mirror,
+        Arc::new(UnusedVulnerabilityScanner),
+        mirror_download_concurrency,
+    )
+}
+
+fn test_app_with_vulnerability_scanner(scanner: Arc<dyn VulnerabilityScanner>) -> PyregistryApp {
+    test_app_with_ports(
+        Arc::new(FakeRegistryStore::default()),
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(FakeMirrorClient::with_artifact_count(0)),
+        scanner,
+        1,
+    )
+}
+
+fn test_app_with_mirror(
+    store: Arc<FakeRegistryStore>,
+    storage: Arc<FakeObjectStorage>,
+    mirror: Arc<dyn MirrorClient>,
+    mirror_download_concurrency: usize,
+) -> PyregistryApp {
+    test_app_with_ports(
+        store,
+        storage,
+        mirror,
+        Arc::new(UnusedVulnerabilityScanner),
+        mirror_download_concurrency,
+    )
+}
+
+fn test_app_with_ports(
+    store: Arc<FakeRegistryStore>,
+    storage: Arc<FakeObjectStorage>,
+    mirror: Arc<dyn MirrorClient>,
+    vulnerability_scanner: Arc<dyn VulnerabilityScanner>,
+    mirror_download_concurrency: usize,
+) -> PyregistryApp {
+    init_test_logger();
     PyregistryApp::new(
         store,
         storage,
@@ -866,7 +1194,7 @@ fn test_app(
         Arc::new(UnusedAttestationSigner),
         Arc::new(UnusedPasswordHasher),
         Arc::new(UnusedTokenHasher),
-        Arc::new(UnusedVulnerabilityScanner),
+        vulnerability_scanner,
         Arc::new(UnusedWheelArchiveReader),
         Arc::new(UnusedWheelVirusScanner),
         Arc::new(UnusedWheelSourceSecurityScanner),
@@ -874,6 +1202,72 @@ fn test_app(
         Arc::new(SequentialIds::default()),
         mirror_download_concurrency,
     )
+}
+
+fn package_release(version: &str, artifacts: Vec<PackageArtifactDetails>) -> PackageReleaseDetails {
+    PackageReleaseDetails {
+        version: version.into(),
+        yanked_reason: None,
+        artifacts,
+    }
+}
+
+fn package_artifact(filename: &str) -> PackageArtifactDetails {
+    PackageArtifactDetails {
+        filename: filename.into(),
+        version: "1.0.0".into(),
+        size_bytes: 42,
+        sha256: "a".repeat(64),
+        yanked_reason: None,
+        security: crate::ArtifactSecurityDetails::pending(),
+    }
+}
+
+enum VulnerabilityScenario {
+    ScannerError,
+    MissingReport,
+    VersionError,
+    Vulnerable,
+}
+
+struct ScenarioVulnerabilityScanner {
+    scenario: VulnerabilityScenario,
+}
+
+#[async_trait]
+impl VulnerabilityScanner for ScenarioVulnerabilityScanner {
+    async fn scan_package_versions(
+        &self,
+        packages: &[PackageVulnerabilityQuery],
+    ) -> Result<Vec<PackageVulnerabilityReport>, ApplicationError> {
+        match self.scenario {
+            VulnerabilityScenario::ScannerError => Err(ApplicationError::External(
+                "advisory database offline".into(),
+            )),
+            VulnerabilityScenario::MissingReport => Ok(Vec::new()),
+            VulnerabilityScenario::VersionError => Ok(packages
+                .iter()
+                .map(|query| PackageVulnerabilityReport::failed(query, "invalid version"))
+                .collect()),
+            VulnerabilityScenario::Vulnerable => Ok(packages
+                .iter()
+                .map(|query| PackageVulnerabilityReport {
+                    package_name: query.package_name.clone(),
+                    version: query.version.clone(),
+                    vulnerabilities: vec![PackageVulnerability {
+                        id: "GHSA-demo".into(),
+                        summary: "demo vulnerability".into(),
+                        severity: "HIGH".into(),
+                        fixed_versions: vec!["1.0.1".into()],
+                        references: vec!["https://example.test/advisory".into()],
+                        source: Some("test".into()),
+                        cvss_score: Some(8.0),
+                    }],
+                    scan_error: None,
+                })
+                .collect()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1421,6 +1815,32 @@ impl FakeMirrorClient {
         }
     }
 
+    fn with_single_artifact(
+        download_url: &str,
+        bytes: Vec<u8>,
+        provenance_payload: Option<String>,
+    ) -> Self {
+        let sha256 = hex::encode(Sha256::digest(&bytes));
+        Self {
+            snapshot: MirroredProjectSnapshot {
+                canonical_name: "demo".into(),
+                summary: "Demo package".into(),
+                description: "Demo package".into(),
+                artifacts: vec![MirroredArtifactSnapshot {
+                    filename: "demo-1.0.0.tar.gz".into(),
+                    version: "1.0.0".into(),
+                    size_bytes: bytes.len() as u64,
+                    sha256,
+                    blake2b_256: None,
+                    download_url: download_url.into(),
+                    provenance_payload,
+                }],
+            },
+            bytes_by_url: HashMap::from([(download_url.into(), bytes)]),
+            counters: Mutex::new(MirrorCounters::default()),
+        }
+    }
+
     fn fetch_count(&self) -> usize {
         self.counters.lock().expect("mirror counters").fetch_count
     }
@@ -1473,6 +1893,62 @@ impl MirrorClient for FakeMirrorClient {
         counters.active_fetches -= 1;
         bytes
     }
+}
+
+struct MissingMirrorClient;
+
+#[async_trait]
+impl MirrorClient for MissingMirrorClient {
+    async fn fetch_project(
+        &self,
+        _project_name: &str,
+    ) -> Result<Option<MirroredProjectSnapshot>, ApplicationError> {
+        Ok(None)
+    }
+
+    async fn fetch_artifact_bytes(&self, _download_url: &str) -> Result<Vec<u8>, ApplicationError> {
+        Err(ApplicationError::NotFound("artifact".into()))
+    }
+}
+
+struct FailingMirrorClient;
+
+#[async_trait]
+impl MirrorClient for FailingMirrorClient {
+    async fn fetch_project(
+        &self,
+        _project_name: &str,
+    ) -> Result<Option<MirroredProjectSnapshot>, ApplicationError> {
+        Err(ApplicationError::External("upstream offline".into()))
+    }
+
+    async fn fetch_artifact_bytes(&self, _download_url: &str) -> Result<Vec<u8>, ApplicationError> {
+        Err(ApplicationError::External("upstream offline".into()))
+    }
+}
+
+static TEST_LOGGER: TestLogger = TestLogger;
+static INIT_TEST_LOGGER: Once = Once::new();
+
+struct TestLogger;
+
+impl log::Log for TestLogger {
+    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        let _ = format!("{}", record.args());
+    }
+
+    fn flush(&self) {}
+}
+
+fn init_test_logger() {
+    INIT_TEST_LOGGER.call_once(|| {
+        let _ = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(log::LevelFilter::Trace);
+    });
 }
 
 struct FixedClock;

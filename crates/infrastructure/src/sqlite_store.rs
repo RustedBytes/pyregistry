@@ -1583,6 +1583,14 @@ mod tests {
             .await
             .expect("other tenant");
         store.save_tenant(tenant.clone()).await.expect("tenant");
+        let tenants = store.list_tenants().await.expect("tenants");
+        assert_eq!(
+            tenants
+                .iter()
+                .map(|tenant| tenant.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["acme", "beta"]
+        );
 
         let admin = AdminUser {
             id: AdminUserId::new(Uuid::new_v4()),
@@ -1651,6 +1659,10 @@ mod tests {
             .await
             .expect("other project");
         assert_eq!(
+            store.list_projects(tenant.id).await.expect("projects"),
+            vec![project.clone()]
+        );
+        assert_eq!(
             store
                 .get_project_by_normalized_name(tenant.id, "demo-pkg")
                 .await
@@ -1683,6 +1695,21 @@ mod tests {
         };
         release.yank(Some("bad build".into()), now);
         store.save_release(release.clone()).await.expect("release");
+        let empty_release = Release {
+            id: ReleaseId::new(Uuid::new_v4()),
+            project_id: project.id,
+            version: ReleaseVersion::new("2.0.0").expect("version"),
+            yanked: None,
+            created_at: now + Duration::minutes(1),
+        };
+        store
+            .save_release(empty_release.clone())
+            .await
+            .expect("empty release");
+        assert_eq!(
+            store.list_releases(project.id).await.expect("releases"),
+            vec![empty_release.clone(), release.clone()]
+        );
         assert_eq!(
             store
                 .get_release_by_version(project.id, &release.version)
@@ -1708,6 +1735,20 @@ mod tests {
             .save_artifact(artifact.clone())
             .await
             .expect("artifact");
+        assert_eq!(
+            store.list_artifacts(release.id).await.expect("artifacts"),
+            vec![artifact.clone()]
+        );
+        let release_artifacts = store
+            .list_release_artifacts(project.id)
+            .await
+            .expect("release artifacts");
+        assert_eq!(release_artifacts.len(), 2);
+        assert!(
+            release_artifacts
+                .iter()
+                .any(|group| group.release.id == empty_release.id && group.artifacts.is_empty())
+        );
         assert_eq!(
             store
                 .get_artifact_by_filename(release.id, &artifact.filename)
@@ -1755,6 +1796,14 @@ mod tests {
                 .await
                 .expect("publishers"),
             vec![publisher]
+        );
+        assert_eq!(
+            store
+                .list_trusted_publishers(tenant.id, "")
+                .await
+                .expect("all publishers")
+                .len(),
+            1
         );
 
         let first_event = AuditEvent::new(
@@ -1819,10 +1868,127 @@ mod tests {
             .await
             .expect("delete release");
         store
+            .delete_release(empty_release.id)
+            .await
+            .expect("delete empty release");
+        store
             .delete_project(project.id)
             .await
             .expect("delete project");
 
         let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_reports_boundary_conversion_errors() {
+        let path = std::env::temp_dir().join(format!("pyregistry-{}.sqlite3", Uuid::new_v4()));
+        let store = SqliteRegistryStore::open(&path).expect("open sqlite store");
+        let now = Utc::now();
+        let tenant = Tenant::new(
+            TenantId::new(Uuid::new_v4()),
+            TenantSlug::new("acme").expect("tenant slug"),
+            "Acme Corp",
+            MirrorRule { enabled: true },
+            now,
+        )
+        .expect("tenant");
+        store.save_tenant(tenant.clone()).await.expect("tenant");
+        let project = Project::new(
+            ProjectId::new(Uuid::new_v4()),
+            tenant.id,
+            ProjectName::new("Demo").expect("project name"),
+            ProjectSource::Local,
+            "summary",
+            "description",
+            now,
+        );
+        store.save_project(project.clone()).await.expect("project");
+        let release = Release {
+            id: ReleaseId::new(Uuid::new_v4()),
+            project_id: project.id,
+            version: ReleaseVersion::new("1.0.0").expect("version"),
+            yanked: None,
+            created_at: now,
+        };
+        store.save_release(release.clone()).await.expect("release");
+        let mut too_large = Artifact::new(
+            ArtifactId::new(Uuid::new_v4()),
+            release.id,
+            "demo-1.0.0-py3-none-any.whl",
+            1,
+            DigestSet::new("a".repeat(64), None).expect("digest"),
+            "objects/demo.whl",
+            now,
+        )
+        .expect("artifact");
+        too_large.size_bytes = i64::MAX as u64 + 1;
+
+        let error = store
+            .save_artifact(too_large)
+            .await
+            .expect_err("oversized artifact should fail");
+
+        assert!(error.to_string().contains("too large"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parses_sqlite_metadata_helpers_and_rejects_invalid_values() {
+        assert_eq!(escape_like_pattern(r"demo\_%"), r"demo\\\_\%");
+        assert!(parse_json::<BTreeMap<String, String>>("not json".into(), 7).is_err());
+        assert!(parse_uuid("not-a-uuid".into(), 8).is_err());
+        assert!(parse_datetime("not-a-date".into(), 9).is_err());
+        let digest_result: rusqlite::Result<DigestSet> =
+            domain_value(DigestSet::new("not-a-digest", None), 10);
+        assert!(digest_result.is_err());
+        assert!(
+            parse_publish_identity(
+                Some("issuer".into()),
+                None,
+                Some("audience".into()),
+                Some("gitlab".into()),
+                None,
+            )
+            .is_err()
+        );
+        assert!(parse_scopes_json(r#"["owner"]"#.into(), 11).is_err());
+        assert!(parse_project_source("remote".into(), 12).is_err());
+        assert!(parse_artifact_kind("egg".into(), 13).is_err());
+        assert!(parse_provider("bitbucket".into(), 14).is_err());
+        assert!(parse_attestation_source("custom".into(), 15).is_err());
+        assert!(
+            parse_yank(Some("legacy".into()), None, 16)
+                .expect("legacy yank")
+                .is_some()
+        );
+        assert!(
+            invalid_enum(17, "thing", "value".into())
+                .to_string()
+                .contains("thing")
+        );
+
+        assert_eq!(
+            artifact_kind_str(&ArtifactKind::SourceDistribution),
+            "sdist"
+        );
+        assert_eq!(
+            provider_str(&TrustedPublisherProvider::GitHubActions),
+            "github-actions"
+        );
+        assert_eq!(
+            attestation_source_str(&AttestationSource::TrustedPublish),
+            "trusted-publish"
+        );
+        assert!(
+            sqlite_error(rusqlite::Error::InvalidQuery)
+                .to_string()
+                .contains("sqlite metadata store failure")
+        );
+        let json_failure = serde_json::from_str::<usize>("not json").expect_err("invalid JSON");
+        assert!(
+            json_error(json_failure)
+                .to_string()
+                .contains("could not serialize sqlite metadata JSON")
+        );
     }
 }

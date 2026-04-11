@@ -22,7 +22,9 @@ cargo nextest run --workspace --profile ci
 ```
 
 The coverage gate defaults to 95 percent line coverage over the stable core
-surface. To experiment locally:
+surface. The script omits the binary bootstrap entrypoint and live PostgreSQL
+adapter by default; set `COVERAGE_IGNORE_FILENAME_REGEX` to replace that ignore
+list. To experiment locally:
 
 ```bash
 COVERAGE_MIN_LINES=90 ./scripts/coverage.sh

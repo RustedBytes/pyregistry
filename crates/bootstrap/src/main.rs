@@ -12,9 +12,10 @@ use pyregistry_application::{
     WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport, WheelAuditUseCase,
 };
 use pyregistry_infrastructure::{
-    ArtifactDownloadRetryPolicy, FilesystemDistributionInspector,
-    FoxGuardWheelSourceSecurityScanner, LoggingConfig, LoggingTimestamp, PypiMirrorClient,
-    Settings, YaraWheelVirusScanner, ZipWheelArchiveReader, build_application, seed_application,
+    ArtifactDownloadRetryPolicy, ArtifactStorageBackend, DatabaseStoreKind,
+    FilesystemDistributionInspector, FoxGuardWheelSourceSecurityScanner, LoggingConfig,
+    LoggingTimestamp, PypiMirrorClient, Settings, YaraWheelVirusScanner, ZipWheelArchiveReader,
+    build_application, seed_application,
 };
 use pyregistry_web::{
     AppState, MirrorJobs, RateLimitConfig as WebRateLimitConfig, RateLimiter, router,
@@ -980,6 +981,9 @@ mod tests {
         DistributionInspection, DistributionKind, PackageSecuritySummary,
         RegistryPackageSecurityReport, WheelSourceSecurityScanSummary, WheelVirusScanSummary,
     };
+    use std::io::{Cursor, Write};
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     fn unique_suffix() -> String {
         format!(
@@ -990,6 +994,17 @@ mod tests {
                 .expect("system clock")
                 .as_nanos()
         )
+    }
+
+    fn in_memory_settings() -> Settings {
+        let mut settings = Settings::new_local_template();
+        settings.database_store = DatabaseStoreKind::InMemory;
+        settings.sqlite = None;
+        settings.blob_root =
+            std::env::temp_dir().join(format!("pyregistry-cli-blobs-{}", unique_suffix()));
+        settings.artifact_storage.backend = ArtifactStorageBackend::FileSystem;
+        settings.pypi.mirror_update_enabled = false;
+        settings
     }
 
     #[test]
@@ -1178,6 +1193,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_commands_succeed_for_empty_in_memory_registry() {
+        let settings = in_memory_settings();
+
+        check_registry(settings.clone(), "test settings".into(), None, None)
+            .await
+            .expect("empty registry security check");
+        validate_registry_distributions(
+            settings.clone(),
+            "test settings".into(),
+            None,
+            None,
+            Some(1),
+        )
+        .await
+        .expect("empty registry distribution validation");
+
+        let _ = std::fs::remove_dir_all(settings.blob_root);
+    }
+
+    #[tokio::test]
     async fn ensure_wheel_is_available_accepts_existing_local_file() {
         let path = std::env::temp_dir().join(format!("pyregistry-cli-{}.whl", unique_suffix()));
         std::fs::write(&path, b"not a real wheel, only an existence check").expect("wheel file");
@@ -1187,6 +1222,67 @@ mod tests {
             .expect("local wheel");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ensure_wheel_is_available_rejects_missing_path_without_filename() {
+        let error =
+            ensure_wheel_is_available("demo", Path::new(""), &Settings::new_local_template())
+                .await
+                .expect_err("empty path has no downloadable filename");
+
+        assert!(error.to_string().contains("does not contain a file name"));
+    }
+
+    #[test]
+    fn validate_distribution_accepts_matching_checksum_and_rejects_mismatch() {
+        let bytes = build_source_zip_bytes();
+        let path = std::env::temp_dir().join(format!("pyregistry-cli-{}.zip", unique_suffix()));
+        std::fs::write(&path, &bytes).expect("write zip");
+
+        validate_distribution(path.clone(), None).expect("valid distribution");
+        let error = validate_distribution(path.clone(), Some("a".repeat(64)))
+            .expect_err("checksum mismatch should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("distribution checksum validation failed")
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn mirror_updater_respects_disabled_config_and_shutdown_signal() {
+        let mut settings = in_memory_settings();
+        let app = build_application(&settings)
+            .await
+            .expect("build test application");
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        assert!(spawn_mirror_updater(app.clone(), &settings, shutdown_rx).is_none());
+
+        settings.pypi.mirror_update_enabled = true;
+        settings.pypi.mirror_update_on_startup = false;
+        settings.pypi.mirror_update_interval_seconds = 3600;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle =
+            spawn_mirror_updater(app, &settings, shutdown_rx).expect("mirror updater task");
+        shutdown_tx.send(true).expect("send shutdown");
+        wait_for_mirror_updater(Some(handle)).await;
+
+        let _ = std::fs::remove_dir_all(settings.blob_root);
+    }
+
+    #[tokio::test]
+    async fn force_http_shutdown_returns_when_shutdown_channel_closes() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(force_http_shutdown_after_signal(
+            shutdown_rx,
+            Duration::from_secs(60),
+        ));
+        drop(shutdown_tx);
+
+        task.await.expect("forced shutdown task");
     }
 
     #[test]
@@ -1375,5 +1471,23 @@ mod tests {
             },
             Duration::from_millis(25),
         );
+    }
+
+    fn build_source_zip_bytes() -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = ZipWriter::new(&mut cursor);
+            writer
+                .start_file(
+                    "demo_pkg-0.1.0/pyproject.toml",
+                    SimpleFileOptions::default(),
+                )
+                .expect("start pyproject");
+            writer
+                .write_all(b"[project]\nname = \"demo-pkg\"\n")
+                .expect("write pyproject");
+            writer.finish().expect("finish zip");
+        }
+        cursor.into_inner()
     }
 }

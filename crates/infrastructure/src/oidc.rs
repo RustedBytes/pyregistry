@@ -177,6 +177,8 @@ fn parse_claims_unverified(token: &str) -> Result<JwtClaims, ApplicationError> {
 mod tests {
     use super::*;
     use pyregistry_domain::TrustedPublisherProvider;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     fn unsigned_token(payload: serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -286,5 +288,77 @@ mod tests {
             verifier.verify(&token, "pyregistry").await,
             Err(ApplicationError::Unauthorized(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn verifier_rejects_jwks_without_matching_rsa_key() {
+        let (jwks_url, server) = serve_jwks(r#"{"keys":[{"kid":"other","kty":"RSA"}]}"#).await;
+        let verifier = SimpleJwksOidcVerifier::new(vec![OidcIssuerConfig {
+            provider: TrustedPublisherProvider::GitHubActions,
+            issuer: "https://issuer.example".into(),
+            jwks_url,
+            audience: "pyregistry".into(),
+        }]);
+        let token = unsigned_token(serde_json::json!({
+            "iss": "https://issuer.example",
+            "sub": "repo:acme/demo",
+            "aud": "pyregistry"
+        }));
+
+        let error = verifier
+            .verify(&token, "pyregistry")
+            .await
+            .expect_err("JWKS key should not match");
+
+        assert!(matches!(error, ApplicationError::Unauthorized(_)));
+        assert!(error.to_string().contains("matching JWKS key"));
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn verifier_requires_rsa_modulus_and_exponent() {
+        let (jwks_url, server) = serve_jwks(r#"{"keys":[{"kid":"test","kty":"RSA"}]}"#).await;
+        let verifier = SimpleJwksOidcVerifier::new(vec![OidcIssuerConfig {
+            provider: TrustedPublisherProvider::GitLab,
+            issuer: "https://issuer.example".into(),
+            jwks_url,
+            audience: "pyregistry".into(),
+        }]);
+        let token = unsigned_token(serde_json::json!({
+            "iss": "https://issuer.example",
+            "sub": "project_path:acme/demo",
+            "aud": "pyregistry"
+        }));
+
+        let error = verifier
+            .verify(&token, "pyregistry")
+            .await
+            .expect_err("JWKS key is incomplete");
+
+        assert!(matches!(error, ApplicationError::Unauthorized(_)));
+        assert!(error.to_string().contains("modulus"));
+        server.await.expect("server task");
+    }
+
+    async fn serve_jwks(body: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind JWKS listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept JWKS request");
+            let mut buffer = [0_u8; 1024];
+            let _ = socket.read(&mut buffer).await.expect("read JWKS request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write JWKS response");
+        });
+        (format!("http://{address}/jwks"), server)
     }
 }

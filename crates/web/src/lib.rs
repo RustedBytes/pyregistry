@@ -113,11 +113,14 @@ mod tests {
         ApplicationError, AttestationSigner, Clock, CreateTenantCommand, IdGenerator,
         IssueApiTokenCommand, MirrorClient, MirroredProjectSnapshot, ObjectStorage, OidcVerifier,
         PackageVulnerabilityQuery, PackageVulnerabilityReport, PasswordHasher, PyregistryApp,
-        TokenHasher, VulnerabilityScanner, WheelArchiveEntry, WheelArchiveReader,
-        WheelArchiveSnapshot, WheelSourceSecurityScanResult, WheelSourceSecurityScanner,
-        WheelVirusScanResult, WheelVirusScanner,
+        RegisterTrustedPublisherCommand, TokenHasher, UploadArtifactCommand, VulnerabilityScanner,
+        WheelArchiveEntry, WheelArchiveReader, WheelArchiveSnapshot, WheelSourceSecurityScanResult,
+        WheelSourceSecurityScanner, WheelVirusScanResult, WheelVirusScanner,
     };
-    use pyregistry_domain::{Artifact, ProjectName, PublishIdentity, ReleaseVersion, TokenScope};
+    use pyregistry_domain::{
+        Artifact, ProjectName, PublishIdentity, ReleaseVersion, TokenScope,
+        TrustedPublisherProvider,
+    };
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::RwLock;
     use tower::ServiceExt;
@@ -173,6 +176,30 @@ mod tests {
             _audience: &str,
         ) -> Result<PublishIdentity, ApplicationError> {
             Err(ApplicationError::Unauthorized("invalid OIDC token".into()))
+        }
+    }
+
+    struct AcceptingOidcVerifier;
+
+    #[async_trait::async_trait]
+    impl OidcVerifier for AcceptingOidcVerifier {
+        async fn verify(
+            &self,
+            _token: &str,
+            audience: &str,
+        ) -> Result<PublishIdentity, ApplicationError> {
+            Ok(PublishIdentity {
+                issuer: "https://token.actions.githubusercontent.com".into(),
+                subject: "repo:acme/demo-pkg:ref:refs/heads/main".into(),
+                audience: audience.to_string(),
+                provider: TrustedPublisherProvider::GitHubActions,
+                claims: HashMap::from([
+                    ("repository".into(), "acme/demo-pkg".into()),
+                    ("ref".into(), "refs/heads/main".into()),
+                ])
+                .into_iter()
+                .collect(),
+            })
         }
     }
 
@@ -316,13 +343,17 @@ mod tests {
     }
 
     async fn state() -> AppState {
+        state_with_oidc(Arc::new(RejectingOidcVerifier)).await
+    }
+
+    async fn state_with_oidc(oidc_verifier: Arc<dyn OidcVerifier>) -> AppState {
         let app = Arc::new(PyregistryApp::new(
             Arc::new(pyregistry_infrastructure::InMemoryRegistryStore::default()),
             Arc::new(MemoryObjectStorage {
                 objects: RwLock::new(HashMap::new()),
             }),
             Arc::new(EmptyMirrorClient),
-            Arc::new(RejectingOidcVerifier),
+            oidc_verifier,
             Arc::new(TestAttestationSigner),
             Arc::new(PlainPasswordHasher),
             Arc::new(PlainTokenHasher),
@@ -593,6 +624,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn package_api_lists_projects_serves_provenance_and_mints_oidc_tokens() {
+        let state = state_with_oidc(Arc::new(AcceptingOidcVerifier)).await;
+        state
+            .app
+            .register_trusted_publisher(RegisterTrustedPublisherCommand {
+                tenant_slug: "acme".into(),
+                project_name: "Demo_Pkg".into(),
+                provider: TrustedPublisherProvider::GitHubActions,
+                issuer: "https://token.actions.githubusercontent.com".into(),
+                audience: "pyregistry".into(),
+                claim_rules: HashMap::from([
+                    ("repository".into(), "acme/demo-pkg".into()),
+                    ("ref".into(), "refs/heads/main".into()),
+                ])
+                .into_iter()
+                .collect(),
+            })
+            .await
+            .expect("trusted publisher");
+        let read_publish_auth =
+            basic_token(&issue_token(&state, vec![TokenScope::Read, TokenScope::Publish]).await);
+        let oidc_grant = state
+            .app
+            .mint_oidc_publish_token(pyregistry_application::MintOidcPublishTokenCommand {
+                tenant_slug: "acme".into(),
+                project_name: "Demo_Pkg".into(),
+                oidc_token: "good.jwt".into(),
+            })
+            .await
+            .expect("OIDC grant");
+        let trusted_access = state
+            .app
+            .authenticate_tenant_token("acme", &oidc_grant.token, TokenScope::Publish)
+            .await
+            .expect("trusted access");
+        state
+            .app
+            .upload_artifact(
+                &trusted_access,
+                UploadArtifactCommand {
+                    tenant_slug: "acme".into(),
+                    project_name: "Demo_Pkg".into(),
+                    version: "2.0.0".into(),
+                    filename: "demo_pkg-2.0.0-py3-none-any.whl".into(),
+                    summary: "A demo package".into(),
+                    description: "Trusted publish".into(),
+                    content: b"trusted wheel bytes".to_vec(),
+                },
+            )
+            .await
+            .expect("trusted upload");
+        let app = router(state);
+        upload_demo_package(app.clone(), &read_publish_auth).await;
+
+        let index = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/t/acme/simple/")
+                    .header(header::AUTHORIZATION, read_publish_auth.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("index response");
+        assert_eq!(index.status(), StatusCode::OK);
+        assert!(body_text(index).await.contains("Demo_Pkg"));
+
+        let provenance = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/t/acme/provenance/demo-pkg/2.0.0/demo_pkg-2.0.0-py3-none-any.whl")
+                    .header(header::AUTHORIZATION, read_publish_auth)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("provenance response");
+        assert_eq!(provenance.status(), StatusCode::OK);
+        assert!(body_text(provenance).await.contains("token.actions"));
+
+        let mint = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/_/oidc/mint-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"tenant_slug":"acme","project_name":"Demo_Pkg","oidc_token":"good.jwt"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("mint response");
+        assert_eq!(mint.status(), StatusCode::OK);
+        assert!(body_text(mint).await.contains("oidc_"));
+    }
+
+    #[tokio::test]
     async fn admin_login_sets_session_cookie_and_dashboard_uses_it() {
         let app = router(state().await);
 
@@ -622,6 +753,84 @@ mod tests {
             .expect("response");
         assert_eq!(dashboard.status(), StatusCode::OK);
         assert!(body_text(dashboard).await.contains("Dashboard"));
+    }
+
+    #[tokio::test]
+    async fn admin_rejects_bad_sessions_and_logout_expires_cookie() {
+        let app = router(state().await);
+
+        let bad_login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "email=admin%40pyregistry.local&password=wrong-password",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("bad login");
+        assert_eq!(bad_login.status(), StatusCode::OK);
+        assert!(
+            body_text(bad_login)
+                .await
+                .contains("Invalid email or password")
+        );
+
+        let missing_cookie = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/dashboard")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("missing cookie response");
+        assert_eq!(missing_cookie.status(), StatusCode::UNAUTHORIZED);
+
+        let expired_cookie = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/dashboard")
+                    .header(header::COOKIE, "admin_session=missing")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("expired cookie response");
+        assert_eq!(expired_cookie.status(), StatusCode::UNAUTHORIZED);
+
+        let cookie = login_cookie(app.clone()).await;
+        let logout = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/logout")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("logout response");
+        assert_eq!(logout.status(), StatusCode::SEE_OTHER);
+
+        let after_logout = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/dashboard")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("after logout response");
+        assert_eq!(after_logout.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -702,6 +911,168 @@ mod tests {
             .await
             .expect("mirror response");
         assert_eq!(mirror.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn tenant_admin_cannot_manage_other_tenants_or_create_tenants() {
+        let app = router(state().await);
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "email=tenant-admin%40acme.local&password=change-me-now",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("tenant login");
+        assert_eq!(login.status(), StatusCode::SEE_OTHER);
+        let cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("set-cookie")
+            .to_str()
+            .expect("cookie")
+            .split(';')
+            .next()
+            .expect("cookie pair")
+            .to_string();
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/tenants")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "slug=beta&display_name=Beta&admin_email=admin%40beta.test&admin_password=secret",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create response");
+        assert_eq!(create.status(), StatusCode::FORBIDDEN);
+
+        let token = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/beta/tokens")
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("label=ci&ttl_hours=&scopes=read"))
+                    .expect("request"),
+            )
+            .await
+            .expect("token response");
+        assert_eq!(token.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_search_renders_metrics_audit_and_mirror_jobs() {
+        let state = state().await;
+        state.mirror_jobs.write().await.insert(
+            "acme:demo".into(),
+            crate::state::MirrorJobStatus::queued("acme".into(), "demo".into()),
+        );
+        state
+            .app
+            .record_audit_event(pyregistry_application::RecordAuditEventCommand {
+                actor: "admin@pyregistry.local".into(),
+                action: "dashboard.view".into(),
+                tenant_slug: Some("acme".into()),
+                target: Some("demo".into()),
+                metadata: HashMap::from([("source".into(), "test".into())])
+                    .into_iter()
+                    .collect(),
+            })
+            .await
+            .expect("audit event");
+        let app = router(state);
+        let cookie = login_cookie(app.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/search?tenant=acme&q=demo")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("search response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("Queued"));
+        assert!(body.contains("dashboard.view"));
+    }
+
+    #[tokio::test]
+    async fn admin_mirror_cache_tracks_background_job_and_duplicate_requests() {
+        let state = state().await;
+        let jobs = state.mirror_jobs.clone();
+        let app = router(state);
+        let cookie = login_cookie(app.clone()).await;
+
+        let started = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/mirror-cache")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("project_name=Demo"))
+                    .expect("request"),
+            )
+            .await
+            .expect("mirror response");
+        assert_eq!(started.status(), StatusCode::OK);
+        assert!(body_text(started).await.contains("Mirror sync started"));
+
+        for _ in 0..20 {
+            let done = jobs
+                .read()
+                .await
+                .get("acme:demo")
+                .is_some_and(|job| !job.is_active());
+            if done {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            jobs.read()
+                .await
+                .get("acme:demo")
+                .is_some_and(|job| !job.is_active())
+        );
+
+        jobs.write().await.insert(
+            "acme:demo".into(),
+            crate::state::MirrorJobStatus::running("acme".into(), "Demo".into()),
+        );
+        let duplicate = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/mirror-cache")
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("project_name=Demo"))
+                    .expect("request"),
+            )
+            .await
+            .expect("duplicate response");
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        assert!(body_text(duplicate).await.contains("already running"));
     }
 
     #[tokio::test]
@@ -850,16 +1221,31 @@ mod tests {
         assert!(body_text(scan).await.contains("Wheel audit"));
 
         let purge_artifact = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/admin/t/acme/packages/demo-pkg/releases/1.0.0/artifacts/demo_pkg-1.0.0-py3-none-any.whl/purge")
-                    .header(header::COOKIE, cookie)
+                    .header(header::COOKIE, cookie.clone())
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("purge artifact");
         assert_eq!(purge_artifact.status(), StatusCode::SEE_OTHER);
+
+        upload_demo_package(app.clone(), &auth).await;
+        let purge_release = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/demo-pkg/releases/1.0.0/purge")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("purge release");
+        assert_eq!(purge_release.status(), StatusCode::SEE_OTHER);
     }
 }

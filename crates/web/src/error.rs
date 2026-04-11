@@ -62,7 +62,7 @@ pub(crate) fn bad_request(message: &str) -> WebError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use askama::{FastWritable, Values};
+    use askama::{FastWritable, NO_VALUES, Values};
     use axum::body::to_bytes;
     use pyregistry_domain::DomainError;
     use std::fmt;
@@ -181,6 +181,15 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!error.message.is_empty());
+    }
+
+    #[test]
+    fn failing_template_reports_display_and_fast_write_errors() {
+        let mut rendered = String::new();
+        assert!(fmt::write(&mut rendered, format_args!("{}", FailingTemplate)).is_err());
+
+        let mut rendered = String::new();
+        assert!(FastWritable::write_into(&FailingTemplate, &mut rendered, NO_VALUES).is_err());
     }
 
     #[test]

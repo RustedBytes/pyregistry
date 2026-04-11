@@ -297,6 +297,7 @@ mod tests {
     use std::io::{Cursor, Write};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tar::{Builder, Header};
+    use uuid::Uuid;
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
 
@@ -333,6 +334,42 @@ mod tests {
 
         fs::remove_file(&path).expect("remove temp wheel");
         assert!(matches!(error, ApplicationError::External(_)));
+    }
+
+    #[test]
+    fn rejects_empty_or_metadata_incomplete_wheel_archives() {
+        let empty = build_zip_bytes(&[]);
+        let error = FilesystemDistributionInspector
+            .inspect_distribution_bytes("empty-0.1.0-py3-none-any.whl", &empty)
+            .expect_err("empty wheel should fail");
+        assert!(error.to_string().contains("empty"));
+
+        let directory_only = build_zip_bytes(&[ZipFixtureEntry::dir("demo_pkg/")]);
+        let error = FilesystemDistributionInspector
+            .inspect_distribution_bytes("dirs-0.1.0-py3-none-any.whl", &directory_only)
+            .expect_err("directory-only wheel should fail");
+        assert!(error.to_string().contains("does not contain files"));
+
+        let missing_wheel = build_zip_bytes(&[ZipFixtureEntry::file(
+            "demo_pkg-0.1.0.dist-info/METADATA",
+            b"Name: demo-pkg\n",
+        )]);
+        let error = FilesystemDistributionInspector
+            .inspect_distribution_bytes("missing-wheel-0.1.0-py3-none-any.whl", &missing_wheel)
+            .expect_err("missing WHEEL should fail");
+        assert!(error.to_string().contains("WHEEL"));
+
+        let missing_metadata = build_zip_bytes(&[ZipFixtureEntry::file(
+            "demo_pkg-0.1.0.dist-info/WHEEL",
+            b"Wheel-Version: 1.0\n",
+        )]);
+        let error = FilesystemDistributionInspector
+            .inspect_distribution_bytes(
+                "missing-metadata-0.1.0-py3-none-any.whl",
+                &missing_metadata,
+            )
+            .expect_err("missing METADATA should fail");
+        assert!(error.to_string().contains("METADATA"));
     }
 
     #[test]
@@ -417,6 +454,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_empty_source_archives() {
+        let empty_zip = build_zip_bytes(&[]);
+        let error = FilesystemDistributionInspector
+            .inspect_distribution_bytes("demo_pkg-0.1.0.zip", &empty_zip)
+            .expect_err("empty source zip should fail");
+        assert!(error.to_string().contains("empty"));
+
+        let directory_only_zip = build_zip_bytes(&[ZipFixtureEntry::dir("demo_pkg-0.1.0/")]);
+        let error = FilesystemDistributionInspector
+            .inspect_distribution_bytes("demo_pkg-0.1.0.zip", &directory_only_zip)
+            .expect_err("directory-only source zip should fail");
+        assert!(error.to_string().contains("does not contain files"));
+
+        let empty_tar = build_tar_gz_bytes(&[]);
+        let error = FilesystemDistributionInspector
+            .inspect_distribution_bytes("demo_pkg-0.1.0.tar.gz", &empty_tar)
+            .expect_err("empty source tar should fail");
+        assert!(error.to_string().contains("does not contain files"));
+    }
+
+    #[test]
     fn rejects_unsupported_distribution_extension() {
         let path = write_temp_file("demo_pkg-0.1.0.exe", b"not supported here");
 
@@ -428,13 +486,46 @@ mod tests {
         assert!(matches!(error, ApplicationError::Conflict(_)));
     }
 
+    #[test]
+    fn rejects_paths_without_regular_distribution_files() {
+        let unnamed_error = FilesystemDistributionInspector
+            .inspect_distribution(Path::new(""))
+            .expect_err("empty path should fail");
+        assert!(unnamed_error.to_string().contains("valid UTF-8 file name"));
+
+        let dir_path =
+            std::env::temp_dir().join(format!("pyregistry-dist-dir-{}.whl", Uuid::new_v4()));
+        fs::create_dir(&dir_path).expect("create directory");
+        let dir_error = FilesystemDistributionInspector
+            .inspect_distribution(&dir_path)
+            .expect_err("directory should not validate as a wheel");
+        assert!(dir_error.to_string().contains("not a regular file"));
+        fs::remove_dir(&dir_path).expect("remove temp directory");
+    }
+
+    #[test]
+    fn rejects_source_tar_archives_that_only_contain_directories() {
+        let bytes = build_tar_gz_directory_bytes("demo_pkg-0.1.0/");
+
+        let error = FilesystemDistributionInspector
+            .inspect_distribution_bytes("demo_pkg-0.1.0.tar.gz", &bytes)
+            .expect_err("directory-only source tar should fail");
+
+        assert!(error.to_string().contains("does not contain files"));
+    }
+
     enum ZipFixtureEntry<'a> {
         File(&'a str, &'a [u8]),
+        Dir(&'a str),
     }
 
     impl<'a> ZipFixtureEntry<'a> {
         fn file(path: &'a str, contents: &'a [u8]) -> Self {
             Self::File(path, contents)
+        }
+
+        fn dir(path: &'a str) -> Self {
+            Self::Dir(path)
         }
     }
 
@@ -449,6 +540,11 @@ mod tests {
                             .start_file(*path, SimpleFileOptions::default())
                             .expect("start zip file");
                         writer.write_all(contents).expect("write zip contents");
+                    }
+                    ZipFixtureEntry::Dir(path) => {
+                        writer
+                            .add_directory(*path, SimpleFileOptions::default())
+                            .expect("add zip directory");
                     }
                 }
             }
@@ -469,6 +565,22 @@ mod tests {
                 .append(&header, *contents)
                 .expect("append tar entry");
         }
+
+        let encoder = builder.into_inner().expect("finish tar builder");
+        encoder.finish().expect("finish gzip stream")
+    }
+
+    fn build_tar_gz_directory_bytes(path: &str) -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = Builder::new(encoder);
+        let mut header = Header::new_gnu();
+        header.set_path(path).expect("set tar path");
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_cksum();
+        builder
+            .append(&header, std::io::empty())
+            .expect("append tar directory");
 
         let encoder = builder.into_inner().expect("finish tar builder");
         encoder.finish().expect("finish gzip stream")

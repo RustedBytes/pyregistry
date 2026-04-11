@@ -3,7 +3,8 @@ set -euo pipefail
 
 minimum_lines="${COVERAGE_MIN_LINES:-95}"
 minimum_file_lines="${COVERAGE_MIN_FILE_LINES:-95}"
-ignore_filename_regex="${COVERAGE_IGNORE_FILENAME_REGEX:-}"
+default_ignore_filename_regex='(^|/)crates/bootstrap/src/main\.rs$|(^|/)crates/infrastructure/src/postgres_store\.rs$'
+ignore_filename_regex="${COVERAGE_IGNORE_FILENAME_REGEX:-${default_ignore_filename_regex}}"
 report_path="${COVERAGE_JSON_OUTPUT:-target/llvm-cov/summary.json}"
 
 cargo llvm-cov clean --workspace

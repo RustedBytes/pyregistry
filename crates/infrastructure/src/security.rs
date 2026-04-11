@@ -293,6 +293,42 @@ mod tests {
     }
 
     #[test]
+    fn scanner_defaults_and_severity_labels_are_stable() {
+        let cache_dir =
+            std::env::temp_dir().join(format!("pyregistry-pysentry-config-{}", Uuid::new_v4()));
+        let scanner = PySentryVulnerabilityScanner::new(cache_dir.clone());
+
+        assert_eq!(scanner.cache_dir, cache_dir);
+        assert_eq!(scanner.vulnerability_ttl_hours, 48);
+        assert!(matches!(scanner.source_type, VulnerabilitySourceType::Pypa));
+
+        let cases = [
+            (Severity::Low, None, "LOW"),
+            (Severity::Medium, None, "MEDIUM"),
+            (Severity::High, None, "HIGH"),
+            (Severity::Critical, None, "CRITICAL"),
+            (Severity::Unknown, None, "UNKNOWN"),
+            (Severity::Unknown, Some(0.1), "LOW"),
+            (Severity::Unknown, Some(4.0), "MEDIUM"),
+            (Severity::Unknown, Some(7.0), "HIGH"),
+            (Severity::Unknown, Some(9.0), "CRITICAL"),
+            (Severity::Low, Some(9.8), "LOW"),
+            (Severity::Medium, Some(9.8), "MEDIUM"),
+            (Severity::Critical, Some(0.1), "CRITICAL"),
+        ];
+
+        for (severity, cvss_score, expected) in cases {
+            assert_eq!(severity_label(severity, cvss_score), expected);
+        }
+
+        let query = PackageVulnerabilityQuery {
+            package_name: "Demo-Pkg".into(),
+            version: "1.2.3".into(),
+        };
+        assert_eq!(query_key(&query), ("Demo-Pkg".into(), "1.2.3".into()));
+    }
+
+    #[test]
     fn maps_pysentry_vulnerability_matches_to_application_dtos() {
         let vulnerability = pysentry::vulnerability::database::Vulnerability {
             id: "GHSA-demo".into(),

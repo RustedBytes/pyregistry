@@ -312,4 +312,29 @@ mod tests {
                 .contains("Missing token")
         );
     }
+
+    #[test]
+    fn rejects_invalid_utf8_and_blank_legacy_username_payloads() {
+        let mut headers = HeaderMap::new();
+        let encoded = base64::engine::general_purpose::STANDARD.encode([0xff]);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {encoded}")).expect("header"),
+        );
+        assert!(
+            extract_basic_secret(&headers)
+                .expect_err("invalid UTF-8")
+                .message
+                .contains("payload")
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, basic_header("   :"));
+        assert!(
+            extract_basic_secret(&headers)
+                .expect_err("blank username")
+                .message
+                .contains("Missing token")
+        );
+    }
 }

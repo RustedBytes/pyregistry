@@ -1217,15 +1217,18 @@ fn forwarded_value<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        attachment_content_disposition, authenticated_index_url, default_scheme_for,
-        package_detail_view, parse_issue_token_form, parse_optional_ttl_hours,
+        artifact_security_view, attachment_content_disposition, audit_heading,
+        authenticated_index_url, default_scheme_for, format_wheel_audit_report_text,
+        forwarded_value, package_detail_view, parse_issue_token_form, parse_optional_ttl_hours,
+        registry_base_url,
     };
     use crate::models::PackageDetailTemplate;
     use askama::Template;
-    use axum::http::StatusCode;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
     use pyregistry_application::{
         ArtifactSecurityDetails, PackageArtifactDetails, PackageDetails, PackageReleaseDetails,
-        PackageSecuritySummary,
+        PackageSecuritySummary, PackageVulnerability, WheelAuditFinding, WheelAuditFindingKind,
+        WheelAuditReport, WheelSourceSecurityScanSummary, WheelVirusScanSummary,
     };
 
     #[test]
@@ -1251,7 +1254,7 @@ mod tests {
     #[test]
     fn parses_issue_token_form_with_repeated_scopes_and_blank_ttl() {
         let form = parse_issue_token_form(
-            b"label=CI+token&ttl_hours=&scopes=read&scopes=publish&scopes=admin",
+            b"label=CI+token&ttl_hours=&scopes=read&ignored=value&scopes=publish&scopes=admin",
         )
         .expect("form");
 
@@ -1403,6 +1406,38 @@ mod tests {
     }
 
     #[test]
+    fn artifact_security_view_formats_visible_and_hidden_vulnerabilities() {
+        let security = ArtifactSecurityDetails::scanned(vec![
+            vulnerability("GHSA-1", "LOW", vec![], vec![]),
+            vulnerability(
+                "GHSA-2",
+                "MEDIUM",
+                vec!["1.2.0"],
+                vec!["https://example.test/2"],
+            ),
+            vulnerability("GHSA-3", "HIGH", vec!["2.0.0", "2.0.1"], vec![]),
+            vulnerability("GHSA-4", "CRITICAL", vec![], vec!["https://example.test/4"]),
+        ]);
+
+        let view = artifact_security_view(security);
+
+        assert!(view.scanned);
+        assert_eq!(view.vulnerability_count, 4);
+        assert_eq!(view.hidden_vulnerability_count, 1);
+        assert_eq!(view.vulnerabilities.len(), 3);
+        assert_eq!(
+            view.vulnerabilities[0].fixed_versions,
+            "no fixed version listed"
+        );
+        assert_eq!(view.vulnerabilities[1].fixed_versions, "1.2.0");
+        assert_eq!(
+            view.vulnerabilities[1].primary_reference.as_deref(),
+            Some("https://example.test/2")
+        );
+        assert_eq!(view.vulnerabilities[2].fixed_versions, "2.0.0, 2.0.1");
+    }
+
+    #[test]
     fn attachment_content_disposition_sanitizes_unsafe_filename_chars() {
         assert_eq!(
             attachment_content_disposition("safe-1.0.0.whl"),
@@ -1424,6 +1459,10 @@ mod tests {
             authenticated_index_url("https://registry.example/t/acme/simple/"),
             "https://__token__:${PYREGISTRY_TOKEN}@registry.example/t/acme/simple/"
         );
+        assert_eq!(
+            authenticated_index_url("registry.example/t/acme/simple/"),
+            "__token__:${PYREGISTRY_TOKEN}@registry.example/t/acme/simple/"
+        );
     }
 
     #[test]
@@ -1432,5 +1471,135 @@ mod tests {
         assert_eq!(default_scheme_for("localhost:3000"), "http");
         assert_eq!(default_scheme_for("[::1]:3000"), "http");
         assert_eq!(default_scheme_for("registry.example"), "https");
+    }
+
+    #[test]
+    fn registry_base_url_prefers_forwarded_headers_and_ignores_empty_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:3000"));
+        assert_eq!(registry_base_url(&headers), "http://127.0.0.1:3000");
+
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("registry.example, proxy.local"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert_eq!(registry_base_url(&headers), "https://registry.example");
+
+        headers.insert("x-forwarded-host", HeaderValue::from_static("   "));
+        assert_eq!(
+            forwarded_value(&headers, "x-forwarded-host"),
+            None,
+            "blank forwarded values should be ignored"
+        );
+    }
+
+    #[test]
+    fn formats_wheel_audit_reports_for_clean_and_finding_cases() {
+        let clean = WheelAuditReport {
+            project_name: "demo".into(),
+            wheel_filename: "demo-1.0.0-py3-none-any.whl".into(),
+            scanned_file_count: 3,
+            source_security_scan: WheelSourceSecurityScanSummary::failed("foxguard unavailable"),
+            virus_scan: WheelVirusScanSummary::failed("yara unavailable"),
+            findings: Vec::new(),
+        };
+
+        let clean_text = format_wheel_audit_report_text(&clean);
+        assert!(clean_text.contains("FoxGuard source scan: unavailable"));
+        assert!(clean_text.contains("FoxGuard scan warning: foxguard unavailable"));
+        assert!(clean_text.contains("YARA virus scan: unavailable"));
+        assert!(clean_text.contains("YARA scan warning: yara unavailable"));
+        assert!(clean_text.contains("No suspicious heuristic signals"));
+
+        let report = WheelAuditReport {
+            project_name: "demo".into(),
+            wheel_filename: "demo-1.0.0-py3-none-any.whl".into(),
+            scanned_file_count: 4,
+            source_security_scan: WheelSourceSecurityScanSummary {
+                enabled: true,
+                scanned_file_count: 4,
+                finding_count: 1,
+                scan_error: None,
+            },
+            virus_scan: WheelVirusScanSummary {
+                enabled: true,
+                scanned_file_count: 4,
+                signature_rule_count: 12,
+                skipped_rule_count: 1,
+                match_count: 1,
+                scan_error: None,
+            },
+            findings: vec![
+                finding(
+                    WheelAuditFindingKind::UnexpectedExecutable,
+                    Some("bin/tool"),
+                    "exec",
+                ),
+                finding(WheelAuditFindingKind::NetworkString, None, "network"),
+                finding(
+                    WheelAuditFindingKind::PostInstallClue,
+                    Some("setup.py"),
+                    "post install",
+                ),
+                finding(
+                    WheelAuditFindingKind::PythonAstSuspiciousBehavior,
+                    Some("pkg/__init__.py"),
+                    "ast",
+                ),
+                finding(
+                    WheelAuditFindingKind::SuspiciousDependency,
+                    Some("METADATA"),
+                    "dep",
+                ),
+                finding(
+                    WheelAuditFindingKind::SourceSecurityFinding,
+                    Some("pkg/mod.py"),
+                    "source",
+                ),
+                finding(
+                    WheelAuditFindingKind::VirusSignatureMatch,
+                    Some("pkg/mod.py"),
+                    "virus",
+                ),
+            ],
+        };
+
+        let text = format_wheel_audit_report_text(&report);
+        assert!(text.contains(audit_heading(WheelAuditFindingKind::UnexpectedExecutable)));
+        assert!(text.contains(audit_heading(WheelAuditFindingKind::VirusSignatureMatch)));
+        assert!(text.contains("- network"));
+        assert!(text.contains("- exec [bin/tool]"));
+        assert!(text.contains("evidence: fixture"));
+    }
+
+    fn vulnerability(
+        id: &str,
+        severity: &str,
+        fixed_versions: Vec<&str>,
+        references: Vec<&str>,
+    ) -> PackageVulnerability {
+        PackageVulnerability {
+            id: id.into(),
+            summary: format!("{id} summary"),
+            severity: severity.into(),
+            fixed_versions: fixed_versions.into_iter().map(str::to_string).collect(),
+            references: references.into_iter().map(str::to_string).collect(),
+            source: Some("test".into()),
+            cvss_score: None,
+        }
+    }
+
+    fn finding(
+        kind: WheelAuditFindingKind,
+        path: Option<&str>,
+        summary: &str,
+    ) -> WheelAuditFinding {
+        WheelAuditFinding {
+            kind,
+            path: path.map(str::to_string),
+            summary: summary.into(),
+            evidence: vec!["fixture".into()],
+        }
     }
 }

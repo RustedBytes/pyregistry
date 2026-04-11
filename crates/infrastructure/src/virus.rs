@@ -45,7 +45,7 @@ impl YaraWheelVirusScanner {
                     rules_path.display(),
                     error
                 );
-                match compile_bundled_rules() {
+                match compile_bundled_rules_for_fallback(&rules_path) {
                     Ok(compiled) => {
                         info!(
                             "loaded {} bundled YARA virus signature rule(s) from supplied/signature-base (skipped {} incompatible file(s))",
@@ -243,6 +243,24 @@ fn compile_bundled_rules() -> Result<CompiledYaraRules, String> {
     finish_compiler(compiler, rule_files.len(), skipped_rule_count)
 }
 
+#[cfg(test)]
+fn compile_bundled_rules_for_fallback(rules_path: &Path) -> Result<CompiledYaraRules, String> {
+    if rules_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "__force-bundled-yara-failure__")
+    {
+        return Err("forced bundled rule failure".into());
+    }
+
+    compile_bundled_rules()
+}
+
+#[cfg(not(test))]
+fn compile_bundled_rules_for_fallback(_rules_path: &Path) -> Result<CompiledYaraRules, String> {
+    compile_bundled_rules()
+}
+
 fn finish_compiler(
     compiler: Compiler<'_>,
     source_file_count: usize,
@@ -371,11 +389,15 @@ fn format_meta_value(value: MetaValue<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bstr::BStr;
+    use log::Log;
     use pyregistry_application::WheelArchiveEntry;
+    use std::sync::Once;
     use uuid::Uuid;
 
     #[test]
     fn builds_stable_namespace_from_relative_path() {
+        init_test_logger();
         let namespace = namespace_for(
             Path::new("supplied/signature-base/yara"),
             Path::new("supplied/signature-base/yara/malware/demo-rule.yar"),
@@ -385,7 +407,30 @@ mod tests {
     }
 
     #[test]
+    fn formats_byte_metadata_values_and_test_logger_is_noop() {
+        let metadata = log::Metadata::builder()
+            .level(log::Level::Info)
+            .target("pyregistry-test")
+            .build();
+        assert!(TEST_LOGGER.enabled(&metadata));
+
+        let record = log::Record::builder()
+            .metadata(metadata)
+            .args(format_args!("hello {}", "coverage"))
+            .build();
+        TEST_LOGGER.log(&record);
+        TEST_LOGGER.flush();
+
+        let bytes = BStr::new(b"\xffdemo");
+        assert_eq!(
+            format_meta_value(MetaValue::Bytes(bytes)),
+            format!("{bytes:?}")
+        );
+    }
+
+    #[test]
     fn matches_compiled_rule_against_wheel_entry() {
+        init_test_logger();
         let rules_dir = std::env::temp_dir().join(format!("pyregistry-yara-{}", Uuid::new_v4()));
         fs::create_dir_all(&rules_dir).expect("create rules dir");
         fs::write(
@@ -424,6 +469,7 @@ rule Pyregistry_Eicar_Test {
 
     #[test]
     fn includes_tags_and_metadata_in_yara_evidence() {
+        init_test_logger();
         let rules_dir =
             std::env::temp_dir().join(format!("pyregistry-yara-meta-{}", Uuid::new_v4()));
         fs::create_dir_all(&rules_dir).expect("create rules dir");
@@ -468,6 +514,7 @@ rule Pyregistry_Meta_Test : malware test {
 
     #[test]
     fn falls_back_to_bundled_rules_when_configured_dir_is_missing() {
+        init_test_logger();
         let missing_rules_dir =
             std::env::temp_dir().join(format!("pyregistry-missing-yara-{}", Uuid::new_v4()));
         let scanner = YaraWheelVirusScanner::from_rules_dir(&missing_rules_dir);
@@ -478,7 +525,30 @@ rule Pyregistry_Meta_Test : malware test {
     }
 
     #[test]
+    fn reports_unavailable_when_configured_and_bundled_rules_fail() {
+        init_test_logger();
+        let missing_rules_dir = std::env::temp_dir().join("__force-bundled-yara-failure__");
+
+        let scanner = YaraWheelVirusScanner::from_rules_dir(&missing_rules_dir);
+
+        assert_eq!(
+            scanner.rules_source,
+            missing_rules_dir.display().to_string()
+        );
+        assert!(scanner.rules.is_none());
+        assert_eq!(scanner.signature_rule_count, 0);
+        assert_eq!(scanner.skipped_rule_count, 0);
+        assert!(
+            scanner
+                .load_error
+                .as_deref()
+                .is_some_and(|error| error.contains("forced bundled rule failure"))
+        );
+    }
+
+    #[test]
     fn unloaded_scanner_reports_clear_error() {
+        init_test_logger();
         let scanner = YaraWheelVirusScanner {
             rules_source: "test rules".into(),
             rules: None,
@@ -500,6 +570,7 @@ rule Pyregistry_Meta_Test : malware test {
 
     #[test]
     fn rule_directory_validation_and_collection_handles_edge_cases() {
+        init_test_logger();
         let root = std::env::temp_dir().join(format!("pyregistry-yara-tree-{}", Uuid::new_v4()));
         let missing = root.join("missing");
         let missing_error = compile_rules_dir(&missing)
@@ -546,8 +617,31 @@ rule Pyregistry_Meta_Test : malware test {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_rule_files_are_skipped_and_zero_compatible_rules_fail() {
+        init_test_logger();
+        let rules_dir =
+            std::env::temp_dir().join(format!("pyregistry-yara-unreadable-{}", Uuid::new_v4()));
+        fs::create_dir_all(&rules_dir).expect("create rules dir");
+        std::os::unix::fs::symlink(
+            rules_dir.join("missing-target"),
+            rules_dir.join("broken.yar"),
+        )
+        .expect("create broken rule symlink");
+
+        let error = match compile_rules_dir(&rules_dir) {
+            Ok(_) => panic!("broken rule should not compile"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("no compatible YARA rules compiled"));
+        let _ = fs::remove_dir_all(rules_dir);
+    }
+
     #[test]
     fn incompatible_rule_files_are_skipped_when_others_compile() {
+        init_test_logger();
         let rules_dir =
             std::env::temp_dir().join(format!("pyregistry-yara-skip-{}", Uuid::new_v4()));
         fs::create_dir_all(&rules_dir).expect("create rules dir");
@@ -564,5 +658,29 @@ rule Pyregistry_Meta_Test : malware test {
         assert_eq!(compiled.skipped_rule_count, 1);
 
         let _ = fs::remove_dir_all(rules_dir);
+    }
+
+    static TEST_LOGGER: TestLogger = TestLogger;
+    static INIT_TEST_LOGGER: Once = Once::new();
+
+    struct TestLogger;
+
+    impl log::Log for TestLogger {
+        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            let _ = format!("{}", record.args());
+        }
+
+        fn flush(&self) {}
+    }
+
+    fn init_test_logger() {
+        INIT_TEST_LOGGER.call_once(|| {
+            let _ = log::set_logger(&TEST_LOGGER);
+            log::set_max_level(log::LevelFilter::Trace);
+        });
     }
 }

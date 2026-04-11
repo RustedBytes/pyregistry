@@ -3324,6 +3324,7 @@ dependencies = [
  "pyregistry-web",
  "tokio",
  "tower-http",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -3368,6 +3369,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "base64",
+ "bstr",
  "chrono",
  "flate2",
  "foxguard",

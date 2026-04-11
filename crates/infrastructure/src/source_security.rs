@@ -309,6 +309,43 @@ mod tests {
     }
 
     #[test]
+    fn materialize_reports_parent_creation_and_file_write_failures() {
+        let parent_root =
+            std::env::temp_dir().join(format!("pyregistry-foxguard-parent-{}", Uuid::new_v4()));
+        fs::create_dir(&parent_root).expect("create parent root");
+        fs::write(parent_root.join("pkg"), b"not a directory").expect("create blocking file");
+        let archive = WheelArchiveSnapshot {
+            wheel_filename: "demo.whl".into(),
+            entries: vec![WheelArchiveEntry {
+                path: "pkg/module.py".into(),
+                contents: b"print('ok')".to_vec(),
+            }],
+        };
+
+        let error =
+            materialize_archive_entries(&archive, &parent_root).expect_err("parent should fail");
+        assert!(error.to_string().contains("temp directory creation failed"));
+        let _ = fs::remove_dir_all(parent_root);
+
+        let write_root =
+            std::env::temp_dir().join(format!("pyregistry-foxguard-write-{}", Uuid::new_v4()));
+        fs::create_dir(&write_root).expect("create write root");
+        fs::create_dir(write_root.join("pkg")).expect("create directory target");
+        let archive = WheelArchiveSnapshot {
+            wheel_filename: "demo.whl".into(),
+            entries: vec![WheelArchiveEntry {
+                path: "pkg".into(),
+                contents: b"cannot overwrite directory".to_vec(),
+            }],
+        };
+
+        let error =
+            materialize_archive_entries(&archive, &write_root).expect_err("write should fail");
+        assert!(error.to_string().contains("temp file write failed"));
+        let _ = fs::remove_dir_all(write_root);
+    }
+
+    #[test]
     fn maps_foxguard_finding_with_cwe_and_truncated_snippet() {
         let root = Path::new("/tmp/pyregistry-foxguard-test");
         let finding = Finding {

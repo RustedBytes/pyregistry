@@ -36,3 +36,6 @@ url.workspace = true
 uuid.workspace = true
 yara-x.workspace = true
 zip.workspace = true
+
+[dev-dependencies]
+bstr.workspace = true
