@@ -17,7 +17,10 @@ use pyregistry_domain::{
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -181,10 +184,11 @@ async fn validate_registry_distributions_reports_checksum_and_missing_blob_failu
 
     let report = app
         .validate_registry_distributions(
-            &FakeDistributionInspector,
+            Arc::new(FakeDistributionInspector),
             ValidateRegistryDistributionsCommand {
                 tenant_slug: Some("acme".into()),
                 project_name: Some("internal".into()),
+                parallelism: 2,
             },
         )
         .await
@@ -208,6 +212,74 @@ async fn validate_registry_distributions_reports_checksum_and_missing_blob_failu
         item.filename == "internal-1.0.0.tar.gz"
             && item.status == RegistryDistributionValidationStatus::MissingBlob
     }));
+}
+
+#[tokio::test]
+async fn validate_registry_distributions_inspects_files_in_parallel() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true));
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(0));
+    let app = test_app(store.clone(), storage.clone(), mirror, 2);
+    let release = Release {
+        id: ReleaseId::new(Uuid::from_u128(210)),
+        project_id: ProjectId::new(Uuid::from_u128(101)),
+        version: ReleaseVersion::new("2.0.0").expect("version"),
+        yanked: None,
+        created_at: fixed_now(),
+    };
+    store.save_release(release).await.expect("save release");
+
+    for index in 0..4 {
+        let bytes = format!("valid wheel bytes {index}").into_bytes();
+        let sha256 = hex::encode(Sha256::digest(&bytes));
+        let filename = format!("internal-2.0.0-{index}.whl");
+        let object_key = format!("objects/parallel-{index}.whl");
+        store
+            .save_artifact(
+                Artifact::new(
+                    ArtifactId::new(Uuid::from_u128(400 + index)),
+                    ReleaseId::new(Uuid::from_u128(210)),
+                    filename,
+                    bytes.len() as u64,
+                    DigestSet::new(sha256, None).expect("digest"),
+                    object_key.clone(),
+                    fixed_now(),
+                )
+                .expect("parallel artifact"),
+            )
+            .await
+            .expect("save parallel artifact");
+        storage
+            .put(&object_key, bytes)
+            .await
+            .expect("put parallel bytes");
+    }
+
+    let inspector = Arc::new(ConcurrentDistributionInspector::default());
+    let inspector_port: Arc<dyn DistributionFileInspector> = inspector.clone();
+    let report = app
+        .validate_registry_distributions(
+            inspector_port,
+            ValidateRegistryDistributionsCommand {
+                tenant_slug: Some("acme".into()),
+                project_name: Some("internal".into()),
+                parallelism: 2,
+            },
+        )
+        .await
+        .expect("registry distribution validation");
+
+    assert!(report.is_valid());
+    assert_eq!(report.artifact_count, 4);
+    assert_eq!(report.valid_count, 4);
+    assert!(
+        inspector.max_active() > 1,
+        "validation should run more than one CPU inspection at once"
+    );
+    assert!(
+        inspector.max_active() <= 2,
+        "validation should respect the configured worker bound"
+    );
 }
 
 fn test_app(
@@ -867,6 +939,66 @@ impl DistributionFileInspector for FakeDistributionInspector {
         filename: &str,
         bytes: &[u8],
     ) -> Result<DistributionInspection, ApplicationError> {
+        Ok(DistributionInspection {
+            kind: if filename.ends_with(".whl") {
+                DistributionKind::Wheel
+            } else {
+                DistributionKind::SourceTarGz
+            },
+            size_bytes: bytes.len() as u64,
+            sha256: hex::encode(Sha256::digest(bytes)),
+            archive_entry_count: 1,
+        })
+    }
+}
+
+#[derive(Default)]
+struct ConcurrentDistributionInspector {
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl ConcurrentDistributionInspector {
+    fn max_active(&self) -> usize {
+        self.max_active.load(Ordering::SeqCst)
+    }
+
+    fn mark_active(&self) {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut observed = self.max_active.load(Ordering::SeqCst);
+        while active > observed {
+            match self.max_active.compare_exchange(
+                observed,
+                active,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(next) => observed = next,
+            }
+        }
+    }
+}
+
+impl DistributionFileInspector for ConcurrentDistributionInspector {
+    fn inspect_distribution(
+        &self,
+        _path: &Path,
+    ) -> Result<DistributionInspection, ApplicationError> {
+        Err(ApplicationError::External(
+            "path distribution inspection is unused".into(),
+        ))
+    }
+
+    fn inspect_distribution_bytes(
+        &self,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<DistributionInspection, ApplicationError> {
+        self.mark_active();
+        std::thread::sleep(Duration::from_millis(50));
+        self.active.fetch_sub(1, Ordering::SeqCst);
+
         Ok(DistributionInspection {
             kind: if filename.ends_with(".whl") {
                 DistributionKind::Wheel

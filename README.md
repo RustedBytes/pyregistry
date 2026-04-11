@@ -191,6 +191,9 @@ burst = 60
 max_tracked_clients = 10000
 trust_proxy_headers = false
 
+[validation]
+distribution_parallelism = 4
+
 [logging]
 filter = "info"
 module_path = true
@@ -240,6 +243,7 @@ Useful environment variables:
 - `RATE_LIMIT_BURST`
 - `RATE_LIMIT_MAX_TRACKED_CLIENTS`
 - `RATE_LIMIT_TRUST_PROXY_HEADERS`
+- `VALIDATION_DISTRIBUTION_PARALLELISM`
 - `LOG_FILTER`
 - `LOG_MODULE_PATH`
 - `LOG_TARGET`
@@ -265,7 +269,7 @@ cargo run -p pyregistry -- init-config --path pyregistry.toml --force
 scripts/pyregistry-release.sh audit-wheel --project rsloop --wheel rsloop-0.1.14-cp314-cp314t-win_arm64.whl
 scripts/pyregistry-release.sh validate-dist --file dist/demo-0.1.0-py3-none-any.whl --sha256 <expected-sha256>
 scripts/pyregistry-release.sh validate-dist --file dist/demo-0.1.0.tar.gz
-scripts/pyregistry-release.sh validate-dist-all --tenant acme
+scripts/pyregistry-release.sh validate-dist-all --tenant acme --parallelism 8
 scripts/pyregistry-release.sh check-registry --tenant acme
 ```
 
@@ -292,7 +296,9 @@ fast.
 `validate-dist-all` performs the same checksum and archive checks for stored
 registry artifact blobs. Use `--tenant` and `--project` to narrow the scope; it
 reports missing object-storage blobs, checksum mismatches, corrupt archives, and
-source formats this validator does not yet support.
+source formats this validator does not yet support. Archive inspection runs in
+parallel with Rayon; tune the default with `[validation].distribution_parallelism`
+or override a single run with `--parallelism`.
 
 `check-registry` checks package versions stored in the current metadata store
 for known vulnerabilities through the PySentry adapter.

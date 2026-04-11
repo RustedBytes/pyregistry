@@ -23,6 +23,7 @@ pub struct Settings {
     pub postgres: Option<PostgresConfig>,
     pub security: SecurityConfig,
     pub rate_limit: RateLimitConfig,
+    pub validation: ValidationConfig,
     pub logging: LoggingConfig,
     pub oidc_issuers: Vec<OidcIssuerConfig>,
 }
@@ -129,6 +130,12 @@ impl Settings {
                 ),
                 trust_proxy_headers: read_env_bool("RATE_LIMIT_TRUST_PROXY_HEADERS", false),
             },
+            validation: ValidationConfig {
+                distribution_parallelism: read_env_usize(
+                    "VALIDATION_DISTRIBUTION_PARALLELISM",
+                    default_validation_parallelism(),
+                ),
+            },
             logging,
             oidc_issuers,
         };
@@ -151,6 +158,7 @@ impl Settings {
             postgres: Some(default_postgres_config()),
             security: default_security_config(),
             rate_limit: default_rate_limit_config(),
+            validation: default_validation_config(),
             logging: default_logging_config(),
             oidc_issuers: default_oidc_issuers(),
         }
@@ -225,7 +233,7 @@ impl Settings {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, security={}, rate_limit={}, logging={}, oidc_issuers={}",
+            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, security={}, rate_limit={}, validation={}, logging={}, oidc_issuers={}",
             self.bind_address,
             self.blob_root.display(),
             self.superadmin_email,
@@ -240,6 +248,7 @@ impl Settings {
                 .map_or_else(|| "disabled".to_string(), PostgresConfig::log_safe_summary),
             self.security.log_safe_summary(),
             self.rate_limit.log_safe_summary(),
+            self.validation.log_safe_summary(),
             self.logging.log_safe_summary(),
             self.oidc_issuers.len()
         )
@@ -301,6 +310,7 @@ impl Settings {
             ));
         }
         self.rate_limit.validate()?;
+        self.validation.validate()?;
 
         Ok(())
     }
@@ -530,6 +540,27 @@ impl RateLimitConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct ValidationConfig {
+    pub distribution_parallelism: usize,
+}
+
+impl ValidationConfig {
+    #[must_use]
+    pub fn log_safe_summary(&self) -> String {
+        format!("distribution_parallelism={}", self.distribution_parallelism)
+    }
+
+    fn validate(&self) -> Result<(), SettingsError> {
+        if self.distribution_parallelism == 0 {
+            return Err(SettingsError::InvalidValidationConfig(
+                "distribution_parallelism must be greater than zero".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct LoggingConfig {
     pub filter: String,
     pub module_path: bool,
@@ -612,6 +643,8 @@ pub enum SettingsError {
     InvalidSecurityConfig(String),
     #[error("invalid rate limit config: {0}")]
     InvalidRateLimitConfig(String),
+    #[error("invalid validation config: {0}")]
+    InvalidValidationConfig(String),
     #[error("invalid logging config: {0}")]
     InvalidLoggingConfig(String),
     #[error("could not serialize TOML config: {0}")]
@@ -634,6 +667,7 @@ struct SettingsFile {
     postgres: Option<PostgresConfigFile>,
     security: Option<SecurityConfigFile>,
     rate_limit: Option<RateLimitConfigFile>,
+    validation: Option<ValidationConfigFile>,
     logging: Option<LoggingConfigFile>,
     oidc_issuers: Vec<OidcIssuerConfigFile>,
 }
@@ -685,6 +719,11 @@ struct RateLimitConfigFile {
     burst: u32,
     max_tracked_clients: usize,
     trust_proxy_headers: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ValidationConfigFile {
+    distribution_parallelism: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -748,6 +787,11 @@ impl TryFrom<SettingsFile> for Settings {
                 .map(RateLimitConfig::try_from)
                 .transpose()?
                 .unwrap_or_else(default_rate_limit_config),
+            validation: value
+                .validation
+                .map(ValidationConfig::try_from)
+                .transpose()?
+                .unwrap_or_else(default_validation_config),
             logging: value
                 .logging
                 .map(LoggingConfig::try_from)
@@ -779,6 +823,7 @@ impl From<Settings> for SettingsFile {
             postgres: value.postgres.map(Into::into),
             security: Some(value.security.into()),
             rate_limit: Some(value.rate_limit.into()),
+            validation: Some(value.validation.into()),
             logging: Some(value.logging.into()),
             oidc_issuers: value.oidc_issuers.into_iter().map(Into::into).collect(),
         }
@@ -1005,6 +1050,26 @@ impl From<RateLimitConfig> for RateLimitConfigFile {
     }
 }
 
+impl TryFrom<ValidationConfigFile> for ValidationConfig {
+    type Error = SettingsError;
+
+    fn try_from(value: ValidationConfigFile) -> Result<Self, Self::Error> {
+        let config = Self {
+            distribution_parallelism: value.distribution_parallelism,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl From<ValidationConfig> for ValidationConfigFile {
+    fn from(value: ValidationConfig) -> Self {
+        Self {
+            distribution_parallelism: value.distribution_parallelism,
+        }
+    }
+}
+
 impl TryFrom<LoggingConfigFile> for LoggingConfig {
     type Error = SettingsError;
 
@@ -1169,6 +1234,18 @@ fn default_rate_limit_config() -> RateLimitConfig {
         max_tracked_clients: 10_000,
         trust_proxy_headers: false,
     }
+}
+
+fn default_validation_config() -> ValidationConfig {
+    ValidationConfig {
+        distribution_parallelism: default_validation_parallelism(),
+    }
+}
+
+fn default_validation_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4)
 }
 
 fn default_logging_config() -> LoggingConfig {
@@ -1474,6 +1551,10 @@ mod tests {
             original.rate_limit.trust_proxy_headers
         );
         assert_eq!(
+            round_trip.validation.distribution_parallelism,
+            original.validation.distribution_parallelism
+        );
+        assert_eq!(
             round_trip.sqlite.as_ref().map(|sqlite| &sqlite.path),
             original.sqlite.as_ref().map(|sqlite| &sqlite.path)
         );
@@ -1540,6 +1621,16 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_validation_parallelism() {
+        let error = ValidationConfig::try_from(ValidationConfigFile {
+            distribution_parallelism: 0,
+        })
+        .expect_err("zero distribution validation parallelism should fail");
+
+        assert!(matches!(error, SettingsError::InvalidValidationConfig(_)));
+    }
+
+    #[test]
     fn minio_template_uses_s3_opendal_options() {
         let settings = Settings::new_minio_template();
 
@@ -1593,6 +1684,7 @@ mod tests {
             postgres: Some(default_postgres_config().into()),
             security: Some(default_security_config().into()),
             rate_limit: Some(default_rate_limit_config().into()),
+            validation: Some(default_validation_config().into()),
             logging: Some(LoggingConfigFile {
                 filter: "info".into(),
                 module_path: true,
@@ -1697,6 +1789,7 @@ mod tests {
             postgres: None,
             security: Some(default_security_config().into()),
             rate_limit: Some(default_rate_limit_config().into()),
+            validation: Some(default_validation_config().into()),
             logging: Some(LoggingConfigFile {
                 filter: "info".into(),
                 module_path: true,

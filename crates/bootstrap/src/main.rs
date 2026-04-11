@@ -5,11 +5,11 @@ use env_logger::Env;
 use log::{debug, error, info, warn};
 use pyregistry_application::{
     ApplicationError, AuditWheelCommand, CancellationSignal, DistributionChecksumStatus,
-    DistributionValidationReport, DistributionValidationUseCase, MirrorRefreshReport,
-    PyregistryApp, RegistryDistributionValidationItem, RegistryDistributionValidationReport,
-    RegistryDistributionValidationStatus, RegistrySecurityReport, ValidateDistributionCommand,
-    ValidateRegistryDistributionsCommand, WheelAuditFinding, WheelAuditFindingKind,
-    WheelAuditReport, WheelAuditUseCase,
+    DistributionFileInspector, DistributionValidationReport, DistributionValidationUseCase,
+    MirrorRefreshReport, PyregistryApp, RegistryDistributionValidationItem,
+    RegistryDistributionValidationReport, RegistryDistributionValidationStatus,
+    RegistrySecurityReport, ValidateDistributionCommand, ValidateRegistryDistributionsCommand,
+    WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport, WheelAuditUseCase,
 };
 use pyregistry_infrastructure::{
     FilesystemDistributionInspector, LoggingConfig, LoggingTimestamp, PypiMirrorClient, Settings,
@@ -114,6 +114,12 @@ enum Command {
             help = "Limit validation to one project; requires --tenant"
         )]
         project: Option<String>,
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Parallel artifact validation workers; defaults to validation.distribution_parallelism"
+        )]
+        parallelism: Option<usize>,
     },
     #[command(about = "Check package versions stored in the registry for known vulnerabilities")]
     CheckRegistry {
@@ -181,14 +187,19 @@ async fn main() -> anyhow::Result<()> {
             debug!("parsed CLI arguments: {cli_debug}");
             validate_distribution(file, sha256)
         }
-        Command::ValidateDistAll { tenant, project } => {
+        Command::ValidateDistAll {
+            tenant,
+            project,
+            parallelism,
+        } => {
             let config_source = describe_settings_source(config_path.as_deref());
             let settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
             init_logging(&settings.logging);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
-            validate_registry_distributions(settings, config_source, tenant, project).await
+            validate_registry_distributions(settings, config_source, tenant, project, parallelism)
+                .await
         }
         Command::CheckRegistry { tenant, project } => {
             let config_source = describe_settings_source(config_path.as_deref());
@@ -632,25 +643,33 @@ async fn validate_registry_distributions(
     config_source: String,
     tenant: Option<String>,
     project: Option<String>,
+    parallelism_override: Option<usize>,
 ) -> anyhow::Result<()> {
     if project.is_some() && tenant.is_none() {
         anyhow::bail!("--project requires --tenant so the package scope is unambiguous");
     }
+    if matches!(parallelism_override, Some(0)) {
+        anyhow::bail!("--parallelism must be greater than zero");
+    }
 
-    info!("validating stored registry distributions using settings from {config_source}");
+    let parallelism = parallelism_override.unwrap_or(settings.validation.distribution_parallelism);
+    info!(
+        "validating stored registry distributions using settings from {config_source} with parallelism={parallelism}"
+    );
     let app = build_application(&settings)
         .await
         .context("failed to build application services")?;
     seed_application(&app, &settings)
         .await
         .context("failed to seed application")?;
-    let inspector = FilesystemDistributionInspector;
+    let inspector: Arc<dyn DistributionFileInspector> = Arc::new(FilesystemDistributionInspector);
     let report = app
         .validate_registry_distributions(
-            &inspector,
+            inspector,
             ValidateRegistryDistributionsCommand {
                 tenant_slug: tenant,
                 project_name: project,
+                parallelism,
             },
         )
         .await

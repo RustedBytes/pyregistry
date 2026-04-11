@@ -406,6 +406,7 @@ pub struct ValidateDistributionCommand {
 pub struct ValidateRegistryDistributionsCommand {
     pub tenant_slug: Option<String>,
     pub project_name: Option<String>,
+    pub parallelism: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

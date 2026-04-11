@@ -1,11 +1,14 @@
 use crate::{
     ApplicationError, DistributionChecksumStatus, DistributionFileInspector,
-    DistributionValidationReport, PyregistryApp, RegistryDistributionValidationItem,
+    DistributionValidationReport, ObjectStorage, PyregistryApp, RegistryDistributionValidationItem,
     RegistryDistributionValidationReport, RegistryDistributionValidationStatus,
     ValidateDistributionCommand, ValidateRegistryDistributionsCommand,
 };
+use futures_channel::oneshot;
+use futures_util::{StreamExt, stream};
 use log::{info, warn};
 use pyregistry_domain::{Artifact, DigestSet, Project, ProjectName, Release, Tenant};
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::sync::Arc;
 
 pub struct DistributionValidationUseCase {
@@ -64,12 +67,13 @@ impl DistributionValidationUseCase {
 impl PyregistryApp {
     pub async fn validate_registry_distributions(
         &self,
-        inspector: &dyn DistributionFileInspector,
+        inspector: Arc<dyn DistributionFileInspector>,
         command: ValidateRegistryDistributionsCommand,
     ) -> Result<RegistryDistributionValidationReport, ApplicationError> {
+        let parallelism = command.parallelism.max(1);
         info!(
-            "validating registry distributions with tenant_filter={:?} project_filter={:?}",
-            command.tenant_slug, command.project_name
+            "validating registry distributions with tenant_filter={:?} project_filter={:?} parallelism={}",
+            command.tenant_slug, command.project_name, parallelism
         );
         let tenants = self
             .tenants_for_distribution_validation(command.tenant_slug.as_deref())
@@ -78,6 +82,7 @@ impl PyregistryApp {
             tenant_count: tenants.len(),
             ..RegistryDistributionValidationReport::default()
         };
+        let mut targets = Vec::new();
 
         for tenant in tenants {
             let projects = self
@@ -90,19 +95,53 @@ impl PyregistryApp {
                 report.release_count += releases.len();
                 for release in releases {
                     for artifact in self.store.list_artifacts(release.id).await? {
-                        let item = self
-                            .validate_registry_artifact(
-                                inspector, &tenant, &project, &release, artifact,
-                            )
-                            .await;
-                        report.push_item(item);
+                        targets.push(RegistryDistributionValidationTarget {
+                            tenant: tenant.clone(),
+                            project: project.clone(),
+                            release: release.clone(),
+                            artifact,
+                        });
                     }
                 }
             }
         }
 
         info!(
-            "registry distribution validation finished: files={}, valid={}, invalid={}, missing_blobs={}, checksum_mismatches={}, invalid_archives={}, unsupported={}, storage_errors={}",
+            "queued {} registry distribution file(s) for validation with {} worker(s)",
+            targets.len(),
+            parallelism
+        );
+        let rayon_pool = Arc::new(
+            ThreadPoolBuilder::new()
+                .num_threads(parallelism)
+                .thread_name(|index| format!("pyregistry-dist-validate-{index}"))
+                .build()
+                .map_err(|error| {
+                    ApplicationError::External(format!(
+                        "could not build distribution validation worker pool: {error}"
+                    ))
+                })?,
+        );
+        let object_storage = self.object_storage.clone();
+        let items = stream::iter(targets)
+            .map(|target| {
+                validate_registry_target(
+                    object_storage.clone(),
+                    inspector.clone(),
+                    rayon_pool.clone(),
+                    target,
+                )
+            })
+            .buffer_unordered(parallelism)
+            .collect::<Vec<_>>()
+            .await;
+
+        for item in items {
+            report.push_item(item);
+        }
+
+        info!(
+            "registry distribution validation finished: files={}, valid={}, invalid={}, missing_blobs={}, checksum_mismatches={}, invalid_archives={}, unsupported={}, storage_errors={}, parallelism={}",
             report.artifact_count,
             report.valid_count,
             report.invalid_count,
@@ -110,7 +149,8 @@ impl PyregistryApp {
             report.checksum_mismatch_count,
             report.invalid_archive_count,
             report.unsupported_distribution_count,
-            report.storage_error_count
+            report.storage_error_count,
+            parallelism
         );
         Ok(report)
     }
@@ -147,101 +187,129 @@ impl PyregistryApp {
         }
         self.store.list_projects(tenant.id).await
     }
+}
 
-    async fn validate_registry_artifact(
-        &self,
-        inspector: &dyn DistributionFileInspector,
-        tenant: &Tenant,
-        project: &Project,
-        release: &Release,
-        artifact: Artifact,
-    ) -> RegistryDistributionValidationItem {
-        if !is_supported_distribution_filename(&artifact.filename) {
+#[derive(Debug, Clone)]
+struct RegistryDistributionValidationTarget {
+    tenant: Tenant,
+    project: Project,
+    release: Release,
+    artifact: Artifact,
+}
+
+async fn validate_registry_target(
+    object_storage: Arc<dyn ObjectStorage>,
+    inspector: Arc<dyn DistributionFileInspector>,
+    rayon_pool: Arc<ThreadPool>,
+    target: RegistryDistributionValidationTarget,
+) -> RegistryDistributionValidationItem {
+    if !is_supported_distribution_filename(&target.artifact.filename) {
+        return registry_distribution_item(
+            &target.tenant,
+            &target.project,
+            &target.release,
+            &target.artifact,
+            RegistryDistributionValidationStatus::UnsupportedDistribution,
+            None,
+            Some("only .whl, .tar.gz, and .tgz files are supported by this validator".to_string()),
+        );
+    }
+
+    let bytes = match object_storage.get(&target.artifact.object_key).await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
             return registry_distribution_item(
-                tenant,
-                project,
-                release,
-                &artifact,
-                RegistryDistributionValidationStatus::UnsupportedDistribution,
+                &target.tenant,
+                &target.project,
+                &target.release,
+                &target.artifact,
+                RegistryDistributionValidationStatus::MissingBlob,
                 None,
-                Some(
-                    "only .whl, .tar.gz, and .tgz files are supported by this validator"
-                        .to_string(),
-                ),
+                Some(format!(
+                    "object storage key `{}` is missing",
+                    target.artifact.object_key
+                )),
             );
         }
+        Err(error) => {
+            return registry_distribution_item(
+                &target.tenant,
+                &target.project,
+                &target.release,
+                &target.artifact,
+                RegistryDistributionValidationStatus::StorageError,
+                None,
+                Some(error.to_string()),
+            );
+        }
+    };
 
-        let bytes = match self.object_storage.get(&artifact.object_key).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                return registry_distribution_item(
-                    tenant,
-                    project,
-                    release,
-                    &artifact,
-                    RegistryDistributionValidationStatus::MissingBlob,
-                    None,
-                    Some(format!(
-                        "object storage key `{}` is missing",
-                        artifact.object_key
-                    )),
-                );
-            }
-            Err(error) => {
-                return registry_distribution_item(
-                    tenant,
-                    project,
-                    release,
-                    &artifact,
-                    RegistryDistributionValidationStatus::StorageError,
-                    None,
-                    Some(error.to_string()),
-                );
-            }
-        };
+    let inspection = match inspect_distribution_bytes_on_rayon(
+        rayon_pool,
+        inspector,
+        target.artifact.filename.clone(),
+        bytes,
+    )
+    .await
+    {
+        Ok(inspection) => inspection,
+        Err(error) => {
+            return registry_distribution_item(
+                &target.tenant,
+                &target.project,
+                &target.release,
+                &target.artifact,
+                RegistryDistributionValidationStatus::InvalidArchive,
+                None,
+                Some(error.to_string()),
+            );
+        }
+    };
 
-        let inspection = match inspector.inspect_distribution_bytes(&artifact.filename, &bytes) {
-            Ok(inspection) => inspection,
-            Err(error) => {
-                return registry_distribution_item(
-                    tenant,
-                    project,
-                    release,
-                    &artifact,
-                    RegistryDistributionValidationStatus::InvalidArchive,
-                    None,
-                    Some(error.to_string()),
-                );
-            }
-        };
+    let status = if inspection.sha256 == target.artifact.digests.sha256 {
+        RegistryDistributionValidationStatus::Valid
+    } else {
+        RegistryDistributionValidationStatus::ChecksumMismatch
+    };
+    let error = if matches!(
+        status,
+        RegistryDistributionValidationStatus::ChecksumMismatch
+    ) {
+        Some(format!(
+            "expected sha256 {}, got {}",
+            target.artifact.digests.sha256, inspection.sha256
+        ))
+    } else {
+        None
+    };
 
-        let status = if inspection.sha256 == artifact.digests.sha256 {
-            RegistryDistributionValidationStatus::Valid
-        } else {
-            RegistryDistributionValidationStatus::ChecksumMismatch
-        };
-        let error = if matches!(
-            status,
-            RegistryDistributionValidationStatus::ChecksumMismatch
-        ) {
-            Some(format!(
-                "expected sha256 {}, got {}",
-                artifact.digests.sha256, inspection.sha256
-            ))
-        } else {
-            None
-        };
+    registry_distribution_item(
+        &target.tenant,
+        &target.project,
+        &target.release,
+        &target.artifact,
+        status,
+        Some(inspection),
+        error,
+    )
+}
 
-        registry_distribution_item(
-            tenant,
-            project,
-            release,
-            &artifact,
-            status,
-            Some(inspection),
-            error,
+async fn inspect_distribution_bytes_on_rayon(
+    rayon_pool: Arc<ThreadPool>,
+    inspector: Arc<dyn DistributionFileInspector>,
+    filename: String,
+    bytes: Vec<u8>,
+) -> Result<crate::DistributionInspection, ApplicationError> {
+    let (sender, receiver) = oneshot::channel();
+    rayon_pool.spawn(move || {
+        let result = inspector.inspect_distribution_bytes(&filename, &bytes);
+        let _ = sender.send(result);
+    });
+    receiver.await.map_err(|_| {
+        ApplicationError::External(
+            "distribution validation worker stopped before sending a result".to_string(),
         )
-    }
+    })?
 }
 
 fn is_supported_distribution_filename(filename: &str) -> bool {
