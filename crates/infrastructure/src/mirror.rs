@@ -7,14 +7,58 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::time::sleep;
 use url::Url;
 
 #[derive(Clone)]
 pub struct PypiMirrorClient {
     client: reqwest::Client,
     base_url: Url,
+    retry_policy: ArtifactDownloadRetryPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactDownloadRetryPolicy {
+    max_attempts: usize,
+    initial_backoff: Duration,
+}
+
+impl Default for ArtifactDownloadRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_backoff: Duration::from_millis(250),
+        }
+    }
+}
+
+impl ArtifactDownloadRetryPolicy {
+    #[must_use]
+    pub fn new(max_attempts: usize, initial_backoff: Duration) -> Self {
+        Self {
+            max_attempts: max_attempts.max(1),
+            initial_backoff,
+        }
+    }
+
+    #[must_use]
+    pub fn max_attempts(self) -> usize {
+        self.max_attempts
+    }
+
+    #[must_use]
+    pub fn initial_backoff(self) -> Duration {
+        self.initial_backoff
+    }
+
+    #[must_use]
+    fn delay_for_attempt(self, attempt: usize) -> Duration {
+        let multiplier = 1_u32 << attempt.saturating_sub(1).min(16);
+        self.initial_backoff.saturating_mul(multiplier)
+    }
 }
 
 impl Default for PypiMirrorClient {
@@ -25,14 +69,23 @@ impl Default for PypiMirrorClient {
 
 impl PypiMirrorClient {
     pub fn new(base_url: &str) -> Result<Self, ApplicationError> {
+        Self::with_retry_policy(base_url, ArtifactDownloadRetryPolicy::default())
+    }
+
+    pub fn with_retry_policy(
+        base_url: &str,
+        retry_policy: ArtifactDownloadRetryPolicy,
+    ) -> Result<Self, ApplicationError> {
         let normalized = base_url.trim().trim_end_matches('/');
         let base_url = Url::parse(normalized)
             .map_err(|error| ApplicationError::External(error.to_string()))?;
         Ok(Self {
             client: reqwest::Client::new(),
             base_url,
+            retry_policy,
         })
     }
+
     fn project_metadata_url(&self, project_name: &str) -> Result<Url, ApplicationError> {
         self.base_url
             .join(&format!("/pypi/{project_name}/json"))
@@ -82,74 +135,212 @@ impl PypiMirrorClient {
         }
 
         let temp_path = temp_download_path(destination);
-        let download_result = async {
-            let mut response = self
-                .client
-                .get(download_url)
-                .send()
-                .await
-                .map_err(|error| ApplicationError::External(error.to_string()))?
-                .error_for_status()
-                .map_err(|error| ApplicationError::External(error.to_string()))?;
-
-            let mut file = fs::File::create(&temp_path)
-                .await
-                .map_err(|error| ApplicationError::External(error.to_string()))?;
-            let mut downloaded_bytes = 0_u64;
-
-            loop {
-                let chunk = response
-                    .chunk()
-                    .await
-                    .map_err(|error| ApplicationError::External(error.to_string()))?;
-                let Some(chunk) = chunk else {
-                    break;
-                };
-
-                file.write_all(&chunk)
-                    .await
-                    .map_err(|error| ApplicationError::External(error.to_string()))?;
-                downloaded_bytes += chunk.len() as u64;
-                debug!(
-                    "downloaded chunk of {} byte(s) for {}, total={} byte(s)",
-                    chunk.len(),
-                    destination.display(),
-                    downloaded_bytes
-                );
-            }
-
-            file.flush()
-                .await
-                .map_err(|error| ApplicationError::External(error.to_string()))?;
-            drop(file);
-
-            if expected_size_bytes > 0 && downloaded_bytes != expected_size_bytes {
-                return Err(ApplicationError::External(format!(
-                    "downloaded size mismatch for {}: expected {} byte(s), got {} byte(s)",
-                    destination.display(),
+        for attempt in 1..=self.retry_policy.max_attempts() {
+            match self
+                .stream_artifact_to_path_once(
+                    download_url,
                     expected_size_bytes,
-                    downloaded_bytes
-                )));
-            }
-
-            fs::rename(&temp_path, destination)
+                    destination,
+                    &temp_path,
+                )
                 .await
-                .map_err(|error| ApplicationError::External(error.to_string()))?;
-            info!(
-                "saved upstream artifact to {} ({} byte(s))",
+            {
+                Ok(()) => return Ok(()),
+                Err(error) if should_retry_download(&error, attempt, self.retry_policy) => {
+                    let delay = self.retry_policy.delay_for_attempt(attempt);
+                    warn!(
+                        "artifact download attempt {}/{} failed for `{download_url}`: {}; retrying in {} ms",
+                        attempt,
+                        self.retry_policy.max_attempts(),
+                        error.error,
+                        delay.as_millis()
+                    );
+                    let _ = fs::remove_file(&temp_path).await;
+                    sleep(delay).await;
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&temp_path).await;
+                    return Err(error.error);
+                }
+            }
+        }
+
+        Err(ApplicationError::External(format!(
+            "artifact download retry loop exhausted for `{download_url}`"
+        )))
+    }
+
+    async fn stream_artifact_to_path_once(
+        &self,
+        download_url: &str,
+        expected_size_bytes: u64,
+        destination: &Path,
+        temp_path: &Path,
+    ) -> Result<(), ArtifactDownloadError> {
+        let mut response = self.get_artifact_response(download_url).await?;
+        let mut file = fs::File::create(temp_path)
+            .await
+            .map_err(|error| ArtifactDownloadError::fatal(error.to_string()))?;
+        let mut downloaded_bytes = 0_u64;
+
+        loop {
+            let chunk = response
+                .chunk()
+                .await
+                .map_err(ArtifactDownloadError::from_reqwest)?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| ArtifactDownloadError::fatal(error.to_string()))?;
+            downloaded_bytes += chunk.len() as u64;
+            debug!(
+                "downloaded chunk of {} byte(s) for {}, total={} byte(s)",
+                chunk.len(),
                 destination.display(),
                 downloaded_bytes
             );
-            Ok(())
-        }
-        .await;
-
-        if download_result.is_err() {
-            let _ = fs::remove_file(&temp_path).await;
         }
 
-        download_result
+        file.flush()
+            .await
+            .map_err(|error| ArtifactDownloadError::fatal(error.to_string()))?;
+        drop(file);
+
+        if expected_size_bytes > 0 && downloaded_bytes != expected_size_bytes {
+            return Err(ArtifactDownloadError::retryable(format!(
+                "downloaded size mismatch for {}: expected {} byte(s), got {} byte(s)",
+                destination.display(),
+                expected_size_bytes,
+                downloaded_bytes
+            )));
+        }
+
+        fs::rename(temp_path, destination)
+            .await
+            .map_err(|error| ArtifactDownloadError::fatal(error.to_string()))?;
+        info!(
+            "saved upstream artifact to {} ({} byte(s))",
+            destination.display(),
+            downloaded_bytes
+        );
+        Ok(())
     }
+
+    async fn fetch_artifact_bytes_with_retries(
+        &self,
+        download_url: &str,
+    ) -> Result<Vec<u8>, ApplicationError> {
+        for attempt in 1..=self.retry_policy.max_attempts() {
+            match self.fetch_artifact_bytes_once(download_url).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(error) if should_retry_download(&error, attempt, self.retry_policy) => {
+                    let delay = self.retry_policy.delay_for_attempt(attempt);
+                    warn!(
+                        "artifact download attempt {}/{} failed for `{download_url}`: {}; retrying in {} ms",
+                        attempt,
+                        self.retry_policy.max_attempts(),
+                        error.error,
+                        delay.as_millis()
+                    );
+                    sleep(delay).await;
+                }
+                Err(error) => return Err(error.error),
+            }
+        }
+
+        Err(ApplicationError::External(format!(
+            "artifact download retry loop exhausted for `{download_url}`"
+        )))
+    }
+
+    async fn fetch_artifact_bytes_once(
+        &self,
+        download_url: &str,
+    ) -> Result<Vec<u8>, ArtifactDownloadError> {
+        let bytes = self
+            .get_artifact_response(download_url)
+            .await?
+            .bytes()
+            .await
+            .map_err(ArtifactDownloadError::from_reqwest)?;
+        debug!("fetched {} byte(s) from upstream artifact URL", bytes.len());
+        Ok(bytes.to_vec())
+    }
+
+    async fn get_artifact_response(
+        &self,
+        download_url: &str,
+    ) -> Result<reqwest::Response, ArtifactDownloadError> {
+        let response = self
+            .client
+            .get(download_url)
+            .send()
+            .await
+            .map_err(ArtifactDownloadError::from_reqwest)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ArtifactDownloadError {
+                error: ApplicationError::External(format!(
+                    "upstream artifact request `{download_url}` returned HTTP {status}"
+                )),
+                retryable: is_retryable_status(status),
+            });
+        }
+        Ok(response)
+    }
+}
+
+#[derive(Debug)]
+struct ArtifactDownloadError {
+    error: ApplicationError,
+    retryable: bool,
+}
+
+impl ArtifactDownloadError {
+    fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            error: ApplicationError::External(message.into()),
+            retryable: true,
+        }
+    }
+
+    fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            error: ApplicationError::External(message.into()),
+            retryable: false,
+        }
+    }
+
+    fn from_reqwest(error: reqwest::Error) -> Self {
+        let retryable = error.is_timeout()
+            || error.is_connect()
+            || error.is_body()
+            || error.status().is_some_and(is_retryable_status);
+        Self {
+            error: ApplicationError::External(error.to_string()),
+            retryable,
+        }
+    }
+}
+
+fn should_retry_download(
+    error: &ArtifactDownloadError,
+    attempt: usize,
+    policy: ArtifactDownloadRetryPolicy,
+) -> bool {
+    error.retryable && attempt < policy.max_attempts()
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::INTERNAL_SERVER_ERROR
+        || status == StatusCode::BAD_GATEWAY
+        || status == StatusCode::SERVICE_UNAVAILABLE
+        || status == StatusCode::GATEWAY_TIMEOUT
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,20 +457,11 @@ impl MirrorClient for PypiMirrorClient {
     }
 
     async fn fetch_artifact_bytes(&self, download_url: &str) -> Result<Vec<u8>, ApplicationError> {
-        info!("fetching mirrored artifact bytes from `{download_url}`");
-        let bytes = self
-            .client
-            .get(download_url)
-            .send()
-            .await
-            .map_err(|error| ApplicationError::External(error.to_string()))?
-            .error_for_status()
-            .map_err(|error| ApplicationError::External(error.to_string()))?
-            .bytes()
-            .await
-            .map_err(|error| ApplicationError::External(error.to_string()))?;
-        debug!("fetched {} byte(s) from upstream artifact URL", bytes.len());
-        Ok(bytes.to_vec())
+        info!(
+            "fetching mirrored artifact bytes from `{download_url}` with up to {} attempt(s)",
+            self.retry_policy.max_attempts()
+        );
+        self.fetch_artifact_bytes_with_retries(download_url).await
     }
 }
 
@@ -308,11 +490,19 @@ fn is_mirrorable_distribution_filename(filename: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        PypiDigests, PypiMirrorClient, PypiReleaseFile, find_artifact_by_filename,
-        is_mirrorable_distribution, is_mirrorable_distribution_filename, temp_download_path,
+        ArtifactDownloadRetryPolicy, PypiDigests, PypiMirrorClient, PypiReleaseFile,
+        find_artifact_by_filename, is_mirrorable_distribution, is_mirrorable_distribution_filename,
+        is_retryable_status, temp_download_path,
     };
-    use pyregistry_application::MirroredArtifactSnapshot;
+    use pyregistry_application::{MirrorClient, MirroredArtifactSnapshot};
     use std::path::Path;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn finds_matching_artifact_by_exact_filename() {
@@ -362,6 +552,75 @@ mod tests {
             .expect("metadata URL");
 
         assert_eq!(url.as_str(), "https://mirror.example/pypi/demo-pkg/json");
+    }
+
+    #[test]
+    fn configures_artifact_download_retry_policy() {
+        let policy = ArtifactDownloadRetryPolicy::new(5, Duration::from_millis(10));
+        let client = PypiMirrorClient::with_retry_policy("https://mirror.example", policy)
+            .expect("configured base URL");
+
+        assert_eq!(client.retry_policy.max_attempts(), 5);
+        assert_eq!(
+            client.retry_policy.delay_for_attempt(1),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            client.retry_policy.delay_for_attempt(3),
+            Duration::from_millis(40)
+        );
+    }
+
+    #[test]
+    fn classifies_transient_artifact_download_statuses() {
+        assert!(is_retryable_status(reqwest::StatusCode::REQUEST_TIMEOUT));
+        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(!is_retryable_status(reqwest::StatusCode::NOT_FOUND));
+        assert!(!is_retryable_status(reqwest::StatusCode::FORBIDDEN));
+    }
+
+    #[tokio::test]
+    async fn retries_transient_artifact_byte_downloads() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server_attempts = attempts.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let attempt = server_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut buffer = [0_u8; 1024];
+                let _ = socket.read(&mut buffer).await.expect("read request");
+                let response = if attempt == 1 {
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                        .to_string()
+                };
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+        let client = PypiMirrorClient::with_retry_policy(
+            "https://pypi.org",
+            ArtifactDownloadRetryPolicy::new(2, Duration::from_millis(1)),
+        )
+        .expect("client");
+
+        let bytes = client
+            .fetch_artifact_bytes(&format!("http://{address}/demo.whl"))
+            .await
+            .expect("download should retry and succeed");
+
+        assert_eq!(bytes, b"ok");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        server.await.expect("server task");
     }
 
     #[test]

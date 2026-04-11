@@ -1,8 +1,9 @@
 use crate::{
-    ArgonPasswordHasher, ArtifactStorageBackend, DatabaseStoreKind, FileSystemObjectStorage,
-    InMemoryRegistryStore, JsonAttestationSigner, OpenDalObjectStorage, PostgresRegistryStore,
-    PySentryVulnerabilityScanner, PypiMirrorClient, Settings, Sha256TokenHasher,
-    SimpleJwksOidcVerifier, SqliteRegistryStore, YaraWheelVirusScanner, ZipWheelArchiveReader,
+    ArgonPasswordHasher, ArtifactDownloadRetryPolicy, ArtifactStorageBackend, DatabaseStoreKind,
+    FileSystemObjectStorage, InMemoryRegistryStore, JsonAttestationSigner, OpenDalObjectStorage,
+    PostgresRegistryStore, PySentryVulnerabilityScanner, PypiMirrorClient, Settings,
+    Sha256TokenHasher, SimpleJwksOidcVerifier, SqliteRegistryStore, YaraWheelVirusScanner,
+    ZipWheelArchiveReader,
 };
 use log::{info, warn};
 use pyregistry_application::{
@@ -10,6 +11,7 @@ use pyregistry_application::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 pub async fn build_application(
@@ -17,18 +19,31 @@ pub async fn build_application(
 ) -> Result<Arc<PyregistryApp>, InfrastructureError> {
     let registry_store = build_registry_store(settings).await?;
     info!(
-        "using PyPI-compatible upstream base URL {} with mirror download concurrency {}",
-        settings.pypi.base_url, settings.pypi.mirror_download_concurrency
+        "using PyPI-compatible upstream base URL {} with mirror download concurrency {}, artifact download attempts {}, initial backoff {} ms",
+        settings.pypi.base_url,
+        settings.pypi.mirror_download_concurrency,
+        settings.pypi.artifact_download_max_attempts,
+        settings.pypi.artifact_download_initial_backoff_millis
     );
     let object_storage = build_object_storage(settings)?;
-    let mirror_client = match PypiMirrorClient::new(&settings.pypi.base_url) {
+    let retry_policy = ArtifactDownloadRetryPolicy::new(
+        settings.pypi.artifact_download_max_attempts,
+        Duration::from_millis(settings.pypi.artifact_download_initial_backoff_millis),
+    );
+    let mirror_client = match PypiMirrorClient::with_retry_policy(
+        &settings.pypi.base_url,
+        retry_policy,
+    ) {
         Ok(client) => Arc::new(client),
         Err(error) => {
             warn!(
                 "configured PyPI base URL `{}` is invalid ({}); falling back to https://pypi.org",
                 settings.pypi.base_url, error
             );
-            Arc::new(PypiMirrorClient::default())
+            Arc::new(
+                PypiMirrorClient::with_retry_policy("https://pypi.org", retry_policy)
+                    .expect("fallback PyPI URL is valid"),
+            )
         }
     };
     Ok(Arc::new(PyregistryApp::new(

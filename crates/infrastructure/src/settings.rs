@@ -103,6 +103,14 @@ impl Settings {
                     "PYPI_MIRROR_DOWNLOAD_CONCURRENCY",
                     default_mirror_download_concurrency(),
                 ),
+                artifact_download_max_attempts: read_env_usize(
+                    "PYPI_ARTIFACT_DOWNLOAD_MAX_ATTEMPTS",
+                    default_artifact_download_max_attempts(),
+                ),
+                artifact_download_initial_backoff_millis: read_env_u64(
+                    "PYPI_ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MILLIS",
+                    default_artifact_download_initial_backoff_millis(),
+                ),
                 mirror_update_enabled: read_env_bool("PYPI_MIRROR_UPDATE_ENABLED", true),
                 mirror_update_interval_seconds: read_env_u64(
                     "PYPI_MIRROR_UPDATE_INTERVAL_SECONDS",
@@ -283,6 +291,16 @@ impl Settings {
                 "mirror_download_concurrency must be greater than zero".into(),
             ));
         }
+        if self.pypi.artifact_download_max_attempts == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "artifact_download_max_attempts must be greater than zero".into(),
+            ));
+        }
+        if self.pypi.artifact_download_initial_backoff_millis == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "artifact_download_initial_backoff_millis must be greater than zero".into(),
+            ));
+        }
         if self.pypi.mirror_update_interval_seconds == 0 {
             return Err(SettingsError::InvalidPypiConfig(
                 "mirror_update_interval_seconds must be greater than zero".into(),
@@ -420,6 +438,8 @@ impl DatabaseStoreKind {
 pub struct PypiConfig {
     pub base_url: String,
     pub mirror_download_concurrency: usize,
+    pub artifact_download_max_attempts: usize,
+    pub artifact_download_initial_backoff_millis: u64,
     pub mirror_update_enabled: bool,
     pub mirror_update_interval_seconds: u64,
     pub mirror_update_on_startup: bool,
@@ -429,9 +449,11 @@ impl PypiConfig {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "base_url={}, mirror_download_concurrency={}, mirror_update_enabled={}, mirror_update_interval_seconds={}, mirror_update_on_startup={}",
+            "base_url={}, mirror_download_concurrency={}, artifact_download_max_attempts={}, artifact_download_initial_backoff_millis={}, mirror_update_enabled={}, mirror_update_interval_seconds={}, mirror_update_on_startup={}",
             self.base_url,
             self.mirror_download_concurrency,
+            self.artifact_download_max_attempts,
+            self.artifact_download_initial_backoff_millis,
             self.mirror_update_enabled,
             self.mirror_update_interval_seconds,
             self.mirror_update_on_startup
@@ -689,6 +711,8 @@ struct OpenDalStorageConfigFile {
 struct PypiConfigFile {
     base_url: String,
     mirror_download_concurrency: Option<usize>,
+    artifact_download_max_attempts: Option<usize>,
+    artifact_download_initial_backoff_millis: Option<u64>,
     mirror_update_enabled: Option<bool>,
     mirror_update_interval_seconds: Option<u64>,
     mirror_update_on_startup: Option<bool>,
@@ -907,6 +931,22 @@ impl TryFrom<PypiConfigFile> for PypiConfig {
                 "mirror_download_concurrency must be greater than zero".into(),
             ));
         }
+        let artifact_download_max_attempts = value
+            .artifact_download_max_attempts
+            .unwrap_or_else(default_artifact_download_max_attempts);
+        if artifact_download_max_attempts == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "artifact_download_max_attempts must be greater than zero".into(),
+            ));
+        }
+        let artifact_download_initial_backoff_millis = value
+            .artifact_download_initial_backoff_millis
+            .unwrap_or_else(default_artifact_download_initial_backoff_millis);
+        if artifact_download_initial_backoff_millis == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "artifact_download_initial_backoff_millis must be greater than zero".into(),
+            ));
+        }
         let mirror_update_interval_seconds = value
             .mirror_update_interval_seconds
             .unwrap_or_else(default_mirror_update_interval_seconds);
@@ -919,6 +959,8 @@ impl TryFrom<PypiConfigFile> for PypiConfig {
         Ok(Self {
             base_url,
             mirror_download_concurrency,
+            artifact_download_max_attempts,
+            artifact_download_initial_backoff_millis,
             mirror_update_enabled: value.mirror_update_enabled.unwrap_or(true),
             mirror_update_interval_seconds,
             mirror_update_on_startup: value.mirror_update_on_startup.unwrap_or(true),
@@ -931,6 +973,10 @@ impl From<PypiConfig> for PypiConfigFile {
         Self {
             base_url: value.base_url,
             mirror_download_concurrency: Some(value.mirror_download_concurrency),
+            artifact_download_max_attempts: Some(value.artifact_download_max_attempts),
+            artifact_download_initial_backoff_millis: Some(
+                value.artifact_download_initial_backoff_millis,
+            ),
             mirror_update_enabled: Some(value.mirror_update_enabled),
             mirror_update_interval_seconds: Some(value.mirror_update_interval_seconds),
             mirror_update_on_startup: Some(value.mirror_update_on_startup),
@@ -1149,6 +1195,9 @@ fn default_pypi_config() -> PypiConfig {
     PypiConfig {
         base_url: "https://pypi.org".into(),
         mirror_download_concurrency: default_mirror_download_concurrency(),
+        artifact_download_max_attempts: default_artifact_download_max_attempts(),
+        artifact_download_initial_backoff_millis: default_artifact_download_initial_backoff_millis(
+        ),
         mirror_update_enabled: true,
         mirror_update_interval_seconds: default_mirror_update_interval_seconds(),
         mirror_update_on_startup: true,
@@ -1157,6 +1206,14 @@ fn default_pypi_config() -> PypiConfig {
 
 fn default_mirror_download_concurrency() -> usize {
     4
+}
+
+fn default_artifact_download_max_attempts() -> usize {
+    3
+}
+
+fn default_artifact_download_initial_backoff_millis() -> u64 {
+    250
 }
 
 fn default_mirror_update_interval_seconds() -> u64 {
@@ -1530,6 +1587,14 @@ mod tests {
             original.pypi.mirror_download_concurrency
         );
         assert_eq!(
+            round_trip.pypi.artifact_download_max_attempts,
+            original.pypi.artifact_download_max_attempts
+        );
+        assert_eq!(
+            round_trip.pypi.artifact_download_initial_backoff_millis,
+            original.pypi.artifact_download_initial_backoff_millis
+        );
+        assert_eq!(
             round_trip.pypi.mirror_update_enabled,
             original.pypi.mirror_update_enabled
         );
@@ -1583,6 +1648,10 @@ mod tests {
         let error = PypiConfig::try_from(PypiConfigFile {
             base_url: "https://pypi.org".into(),
             mirror_download_concurrency: Some(0),
+            artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
+            artifact_download_initial_backoff_millis: Some(
+                default_artifact_download_initial_backoff_millis(),
+            ),
             mirror_update_enabled: Some(true),
             mirror_update_interval_seconds: Some(default_mirror_update_interval_seconds()),
             mirror_update_on_startup: Some(true),
@@ -1597,6 +1666,10 @@ mod tests {
         let error = PypiConfig::try_from(PypiConfigFile {
             base_url: "https://pypi.org".into(),
             mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+            artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
+            artifact_download_initial_backoff_millis: Some(
+                default_artifact_download_initial_backoff_millis(),
+            ),
             mirror_update_enabled: Some(true),
             mirror_update_interval_seconds: Some(0),
             mirror_update_on_startup: Some(true),
@@ -1604,6 +1677,38 @@ mod tests {
         .expect_err("zero update interval should fail");
 
         assert!(matches!(error, SettingsError::InvalidPypiConfig(_)));
+    }
+
+    #[test]
+    fn rejects_zero_artifact_download_retry_values() {
+        let attempts_error = PypiConfig::try_from(PypiConfigFile {
+            base_url: "https://pypi.org".into(),
+            mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+            artifact_download_max_attempts: Some(0),
+            artifact_download_initial_backoff_millis: Some(
+                default_artifact_download_initial_backoff_millis(),
+            ),
+            mirror_update_enabled: Some(true),
+            mirror_update_interval_seconds: Some(default_mirror_update_interval_seconds()),
+            mirror_update_on_startup: Some(true),
+        })
+        .expect_err("zero artifact download attempts should fail");
+        assert!(matches!(
+            attempts_error,
+            SettingsError::InvalidPypiConfig(_)
+        ));
+
+        let backoff_error = PypiConfig::try_from(PypiConfigFile {
+            base_url: "https://pypi.org".into(),
+            mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+            artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
+            artifact_download_initial_backoff_millis: Some(0),
+            mirror_update_enabled: Some(true),
+            mirror_update_interval_seconds: Some(default_mirror_update_interval_seconds()),
+            mirror_update_on_startup: Some(true),
+        })
+        .expect_err("zero artifact download backoff should fail");
+        assert!(matches!(backoff_error, SettingsError::InvalidPypiConfig(_)));
     }
 
     #[test]
@@ -1676,6 +1781,10 @@ mod tests {
             pypi: Some(PypiConfigFile {
                 base_url: "https://pypi.org".into(),
                 mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+                artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
+                artifact_download_initial_backoff_millis: Some(
+                    default_artifact_download_initial_backoff_millis(),
+                ),
                 mirror_update_enabled: Some(true),
                 mirror_update_interval_seconds: Some(default_mirror_update_interval_seconds()),
                 mirror_update_on_startup: Some(true),
@@ -1781,6 +1890,10 @@ mod tests {
             pypi: Some(PypiConfigFile {
                 base_url: "https://pypi.org".into(),
                 mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+                artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
+                artifact_download_initial_backoff_millis: Some(
+                    default_artifact_download_initial_backoff_millis(),
+                ),
                 mirror_update_enabled: Some(true),
                 mirror_update_interval_seconds: Some(default_mirror_update_interval_seconds()),
                 mirror_update_on_startup: Some(true),

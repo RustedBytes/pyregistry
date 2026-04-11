@@ -168,6 +168,8 @@ root = ".pyregistry/blobs"
 [pypi]
 base_url = "https://pypi.org"
 mirror_download_concurrency = 4
+artifact_download_max_attempts = 3
+artifact_download_initial_backoff_millis = 250
 mirror_update_enabled = true
 mirror_update_interval_seconds = 3600
 mirror_update_on_startup = true
@@ -234,6 +236,8 @@ Useful environment variables:
 - `POSTGRES_ACQUIRE_TIMEOUT_SECONDS`
 - `PYPI_BASE_URL` or `PYPI_URL`
 - `PYPI_MIRROR_DOWNLOAD_CONCURRENCY`
+- `PYPI_ARTIFACT_DOWNLOAD_MAX_ATTEMPTS`
+- `PYPI_ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MILLIS`
 - `PYPI_MIRROR_UPDATE_ENABLED`
 - `PYPI_MIRROR_UPDATE_INTERVAL_SECONDS`
 - `PYPI_MIRROR_UPDATE_ON_STARTUP`
@@ -399,6 +403,8 @@ The upstream base URL is configurable:
 [pypi]
 base_url = "https://pypi.org"
 mirror_download_concurrency = 4
+artifact_download_max_attempts = 3
+artifact_download_initial_backoff_millis = 250
 mirror_update_enabled = true
 mirror_update_interval_seconds = 3600
 mirror_update_on_startup = true
@@ -407,6 +413,10 @@ mirror_update_on_startup = true
 For an internal PyPI-compatible mirror, set `base_url` to that service instead.
 Increase `mirror_download_concurrency` to cache large projects faster, or lower
 it if your upstream mirror or object storage needs gentler traffic.
+Artifact downloads retry transient network failures plus HTTP 408, 429, and
+5xx responses using exponential backoff from
+`artifact_download_initial_backoff_millis` up to
+`artifact_download_max_attempts`.
 The background updater periodically refreshes already-mirrored projects in
 tenants where mirroring is enabled. It discovers newer upstream releases and
 files, then caches them locally using the same bounded download concurrency.

@@ -12,8 +12,9 @@ use pyregistry_application::{
     WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport, WheelAuditUseCase,
 };
 use pyregistry_infrastructure::{
-    FilesystemDistributionInspector, LoggingConfig, LoggingTimestamp, PypiMirrorClient, Settings,
-    YaraWheelVirusScanner, ZipWheelArchiveReader, build_application, seed_application,
+    ArtifactDownloadRetryPolicy, FilesystemDistributionInspector, LoggingConfig, LoggingTimestamp,
+    PypiMirrorClient, Settings, YaraWheelVirusScanner, ZipWheelArchiveReader, build_application,
+    seed_application,
 };
 use pyregistry_web::{
     AppState, MirrorJobs, RateLimitConfig as WebRateLimitConfig, RateLimiter, router,
@@ -578,7 +579,7 @@ async fn audit_wheel(project: String, wheel: PathBuf, settings: &Settings) -> an
         project,
         wheel.display()
     );
-    ensure_wheel_is_available(&project, &wheel).await?;
+    ensure_wheel_is_available(&project, &wheel, settings).await?;
     let use_case = WheelAuditUseCase::new(
         Arc::new(ZipWheelArchiveReader),
         Arc::new(YaraWheelVirusScanner::from_rules_dir(
@@ -686,7 +687,11 @@ async fn validate_registry_distributions(
     Ok(())
 }
 
-async fn ensure_wheel_is_available(project: &str, wheel: &Path) -> anyhow::Result<()> {
+async fn ensure_wheel_is_available(
+    project: &str,
+    wheel: &Path,
+    settings: &Settings,
+) -> anyhow::Result<()> {
     if wheel.exists() {
         info!("using local wheel file at {}", wheel.display());
         return Ok(());
@@ -702,12 +707,18 @@ async fn ensure_wheel_is_available(project: &str, wheel: &Path) -> anyhow::Resul
             )
         })?;
     info!(
-        "wheel file {} is not present locally; downloading `{}` from PyPI",
+        "wheel file {} is not present locally; downloading `{}` from configured PyPI upstream {}",
         wheel.display(),
-        filename
+        filename,
+        settings.pypi.base_url
     );
 
-    let mirror_client = PypiMirrorClient::default();
+    let retry_policy = ArtifactDownloadRetryPolicy::new(
+        settings.pypi.artifact_download_max_attempts,
+        Duration::from_millis(settings.pypi.artifact_download_initial_backoff_millis),
+    );
+    let mirror_client = PypiMirrorClient::with_retry_policy(&settings.pypi.base_url, retry_policy)
+        .context("configured PyPI base URL is invalid")?;
     tokio::select! {
         result = mirror_client.download_project_artifact_by_filename(project, filename, wheel) => {
             result.with_context(|| {
