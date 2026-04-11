@@ -1,6 +1,6 @@
 use crate::{
     ArgonPasswordHasher, ArtifactStorageBackend, DatabaseStoreKind, FileSystemObjectStorage,
-    InMemoryRegistryStore, JsonAttestationSigner, OpenDalObjectStorage,
+    InMemoryRegistryStore, JsonAttestationSigner, OpenDalObjectStorage, PostgresRegistryStore,
     PySentryVulnerabilityScanner, PypiMirrorClient, Settings, Sha256TokenHasher,
     SimpleJwksOidcVerifier, SqliteRegistryStore, YaraWheelVirusScanner, ZipWheelArchiveReader,
 };
@@ -12,8 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
-pub fn build_application(settings: &Settings) -> Result<Arc<PyregistryApp>, InfrastructureError> {
-    let registry_store = build_registry_store(settings)?;
+pub async fn build_application(
+    settings: &Settings,
+) -> Result<Arc<PyregistryApp>, InfrastructureError> {
+    let registry_store = build_registry_store(settings).await?;
     info!(
         "using PyPI-compatible upstream base URL {} with mirror download concurrency {}",
         settings.pypi.base_url, settings.pypi.mirror_download_concurrency
@@ -50,7 +52,7 @@ pub fn build_application(settings: &Settings) -> Result<Arc<PyregistryApp>, Infr
     )))
 }
 
-fn build_registry_store(
+async fn build_registry_store(
     settings: &Settings,
 ) -> Result<Arc<dyn RegistryStore>, InfrastructureError> {
     match settings.database_store {
@@ -84,9 +86,14 @@ fn build_registry_store(
                 .postgres
                 .as_ref()
                 .ok_or(InfrastructureError::PostgresConfigurationRequired)?;
-            Err(InfrastructureError::PostgresStoreNotImplemented(
-                postgres.log_safe_summary(),
-            ))
+            info!(
+                "building application with PostgreSQL metadata store: {}",
+                postgres.log_safe_summary()
+            );
+            PostgresRegistryStore::connect(postgres)
+                .await
+                .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
+                .map_err(|error| InfrastructureError::MetadataStoreConfiguration(error.to_string()))
         }
     }
 }
@@ -173,10 +180,6 @@ pub enum InfrastructureError {
     SqliteConfigurationRequired,
     #[error("database_store `pgsql` requires postgres connection settings")]
     PostgresConfigurationRequired,
-    #[error(
-        "database_store `pgsql` is configured, but the postgres metadata adapter is not implemented yet ({0})"
-    )]
-    PostgresStoreNotImplemented(String),
     #[error("metadata store is not configured correctly: {0}")]
     MetadataStoreConfiguration(String),
     #[error("artifact object storage is not configured correctly: {0}")]

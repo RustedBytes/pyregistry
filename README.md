@@ -36,10 +36,9 @@ Implemented today:
 
 Important limitations:
 
-- SQLite is the default metadata store. The `in-memory` store is still available
-  for throwaway development runs.
-- `database_store = "pgsql"` is accepted in config, but the Postgres metadata
-  adapter is not implemented yet.
+- SQLite is the default metadata store. PostgreSQL is available for persistent
+  deployments, and the `in-memory` store is still available for throwaway
+  development runs.
 - The UI is intentionally small and admin-focused.
 - Mirroring targets a PyPI-compatible JSON/files API and defaults to
   `https://pypi.org`.
@@ -175,6 +174,12 @@ mirror_update_on_startup = true
 
 [sqlite]
 path = ".pyregistry/pyregistry.sqlite3"
+
+[postgres]
+connection_url = "postgres://pyregistry:pyregistry@127.0.0.1:5432/pyregistry"
+max_connections = 20
+min_connections = 2
+acquire_timeout_seconds = 10
 
 [security]
 yara_rules_path = "supplied/signature-base/yara"

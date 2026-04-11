@@ -29,6 +29,7 @@ sha2.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-postgres.workspace = true
 toml.workspace = true
 url.workspace = true
 uuid.workspace = true

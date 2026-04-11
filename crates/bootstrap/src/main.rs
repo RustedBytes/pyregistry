@@ -257,7 +257,9 @@ async fn serve(settings: Settings, config_source: String) -> anyhow::Result<()> 
     );
 
     info!("building application services");
-    let app = build_application(&settings).context("failed to build application services")?;
+    let app = build_application(&settings)
+        .await
+        .context("failed to build application services")?;
     info!("seeding bootstrap data");
     seed_application(&app, &settings)
         .await
@@ -593,7 +595,9 @@ async fn check_registry(
     }
 
     info!("checking registry security using settings from {config_source}");
-    let app = build_application(&settings).context("failed to build application services")?;
+    let app = build_application(&settings)
+        .await
+        .context("failed to build application services")?;
     seed_application(&app, &settings)
         .await
         .context("failed to seed application")?;
@@ -634,7 +638,9 @@ async fn validate_registry_distributions(
     }
 
     info!("validating stored registry distributions using settings from {config_source}");
-    let app = build_application(&settings).context("failed to build application services")?;
+    let app = build_application(&settings)
+        .await
+        .context("failed to build application services")?;
     seed_application(&app, &settings)
         .await
         .context("failed to seed application")?;
