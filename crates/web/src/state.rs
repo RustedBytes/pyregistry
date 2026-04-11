@@ -1,3 +1,4 @@
+use crate::rate_limit::RateLimiter;
 use pyregistry_application::{AdminSession, PyregistryApp};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -82,4 +83,5 @@ pub struct AppState {
     pub app: Arc<PyregistryApp>,
     pub sessions: Arc<RwLock<HashMap<String, AdminSession>>>,
     pub mirror_jobs: MirrorJobs,
+    pub rate_limiter: RateLimiter,
 }

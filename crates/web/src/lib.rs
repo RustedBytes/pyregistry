@@ -3,17 +3,22 @@ mod auth;
 mod error;
 mod models;
 mod package_api;
+mod rate_limit;
 mod state;
 
+pub use rate_limit::{RateLimitConfig, RateLimiter};
 pub use state::{AppState, MirrorJobs};
 
 use axum::{
-    Router,
+    Router, middleware,
     routing::{get, post},
 };
 
 #[must_use]
 pub fn router(state: AppState) -> Router {
+    let rate_limit_layer =
+        middleware::from_fn_with_state(state.clone(), rate_limit::enforce_api_rate_limit);
+
     Router::new()
         .route("/", get(admin::index))
         .route(
@@ -81,5 +86,6 @@ pub fn router(state: AppState) -> Router {
             "/_/oidc/mint-token",
             post(package_api::mint_oidc_publish_token),
         )
+        .layer(rate_limit_layer)
         .with_state(state)
 }

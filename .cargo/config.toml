@@ -1,0 +1,4 @@
+[alias]
+xtest = "nextest run --workspace"
+coverage = "llvm-cov nextest --workspace --summary-only --fail-under-lines 40"
+coverage-ci = "llvm-cov nextest --workspace --profile ci --summary-only --fail-under-lines 40"

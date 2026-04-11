@@ -235,3 +235,66 @@ fn max_severity(left: Option<String>, right: Option<String>) -> Option<String> {
         (None, None) => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_security_report_aggregates_package_summaries() {
+        let report = registry_security_report(vec![
+            package_report("acme", "demo", 2, 1, 3, Some("MEDIUM")),
+            package_report("acme", "helper", 1, 1, 1, Some("CRITICAL")),
+            package_report("tools", "clean", 4, 0, 0, None),
+        ]);
+
+        assert_eq!(report.package_count, 3);
+        assert_eq!(report.file_count, 7);
+        assert_eq!(report.vulnerable_file_count, 2);
+        assert_eq!(report.vulnerability_count, 4);
+        assert_eq!(report.highest_severity.as_deref(), Some("CRITICAL"));
+    }
+
+    #[test]
+    fn max_severity_keeps_stronger_or_existing_value() {
+        assert_eq!(
+            max_severity(Some("LOW".into()), Some("HIGH".into())).as_deref(),
+            Some("HIGH")
+        );
+        assert_eq!(
+            max_severity(Some("MEDIUM".into()), Some("UNKNOWN".into())).as_deref(),
+            Some("MEDIUM")
+        );
+        assert_eq!(
+            max_severity(Some("LOW".into()), None).as_deref(),
+            Some("LOW")
+        );
+        assert_eq!(
+            max_severity(None, Some("CRITICAL".into())).as_deref(),
+            Some("CRITICAL")
+        );
+        assert_eq!(max_severity(None, None), None);
+    }
+
+    fn package_report(
+        tenant_slug: &str,
+        project_name: &str,
+        scanned_file_count: usize,
+        vulnerable_file_count: usize,
+        vulnerability_count: usize,
+        highest_severity: Option<&str>,
+    ) -> RegistryPackageSecurityReport {
+        RegistryPackageSecurityReport {
+            tenant_slug: tenant_slug.into(),
+            project_name: project_name.into(),
+            normalized_name: project_name.into(),
+            security: PackageSecuritySummary {
+                scanned_file_count,
+                vulnerable_file_count,
+                vulnerability_count,
+                highest_severity: highest_severity.map(str::to_string),
+                scan_error: None,
+            },
+        }
+    }
+}

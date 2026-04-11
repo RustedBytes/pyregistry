@@ -6,7 +6,7 @@ private search, PyPI mirroring, provenance, trusted publishing, and lightweight
 package security checks without running a full PyPI clone.
 
 The project is intentionally server-rendered and minimal: Axum for HTTP, Askama
-templates for HTML, TOML/YAML configuration, and no frontend build pipeline.
+templates for HTML, TOML configuration, and no frontend build pipeline.
 
 ## Current Status
 
@@ -26,6 +26,7 @@ Implemented today:
 - OIDC trusted publishing token minting for configured issuers.
 - SQLite metadata store by default, with in-memory available for throwaway runs.
 - OpenDAL artifact storage with filesystem and S3/MinIO configuration.
+- Per-client rate limiting for package and OIDC API endpoints.
 - Wheel audit CLI and UI modal with RustPython AST checks, heuristics, and YARA virus signatures.
 - PySentry-backed known vulnerability checks for package versions.
 
@@ -60,6 +61,8 @@ drivers, serialization formats, or config loading.
   and this repository has been tested with a newer stable toolchain.
 - `cargo-nextest` for the workspace test runner:
   `cargo install cargo-nextest --locked`
+- `cargo-llvm-cov` for the coverage gate:
+  `cargo install cargo-llvm-cov --locked`
 - Docker Compose, optional, for local Postgres, MinIO, and the test JWKS server.
 - Python tooling such as `pip`, `uv`, and `twine`, optional, for compatibility
   smoke tests.
@@ -72,6 +75,7 @@ Build and test:
 cargo fmt
 cargo check --workspace
 cargo nextest run --workspace
+./scripts/coverage.sh
 ```
 
 Generate a local config:
@@ -137,7 +141,7 @@ Pyregistry loads settings in this order:
 - `pyregistry.toml` in the current directory.
 - Environment variables.
 
-TOML and YAML are supported. The file format is inferred from the extension.
+Only TOML config files are supported. Config paths must use a `.toml` suffix.
 
 Common settings:
 
@@ -167,6 +171,13 @@ path = ".pyregistry/pyregistry.sqlite3"
 
 [security]
 yara_rules_path = "supplied/signature-base/yara"
+
+[rate_limit]
+enabled = true
+requests_per_minute = 120
+burst = 60
+max_tracked_clients = 10000
+trust_proxy_headers = false
 
 [logging]
 filter = "info"
@@ -208,11 +219,21 @@ Useful environment variables:
 - `POSTGRES_ACQUIRE_TIMEOUT_SECONDS`
 - `PYPI_BASE_URL` or `PYPI_URL`
 - `YARA_RULES_PATH`
+- `RATE_LIMIT_ENABLED`
+- `RATE_LIMIT_REQUESTS_PER_MINUTE`
+- `RATE_LIMIT_BURST`
+- `RATE_LIMIT_MAX_TRACKED_CLIENTS`
+- `RATE_LIMIT_TRUST_PROXY_HEADERS`
 - `LOG_FILTER`
 - `LOG_MODULE_PATH`
 - `LOG_TARGET`
 - `LOG_TIMESTAMP`
 - `OIDC_ISSUERS`
+
+Rate limiting applies to package and OIDC API paths (`/t/...` and
+`/_/oidc/...`). By default Pyregistry keys limits by the direct TCP peer IP. If
+the service runs behind a trusted reverse proxy, set `trust_proxy_headers = true`
+so `X-Forwarded-For`, `X-Real-IP`, or `Forwarded` can be used instead.
 
 ## CLI
 
@@ -359,6 +380,7 @@ Run the main checks before handing off changes:
 cargo fmt
 cargo check --workspace
 cargo nextest run --workspace
+./scripts/coverage.sh
 ```
 
 Use the CI-oriented Nextest profile when you want retries for potentially flaky
@@ -366,7 +388,12 @@ integration checks:
 
 ```bash
 cargo nextest run --workspace --profile ci
+./scripts/coverage.sh --profile ci
 ```
+
+The coverage gate currently requires at least 40% line coverage. To experiment
+with a stricter local threshold, set `COVERAGE_MIN_LINES`, for example
+`COVERAGE_MIN_LINES=45 ./scripts/coverage.sh`.
 
 The first full build after adding YARA-X can take longer because the dependency
 tree includes the YARA-X scanner and Wasmtime components.

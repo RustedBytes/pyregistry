@@ -52,5 +52,4 @@ tower-http = { version = "0.6", features = ["fs", "trace"] }
 url = "2.5"
 uuid = { version = "1.18", features = ["serde", "v4"] }
 yara-x = "1.14"
-yaml_serde = "0.10"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }

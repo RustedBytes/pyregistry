@@ -10,8 +10,11 @@ use pyregistry_infrastructure::{
     LoggingConfig, LoggingTimestamp, PypiMirrorClient, Settings, YaraWheelVirusScanner,
     ZipWheelArchiveReader, build_application, seed_application,
 };
-use pyregistry_web::{AppState, MirrorJobs, router};
+use pyregistry_web::{
+    AppState, MirrorJobs, RateLimitConfig as WebRateLimitConfig, RateLimiter, router,
+};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,7 +34,7 @@ struct Cli {
         long,
         global = true,
         value_name = "PATH",
-        help = "Load runtime settings from a TOML or YAML config file"
+        help = "Load runtime settings from a TOML config file"
     )]
     config: Option<PathBuf>,
 
@@ -43,12 +46,12 @@ struct Cli {
 enum Command {
     #[command(about = "Run the HTTP service")]
     Serve,
-    #[command(about = "Write a starter TOML or YAML config file")]
+    #[command(about = "Write a starter TOML config file")]
     InitConfig {
         #[arg(
             long,
             value_name = "PATH",
-            help = "Where to write the TOML or YAML config file"
+            help = "Where to write the TOML config file"
         )]
         path: Option<PathBuf>,
         #[arg(
@@ -195,13 +198,27 @@ async fn serve(settings: Settings, config_source: String) -> anyhow::Result<()> 
         app,
         sessions: Arc::new(RwLock::new(HashMap::new())),
         mirror_jobs: MirrorJobs::default(),
+        rate_limiter: RateLimiter::new(WebRateLimitConfig {
+            enabled: settings.rate_limit.enabled,
+            requests_per_minute: settings.rate_limit.requests_per_minute,
+            burst: settings.rate_limit.burst,
+            max_tracked_clients: settings.rate_limit.max_tracked_clients,
+            trust_proxy_headers: settings.rate_limit.trust_proxy_headers,
+        }),
     };
+    info!(
+        "HTTP API rate limiting: {}",
+        state.rate_limiter.log_safe_summary()
+    );
     let router = router(state).layer(TraceLayer::new_for_http());
 
     info!("pyregistry listening on http://{}", settings.bind_address);
-    if let Err(error) = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
+    if let Err(error) = axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
     {
         error!("axum server terminated with an error: {error}");
         return Err(error).context("axum server failed");

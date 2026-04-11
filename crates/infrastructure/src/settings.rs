@@ -22,6 +22,7 @@ pub struct Settings {
     pub sqlite: Option<SqliteConfig>,
     pub postgres: Option<PostgresConfig>,
     pub security: SecurityConfig,
+    pub rate_limit: RateLimitConfig,
     pub logging: LoggingConfig,
     pub oidc_issuers: Vec<OidcIssuerConfig>,
 }
@@ -109,6 +110,19 @@ impl Settings {
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| default_security_config().yara_rules_path),
             },
+            rate_limit: RateLimitConfig {
+                enabled: read_env_bool("RATE_LIMIT_ENABLED", true),
+                requests_per_minute: read_env_u32(
+                    "RATE_LIMIT_REQUESTS_PER_MINUTE",
+                    default_rate_limit_config().requests_per_minute,
+                ),
+                burst: read_env_u32("RATE_LIMIT_BURST", default_rate_limit_config().burst),
+                max_tracked_clients: read_env_usize(
+                    "RATE_LIMIT_MAX_TRACKED_CLIENTS",
+                    default_rate_limit_config().max_tracked_clients,
+                ),
+                trust_proxy_headers: read_env_bool("RATE_LIMIT_TRUST_PROXY_HEADERS", false),
+            },
             logging,
             oidc_issuers,
         };
@@ -130,6 +144,7 @@ impl Settings {
             sqlite: Some(default_sqlite_config()),
             postgres: Some(default_postgres_config()),
             security: default_security_config(),
+            rate_limit: default_rate_limit_config(),
             logging: default_logging_config(),
             oidc_issuers: default_oidc_issuers(),
         }
@@ -143,24 +158,16 @@ impl Settings {
     }
 
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, SettingsError> {
+        ensure_toml_config_path(path.as_ref())?;
         let raw = fs::read_to_string(path.as_ref()).map_err(|source| SettingsError::Io {
             path: path.as_ref().to_path_buf(),
             source,
         })?;
-        let file: SettingsFile = match ConfigFileFormat::from_path(path.as_ref()) {
-            ConfigFileFormat::Toml => {
-                toml::from_str(&raw).map_err(|source| SettingsError::ParseToml {
-                    path: path.as_ref().to_path_buf(),
-                    source,
-                })?
-            }
-            ConfigFileFormat::Yaml => {
-                yaml_serde::from_str(&raw).map_err(|source| SettingsError::ParseYaml {
-                    path: path.as_ref().to_path_buf(),
-                    source,
-                })?
-            }
-        };
+        let file: SettingsFile =
+            toml::from_str(&raw).map_err(|source| SettingsError::ParseToml {
+                path: path.as_ref().to_path_buf(),
+                source,
+            })?;
         file.try_into()
     }
 
@@ -180,6 +187,7 @@ impl Settings {
 
     pub fn write_to_path(&self, path: impl AsRef<Path>, force: bool) -> Result<(), SettingsError> {
         let path = path.as_ref();
+        ensure_toml_config_path(path)?;
         if path.exists() && !force {
             return Err(SettingsError::AlreadyExists(path.to_path_buf()));
         }
@@ -195,16 +203,8 @@ impl Settings {
         }
 
         let file = SettingsFile::from(self.clone());
-        let format = ConfigFileFormat::from_path(path);
-        let mut content = match format {
-            ConfigFileFormat::Toml => {
-                toml::to_string_pretty(&file).map_err(SettingsError::SerializeToml)?
-            }
-            ConfigFileFormat::Yaml => {
-                yaml_serde::to_string(&file).map_err(SettingsError::SerializeYaml)?
-            }
-        };
-        append_artifact_storage_help(&mut content, format, &self.artifact_storage);
+        let mut content = toml::to_string_pretty(&file).map_err(SettingsError::SerializeToml)?;
+        append_artifact_storage_help(&mut content, &self.artifact_storage);
         fs::write(path, content).map_err(|source| SettingsError::Io {
             path: path.to_path_buf(),
             source,
@@ -219,7 +219,7 @@ impl Settings {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, security={}, logging={}, oidc_issuers={}",
+            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, security={}, rate_limit={}, logging={}, oidc_issuers={}",
             self.bind_address,
             self.blob_root.display(),
             self.superadmin_email,
@@ -233,6 +233,7 @@ impl Settings {
                 .as_ref()
                 .map_or_else(|| "disabled".to_string(), PostgresConfig::log_safe_summary),
             self.security.log_safe_summary(),
+            self.rate_limit.log_safe_summary(),
             self.logging.log_safe_summary(),
             self.oidc_issuers.len()
         )
@@ -288,28 +289,9 @@ impl Settings {
                 "security.yara_rules_path must not be empty".into(),
             ));
         }
+        self.rate_limit.validate()?;
 
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ConfigFileFormat {
-    Toml,
-    Yaml,
-}
-
-impl ConfigFileFormat {
-    fn from_path(path: &Path) -> Self {
-        match path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map(|extension| extension.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("yaml" | "yml") => Self::Yaml,
-            _ => Self::Toml,
-        }
     }
 }
 
@@ -488,6 +470,48 @@ impl SecurityConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    pub enabled: bool,
+    pub requests_per_minute: u32,
+    pub burst: u32,
+    pub max_tracked_clients: usize,
+    pub trust_proxy_headers: bool,
+}
+
+impl RateLimitConfig {
+    #[must_use]
+    pub fn log_safe_summary(&self) -> String {
+        format!(
+            "enabled={}, requests_per_minute={}, burst={}, max_tracked_clients={}, trust_proxy_headers={}",
+            self.enabled,
+            self.requests_per_minute,
+            self.burst,
+            self.max_tracked_clients,
+            self.trust_proxy_headers
+        )
+    }
+
+    fn validate(&self) -> Result<(), SettingsError> {
+        if self.requests_per_minute == 0 {
+            return Err(SettingsError::InvalidRateLimitConfig(
+                "requests_per_minute must be greater than zero".into(),
+            ));
+        }
+        if self.burst == 0 {
+            return Err(SettingsError::InvalidRateLimitConfig(
+                "burst must be greater than zero".into(),
+            ));
+        }
+        if self.max_tracked_clients == 0 {
+            return Err(SettingsError::InvalidRateLimitConfig(
+                "max_tracked_clients must be greater than zero".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct LoggingConfig {
     pub filter: String,
     pub module_path: bool,
@@ -552,12 +576,8 @@ pub enum SettingsError {
         #[source]
         source: toml::de::Error,
     },
-    #[error("could not parse YAML config at `{path}`: {source}")]
-    ParseYaml {
-        path: PathBuf,
-        #[source]
-        source: yaml_serde::Error,
-    },
+    #[error("unsupported config file format for `{0}`; only .toml config files are supported")]
+    UnsupportedConfigFormat(PathBuf),
     #[error("invalid OIDC provider `{0}` in config")]
     InvalidOidcProvider(String),
     #[error("invalid pypi config: {0}")]
@@ -572,12 +592,12 @@ pub enum SettingsError {
     InvalidArtifactStorageConfig(String),
     #[error("invalid security config: {0}")]
     InvalidSecurityConfig(String),
+    #[error("invalid rate limit config: {0}")]
+    InvalidRateLimitConfig(String),
     #[error("invalid logging config: {0}")]
     InvalidLoggingConfig(String),
     #[error("could not serialize TOML config: {0}")]
     SerializeToml(#[source] toml::ser::Error),
-    #[error("could not serialize YAML config: {0}")]
-    SerializeYaml(#[source] yaml_serde::Error),
     #[error("config file `{0}` already exists; pass --force to overwrite it")]
     AlreadyExists(PathBuf),
 }
@@ -595,6 +615,7 @@ struct SettingsFile {
     sqlite: Option<SqliteConfigFile>,
     postgres: Option<PostgresConfigFile>,
     security: Option<SecurityConfigFile>,
+    rate_limit: Option<RateLimitConfigFile>,
     logging: Option<LoggingConfigFile>,
     oidc_issuers: Vec<OidcIssuerConfigFile>,
 }
@@ -634,6 +655,15 @@ struct SqliteConfigFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SecurityConfigFile {
     yara_rules_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RateLimitConfigFile {
+    enabled: bool,
+    requests_per_minute: u32,
+    burst: u32,
+    max_tracked_clients: usize,
+    trust_proxy_headers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -692,6 +722,11 @@ impl TryFrom<SettingsFile> for Settings {
                 .map(SecurityConfig::try_from)
                 .transpose()?
                 .unwrap_or_else(default_security_config),
+            rate_limit: value
+                .rate_limit
+                .map(RateLimitConfig::try_from)
+                .transpose()?
+                .unwrap_or_else(default_rate_limit_config),
             logging: value
                 .logging
                 .map(LoggingConfig::try_from)
@@ -722,6 +757,7 @@ impl From<Settings> for SettingsFile {
             sqlite: value.sqlite.map(Into::into),
             postgres: value.postgres.map(Into::into),
             security: Some(value.security.into()),
+            rate_limit: Some(value.rate_limit.into()),
             logging: Some(value.logging.into()),
             oidc_issuers: value.oidc_issuers.into_iter().map(Into::into).collect(),
         }
@@ -906,6 +942,34 @@ impl From<SecurityConfig> for SecurityConfigFile {
     }
 }
 
+impl TryFrom<RateLimitConfigFile> for RateLimitConfig {
+    type Error = SettingsError;
+
+    fn try_from(value: RateLimitConfigFile) -> Result<Self, Self::Error> {
+        let config = Self {
+            enabled: value.enabled,
+            requests_per_minute: value.requests_per_minute,
+            burst: value.burst,
+            max_tracked_clients: value.max_tracked_clients,
+            trust_proxy_headers: value.trust_proxy_headers,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl From<RateLimitConfig> for RateLimitConfigFile {
+    fn from(value: RateLimitConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            requests_per_minute: value.requests_per_minute,
+            burst: value.burst,
+            max_tracked_clients: value.max_tracked_clients,
+            trust_proxy_headers: value.trust_proxy_headers,
+        }
+    }
+}
+
 impl TryFrom<LoggingConfigFile> for LoggingConfig {
     type Error = SettingsError;
 
@@ -1052,6 +1116,16 @@ fn default_sqlite_config() -> SqliteConfig {
 fn default_security_config() -> SecurityConfig {
     SecurityConfig {
         yara_rules_path: PathBuf::from("supplied/signature-base/yara"),
+    }
+}
+
+fn default_rate_limit_config() -> RateLimitConfig {
+    RateLimitConfig {
+        enabled: true,
+        requests_per_minute: 120,
+        burst: 60,
+        max_tracked_clients: 10_000,
+        trust_proxy_headers: false,
     }
 }
 
@@ -1252,15 +1326,21 @@ fn random_cookie_secret() -> String {
     Alphanumeric.sample_string(&mut rand::rng(), 64)
 }
 
-fn append_artifact_storage_help(
-    content: &mut String,
-    format: ConfigFileFormat,
-    artifact_storage: &ArtifactStorageConfig,
-) {
-    match format {
-        ConfigFileFormat::Toml => append_toml_artifact_storage_help(content, artifact_storage),
-        ConfigFileFormat::Yaml => append_yaml_artifact_storage_help(content, artifact_storage),
+fn ensure_toml_config_path(path: &Path) -> Result<(), SettingsError> {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("toml"))
+        .unwrap_or(false)
+    {
+        return Ok(());
     }
+
+    Err(SettingsError::UnsupportedConfigFormat(path.to_path_buf()))
+}
+
+fn append_artifact_storage_help(content: &mut String, artifact_storage: &ArtifactStorageConfig) {
+    append_toml_artifact_storage_help(content, artifact_storage);
 }
 
 fn append_toml_artifact_storage_help(
@@ -1301,45 +1381,6 @@ fn append_toml_artifact_storage_help(
     );
 }
 
-fn append_yaml_artifact_storage_help(
-    content: &mut String,
-    artifact_storage: &ArtifactStorageConfig,
-) {
-    if artifact_storage.opendal.scheme == "s3" {
-        content.push_str(
-            r#"
-# Artifact storage is configured for OpenDAL S3.
-# The defaults above target the docker-compose MinIO service.
-# Make sure the `pyregistry` bucket exists before serving.
-"#,
-        );
-        return;
-    }
-
-    content.push_str(
-        r#"
-# MinIO/S3 artifact storage example:
-# To use the docker-compose MinIO service, replace artifact_storage.opendal
-# above with:
-#
-# artifact_storage:
-#   backend: opendal
-#   opendal:
-#     scheme: s3
-#     options:
-#       bucket: pyregistry
-#       endpoint: http://127.0.0.1:9000
-#       region: us-east-1
-#       access_key_id: pyregistry
-#       secret_access_key: pyregistry123
-#       root: /artifacts
-#       disable_config_load: "true"
-#       disable_ec2_metadata: "true"
-#       enable_virtual_host_style: "false"
-"#,
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1370,6 +1411,15 @@ mod tests {
             original.pypi.mirror_download_concurrency
         );
         assert_eq!(
+            round_trip.rate_limit.requests_per_minute,
+            original.rate_limit.requests_per_minute
+        );
+        assert_eq!(round_trip.rate_limit.burst, original.rate_limit.burst);
+        assert_eq!(
+            round_trip.rate_limit.trust_proxy_headers,
+            original.rate_limit.trust_proxy_headers
+        );
+        assert_eq!(
             round_trip.sqlite.as_ref().map(|sqlite| &sqlite.path),
             original.sqlite.as_ref().map(|sqlite| &sqlite.path)
         );
@@ -1394,29 +1444,6 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_settings_through_yaml_shape() {
-        let original = Settings::new_local_template();
-        let raw = yaml_serde::to_string(&SettingsFile::from(original.clone())).expect("serialize");
-        let parsed: SettingsFile = yaml_serde::from_str(&raw).expect("parse");
-        let round_trip = Settings::try_from(parsed).expect("settings");
-
-        assert_eq!(round_trip.bind_address, original.bind_address);
-        assert_eq!(round_trip.database_store, original.database_store);
-        assert_eq!(
-            round_trip.sqlite.as_ref().map(|sqlite| &sqlite.path),
-            original.sqlite.as_ref().map(|sqlite| &sqlite.path)
-        );
-        assert_eq!(
-            round_trip.artifact_storage.opendal.options.get("root"),
-            original.artifact_storage.opendal.options.get("root")
-        );
-        assert_eq!(
-            round_trip.pypi.mirror_download_concurrency,
-            original.pypi.mirror_download_concurrency
-        );
-    }
-
-    #[test]
     fn rejects_zero_mirror_download_concurrency() {
         let error = PypiConfig::try_from(PypiConfigFile {
             base_url: "https://pypi.org".into(),
@@ -1425,6 +1452,20 @@ mod tests {
         .expect_err("zero concurrency should fail");
 
         assert!(matches!(error, SettingsError::InvalidPypiConfig(_)));
+    }
+
+    #[test]
+    fn rejects_zero_rate_limit_values() {
+        let error = RateLimitConfig::try_from(RateLimitConfigFile {
+            enabled: true,
+            requests_per_minute: 0,
+            burst: 60,
+            max_tracked_clients: 10_000,
+            trust_proxy_headers: false,
+        })
+        .expect_err("zero requests per minute should fail");
+
+        assert!(matches!(error, SettingsError::InvalidRateLimitConfig(_)));
     }
 
     #[test]
@@ -1477,6 +1518,7 @@ mod tests {
             sqlite: Some(default_sqlite_config().into()),
             postgres: Some(default_postgres_config().into()),
             security: Some(default_security_config().into()),
+            rate_limit: Some(default_rate_limit_config().into()),
             logging: Some(LoggingConfigFile {
                 filter: "info".into(),
                 module_path: true,
@@ -1512,20 +1554,44 @@ mod tests {
 
     #[test]
     fn write_minio_config_uses_active_s3_fields() {
-        let target = std::env::temp_dir().join(format!("pyregistry-{}.yaml", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!("pyregistry-{}.toml", Uuid::new_v4()));
         Settings::new_minio_template()
             .write_to_path(&target, true)
             .expect("write config");
 
         let raw = fs::read_to_string(&target).expect("read config");
 
-        assert!(raw.contains("scheme: s3"));
-        assert!(raw.contains("bucket: pyregistry"));
-        assert!(raw.contains("endpoint: http://127.0.0.1:9000"));
-        assert!(raw.contains("disable_config_load: 'true'"));
+        assert!(raw.contains("scheme = \"s3\""));
+        assert!(raw.contains("bucket = \"pyregistry\""));
+        assert!(raw.contains("endpoint = \"http://127.0.0.1:9000\""));
+        assert!(raw.contains("disable_config_load = \"true\""));
 
         let loaded = Settings::load_from_path(&target).expect("load generated config");
         assert_eq!(loaded.artifact_storage.opendal.scheme, "s3");
+
+        let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn rejects_non_toml_config_paths() {
+        let target = std::env::temp_dir().join(format!("pyregistry-{}.yaml", Uuid::new_v4()));
+        let write_error = Settings::new_local_template()
+            .write_to_path(&target, true)
+            .expect_err("non-TOML config paths should fail on write");
+
+        assert!(matches!(
+            write_error,
+            SettingsError::UnsupportedConfigFormat(_)
+        ));
+
+        fs::write(&target, "bind_address = \"127.0.0.1:3000\"").expect("write config fixture");
+        let load_error = Settings::load_from_path(&target)
+            .expect_err("non-TOML config paths should fail on load");
+
+        assert!(matches!(
+            load_error,
+            SettingsError::UnsupportedConfigFormat(_)
+        ));
 
         let _ = fs::remove_file(target);
     }
@@ -1553,6 +1619,7 @@ mod tests {
             sqlite: Some(default_sqlite_config().into()),
             postgres: None,
             security: Some(default_security_config().into()),
+            rate_limit: Some(default_rate_limit_config().into()),
             logging: Some(LoggingConfigFile {
                 filter: "info".into(),
                 module_path: true,
