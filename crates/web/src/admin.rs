@@ -1281,6 +1281,31 @@ mod tests {
     }
 
     #[test]
+    fn package_detail_template_collapses_install_block_by_default() {
+        let details = PackageDetails {
+            tenant_slug: "acme".into(),
+            project_name: "rsloop".into(),
+            normalized_name: "rsloop".into(),
+            summary: String::new(),
+            description: String::new(),
+            source: "Local".into(),
+            security: PackageSecuritySummary::default(),
+            releases: Vec::new(),
+            trusted_publishers: Vec::new(),
+        };
+
+        let rendered = PackageDetailTemplate {
+            details: package_detail_view(details, "http://127.0.0.1:3000"),
+        }
+        .render()
+        .expect("render package detail");
+
+        assert!(rendered.contains("<details class=\"install-panel\">"));
+        assert!(!rendered.contains("<details class=\"install-panel\" open>"));
+        assert!(rendered.contains("Index URL, pip, and uv commands"));
+    }
+
+    #[test]
     fn package_detail_view_exposes_admin_download_url_for_release_files() {
         let details = PackageDetails {
             tenant_slug: "acme".into(),

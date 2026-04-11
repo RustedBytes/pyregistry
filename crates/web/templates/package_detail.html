@@ -23,6 +23,11 @@
         padding: 22px;
         margin-bottom: 18px;
       }
+      .install-section {
+        background: transparent;
+        border: 0;
+        padding: 0;
+      }
       form { display: inline-block; margin-right: 8px; margin-top: 8px; }
       button {
         border: 0;
@@ -197,6 +202,12 @@
         display: grid;
         gap: 14px;
       }
+      .install-panel {
+        margin-top: 0;
+      }
+      .install-content {
+        padding: 0 16px 16px;
+      }
       .security-card {
         border-color: #d7b46a;
         background: #fffaf0;
@@ -306,23 +317,30 @@
         {% endif %}
       </section>
 
-      <section>
-        <h2>Install</h2>
-        <p class="muted">Use a tenant read token with the simple index for this package.</p>
-        <div class="install-grid">
-          <div>
-            <p><strong>Index URL</strong></p>
-            <pre><code>{{ details.index_url }}</code></pre>
+      <section class="install-section">
+        <details class="install-panel">
+          <summary>
+            <span>Install</span>
+            <span class="summary-meta">Index URL, pip, and uv commands</span>
+          </summary>
+          <div class="install-content">
+            <p class="muted">Use a tenant read token with the simple index for this package.</p>
+            <div class="install-grid">
+              <div>
+                <p><strong>Index URL</strong></p>
+                <pre><code>{{ details.index_url }}</code></pre>
+              </div>
+              <div>
+                <p><strong>pip</strong></p>
+                <pre><code>{{ details.pip_install_command }}</code></pre>
+              </div>
+              <div>
+                <p><strong>uv</strong></p>
+                <pre><code>{{ details.uv_install_command }}</code></pre>
+              </div>
+            </div>
           </div>
-          <div>
-            <p><strong>pip</strong></p>
-            <pre><code>{{ details.pip_install_command }}</code></pre>
-          </div>
-          <div>
-            <p><strong>uv</strong></p>
-            <pre><code>{{ details.uv_install_command }}</code></pre>
-          </div>
-        </div>
+        </details>
       </section>
 
       <section>
