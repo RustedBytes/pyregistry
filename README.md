@@ -91,7 +91,7 @@ cargo run -p pyregistry -- init-config --path pyregistry.toml --force
 Start the service:
 
 ```bash
-cargo run -p pyregistry -- --config pyregistry.toml serve
+scripts/pyregistry-release.sh --config pyregistry.toml serve
 ```
 
 Then open:
@@ -249,17 +249,22 @@ so `X-Forwarded-For`, `X-Real-IP`, or `Forwarded` can be used instead.
 ## CLI
 
 ```bash
-cargo run -p pyregistry -- --help
+scripts/pyregistry-release.sh --help
 ```
 
 Commands:
 
 ```bash
-cargo run -p pyregistry -- serve
+scripts/pyregistry-release.sh serve
 cargo run -p pyregistry -- init-config --path pyregistry.toml --force
-cargo run -p pyregistry -- audit-wheel --project rsloop --wheel rsloop-0.1.14-cp314-cp314t-win_arm64.whl
-cargo run -p pyregistry -- check-registry --tenant acme
+scripts/pyregistry-release.sh audit-wheel --project rsloop --wheel rsloop-0.1.14-cp314-cp314t-win_arm64.whl
+scripts/pyregistry-release.sh check-registry --tenant acme
 ```
+
+Use release mode for serving, mirroring, vulnerability checks, and wheel scans.
+Debug builds work for development, but they are much slower for YARA and
+RustPython analysis. The helper above is equivalent to
+`cargo run --release -p pyregistry -- ...`.
 
 `audit-wheel` downloads the named wheel from the configured PyPI upstream if the
 file is not present locally. The audit checks:

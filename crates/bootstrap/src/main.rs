@@ -106,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
             let settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
             init_logging(&settings.logging);
+            log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             serve(settings, config_source).await
         }
@@ -126,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
             let settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
             init_logging(&settings.logging);
+            log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             audit_wheel(project, wheel, &settings).await
         }
@@ -134,9 +136,20 @@ async fn main() -> anyhow::Result<()> {
             let settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
             init_logging(&settings.logging);
+            log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             check_registry(settings, config_source, tenant, project).await
         }
+    }
+}
+
+fn log_build_mode() {
+    if cfg!(debug_assertions) {
+        warn!(
+            "running an unoptimized debug build; use `cargo run --release -p pyregistry -- ...` or `scripts/pyregistry-release.sh` for serving, mirroring, and wheel scans"
+        );
+    } else {
+        info!("running optimized release build");
     }
 }
 
