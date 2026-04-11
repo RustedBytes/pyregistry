@@ -423,6 +423,50 @@ rule Pyregistry_Eicar_Test {
     }
 
     #[test]
+    fn includes_tags_and_metadata_in_yara_evidence() {
+        let rules_dir =
+            std::env::temp_dir().join(format!("pyregistry-yara-meta-{}", Uuid::new_v4()));
+        fs::create_dir_all(&rules_dir).expect("create rules dir");
+        fs::write(
+            rules_dir.join("meta.yara"),
+            r#"
+rule Pyregistry_Meta_Test : malware test {
+    meta:
+        score = 10
+        ratio = 1.5
+        enabled = true
+        description = "demo rule"
+    strings:
+        $payload = "PYREGISTRY-META-MATCH"
+    condition:
+        $payload
+}
+"#,
+        )
+        .expect("write rule");
+
+        let scanner = YaraWheelVirusScanner::from_rules_dir(&rules_dir);
+        let result = scanner
+            .scan_archive(&WheelArchiveSnapshot {
+                wheel_filename: "demo-0.1.0-py3-none-any.whl".into(),
+                entries: vec![WheelArchiveEntry {
+                    path: "demo/payload.bin".into(),
+                    contents: b"PYREGISTRY-META-MATCH".to_vec(),
+                }],
+            })
+            .expect("scan archive");
+
+        let evidence = result.findings[0].evidence.join("\n");
+        assert!(evidence.contains("tags=malware,test"));
+        assert!(evidence.contains("meta.score=10"));
+        assert!(evidence.contains("meta.ratio=1.5"));
+        assert!(evidence.contains("meta.enabled=true"));
+        assert!(evidence.contains("meta.description=demo rule"));
+
+        let _ = fs::remove_dir_all(rules_dir);
+    }
+
+    #[test]
     fn falls_back_to_bundled_rules_when_configured_dir_is_missing() {
         let missing_rules_dir =
             std::env::temp_dir().join(format!("pyregistry-missing-yara-{}", Uuid::new_v4()));
@@ -431,5 +475,94 @@ rule Pyregistry_Eicar_Test {
         assert_eq!(scanner.rules_source, "bundled supplied/signature-base");
         assert!(scanner.rules.is_some());
         assert!(scanner.signature_rule_count > 0);
+    }
+
+    #[test]
+    fn unloaded_scanner_reports_clear_error() {
+        let scanner = YaraWheelVirusScanner {
+            rules_source: "test rules".into(),
+            rules: None,
+            signature_rule_count: 0,
+            skipped_rule_count: 0,
+            load_error: Some("boom".into()),
+        };
+
+        let error = scanner
+            .scan_archive(&WheelArchiveSnapshot {
+                wheel_filename: "demo.whl".into(),
+                entries: Vec::new(),
+            })
+            .expect_err("missing rules should fail");
+
+        assert!(error.to_string().contains("YARA rules are not loaded"));
+        assert!(error.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn rule_directory_validation_and_collection_handles_edge_cases() {
+        let root = std::env::temp_dir().join(format!("pyregistry-yara-tree-{}", Uuid::new_v4()));
+        let missing = root.join("missing");
+        let missing_error = compile_rules_dir(&missing)
+            .err()
+            .expect("missing dir should fail");
+        assert!(missing_error.contains("does not exist"));
+
+        fs::create_dir_all(&root).expect("create root");
+        let file_path = root.join("not-a-dir.yar");
+        fs::write(&file_path, "rule FileRule { condition: true }").expect("write file");
+        let file_error = compile_rules_dir(&file_path)
+            .err()
+            .expect("file path should fail");
+        assert!(file_error.contains("not a directory"));
+
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).expect("create empty dir");
+        let empty_error = compile_rules_dir(&empty)
+            .err()
+            .expect("empty dir should fail");
+        assert!(empty_error.contains("does not contain"));
+
+        let nested = root.join("nested");
+        fs::create_dir_all(nested.join("child")).expect("create nested dir");
+        fs::write(
+            nested.join("child").join("one.yar"),
+            "rule One { condition: true }",
+        )
+        .expect("write yar");
+        fs::write(nested.join("two.yara"), "rule Two { condition: true }").expect("write yara");
+        fs::write(nested.join("notes.txt"), "ignored").expect("write ignored");
+        let mut rule_files = Vec::new();
+        let mut include_dirs = Vec::new();
+        collect_yara_material(&nested, &mut rule_files, &mut include_dirs)
+            .expect("collect yara material");
+        rule_files.sort();
+
+        assert_eq!(rule_files.len(), 2);
+        assert!(include_dirs.contains(&nested));
+        assert!(include_dirs.contains(&nested.join("child")));
+        assert!(is_yara_rule_file(&nested.join("two.YARA")));
+        assert!(!is_yara_rule_file(&nested.join("notes.txt")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn incompatible_rule_files_are_skipped_when_others_compile() {
+        let rules_dir =
+            std::env::temp_dir().join(format!("pyregistry-yara-skip-{}", Uuid::new_v4()));
+        fs::create_dir_all(&rules_dir).expect("create rules dir");
+        fs::write(
+            rules_dir.join("valid.yar"),
+            "rule ValidRule { condition: true }",
+        )
+        .expect("write valid rule");
+        fs::write(rules_dir.join("broken.yar"), "rule Broken { condition:").expect("write broken");
+
+        let compiled = compile_rules_dir(&rules_dir).expect("compile with skipped rule");
+
+        assert_eq!(compiled.signature_rule_count, 1);
+        assert_eq!(compiled.skipped_rule_count, 1);
+
+        let _ = fs::remove_dir_all(rules_dir);
     }
 }

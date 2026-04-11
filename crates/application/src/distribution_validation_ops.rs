@@ -353,7 +353,16 @@ fn registry_distribution_item(
 mod tests {
     use super::*;
     use crate::{DistributionInspection, DistributionKind};
+    use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
+    use pyregistry_domain::{
+        ArtifactId, ArtifactKind, MirrorRule, ProjectId, ProjectSource, ReleaseId, ReleaseVersion,
+        TenantId, TenantSlug,
+    };
+    use std::collections::HashMap;
     use std::path::Path;
+    use std::sync::Mutex;
+    use uuid::Uuid;
 
     struct FakeInspector {
         inspection: DistributionInspection,
@@ -373,6 +382,59 @@ mod tests {
             _bytes: &[u8],
         ) -> Result<DistributionInspection, ApplicationError> {
             Ok(self.inspection.clone())
+        }
+    }
+
+    struct FailingBytesInspector;
+
+    impl DistributionFileInspector for FailingBytesInspector {
+        fn inspect_distribution(
+            &self,
+            _path: &Path,
+        ) -> Result<DistributionInspection, ApplicationError> {
+            Err(ApplicationError::External("unused path inspection".into()))
+        }
+
+        fn inspect_distribution_bytes(
+            &self,
+            _filename: &str,
+            _bytes: &[u8],
+        ) -> Result<DistributionInspection, ApplicationError> {
+            Err(ApplicationError::External("broken archive".into()))
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeObjectStorage {
+        objects: Mutex<HashMap<String, Vec<u8>>>,
+        fail_get: bool,
+    }
+
+    #[async_trait]
+    impl ObjectStorage for FakeObjectStorage {
+        async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<(), ApplicationError> {
+            self.objects
+                .lock()
+                .expect("object storage")
+                .insert(key.to_string(), bytes);
+            Ok(())
+        }
+
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, ApplicationError> {
+            if self.fail_get {
+                return Err(ApplicationError::External("storage offline".into()));
+            }
+            Ok(self
+                .objects
+                .lock()
+                .expect("object storage")
+                .get(key)
+                .cloned())
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ApplicationError> {
+            self.objects.lock().expect("object storage").remove(key);
+            Ok(())
         }
     }
 
@@ -451,12 +513,219 @@ mod tests {
         assert!(!is_supported_distribution_filename("demo-0.1.0.exe"));
     }
 
+    #[tokio::test]
+    async fn registry_target_validation_reports_terminal_statuses() {
+        let pool = Arc::new(
+            ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .expect("rayon pool"),
+        );
+
+        let unsupported = validate_registry_target(
+            Arc::new(FakeObjectStorage::default()),
+            Arc::new(FakeInspector {
+                inspection: fake_inspection("a".repeat(64)),
+            }),
+            pool.clone(),
+            validation_target("demo.exe", "objects/demo.exe", "a".repeat(64), 10),
+        )
+        .await;
+        assert_eq!(
+            unsupported.status,
+            RegistryDistributionValidationStatus::UnsupportedDistribution
+        );
+        assert!(unsupported.error.as_deref().unwrap().contains(".zip"));
+
+        let missing = validate_registry_target(
+            Arc::new(FakeObjectStorage::default()),
+            Arc::new(FakeInspector {
+                inspection: fake_inspection("a".repeat(64)),
+            }),
+            pool.clone(),
+            validation_target(
+                "demo-0.1.0-py3-none-any.whl",
+                "objects/missing.whl",
+                "a".repeat(64),
+                10,
+            ),
+        )
+        .await;
+        assert_eq!(
+            missing.status,
+            RegistryDistributionValidationStatus::MissingBlob
+        );
+        assert_eq!(missing.actual_sha256, None);
+
+        let storage_error = validate_registry_target(
+            Arc::new(FakeObjectStorage {
+                objects: Mutex::new(HashMap::new()),
+                fail_get: true,
+            }),
+            Arc::new(FakeInspector {
+                inspection: fake_inspection("a".repeat(64)),
+            }),
+            pool.clone(),
+            validation_target(
+                "demo-0.1.0-py3-none-any.whl",
+                "objects/error.whl",
+                "a".repeat(64),
+                10,
+            ),
+        )
+        .await;
+        assert_eq!(
+            storage_error.status,
+            RegistryDistributionValidationStatus::StorageError
+        );
+
+        let storage = Arc::new(FakeObjectStorage::default());
+        storage
+            .put("objects/invalid.whl", b"not a zip".to_vec())
+            .await
+            .expect("put invalid bytes");
+        let invalid = validate_registry_target(
+            storage,
+            Arc::new(FailingBytesInspector),
+            pool.clone(),
+            validation_target(
+                "demo-0.1.0-py3-none-any.whl",
+                "objects/invalid.whl",
+                "a".repeat(64),
+                9,
+            ),
+        )
+        .await;
+        assert_eq!(
+            invalid.status,
+            RegistryDistributionValidationStatus::InvalidArchive
+        );
+        assert!(invalid.error.as_deref().unwrap().contains("broken archive"));
+
+        let storage = Arc::new(FakeObjectStorage::default());
+        storage
+            .put("objects/mismatch.whl", b"payload".to_vec())
+            .await
+            .expect("put mismatch bytes");
+        let mismatch = validate_registry_target(
+            storage,
+            Arc::new(FakeInspector {
+                inspection: fake_inspection("b".repeat(64)),
+            }),
+            pool.clone(),
+            validation_target(
+                "demo-0.1.0-py3-none-any.whl",
+                "objects/mismatch.whl",
+                "a".repeat(64),
+                7,
+            ),
+        )
+        .await;
+        assert_eq!(
+            mismatch.status,
+            RegistryDistributionValidationStatus::ChecksumMismatch
+        );
+        let expected_actual_sha256 = "b".repeat(64);
+        assert_eq!(
+            mismatch.actual_sha256.as_deref(),
+            Some(expected_actual_sha256.as_str())
+        );
+        assert!(
+            mismatch
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("expected sha256")
+        );
+
+        let storage = Arc::new(FakeObjectStorage::default());
+        storage
+            .put("objects/valid.whl", b"payload".to_vec())
+            .await
+            .expect("put valid bytes");
+        let valid = validate_registry_target(
+            storage,
+            Arc::new(FakeInspector {
+                inspection: fake_inspection("c".repeat(64)),
+            }),
+            pool,
+            validation_target(
+                "demo-0.1.0-py3-none-any.whl",
+                "objects/valid.whl",
+                "c".repeat(64),
+                7,
+            ),
+        )
+        .await;
+        assert_eq!(valid.status, RegistryDistributionValidationStatus::Valid);
+        assert_eq!(valid.actual_size_bytes, Some(42));
+        assert_eq!(valid.kind, Some(DistributionKind::Wheel));
+        assert_eq!(valid.archive_entry_count, Some(2));
+        assert_eq!(valid.error, None);
+    }
+
     fn fake_inspection(sha256: String) -> DistributionInspection {
         DistributionInspection {
             kind: DistributionKind::Wheel,
             size_bytes: 42,
             sha256,
             archive_entry_count: 2,
+        }
+    }
+
+    fn validation_target(
+        filename: &str,
+        object_key: &str,
+        expected_sha256: String,
+        size_bytes: u64,
+    ) -> RegistryDistributionValidationTarget {
+        let now = Utc
+            .with_ymd_and_hms(2026, 4, 11, 12, 0, 0)
+            .single()
+            .expect("fixed time");
+        let tenant = Tenant::new(
+            TenantId::new(Uuid::from_u128(1)),
+            TenantSlug::new("acme").expect("tenant slug"),
+            "Acme",
+            MirrorRule { enabled: false },
+            now,
+        )
+        .expect("tenant");
+        let project = Project::new(
+            ProjectId::new(Uuid::from_u128(2)),
+            tenant.id,
+            ProjectName::new("demo").expect("project name"),
+            ProjectSource::Local,
+            "Demo",
+            "Demo",
+            now,
+        );
+        let release = Release {
+            id: ReleaseId::new(Uuid::from_u128(3)),
+            project_id: project.id,
+            version: ReleaseVersion::new("0.1.0").expect("version"),
+            yanked: None,
+            created_at: now,
+        };
+        let artifact = Artifact {
+            id: ArtifactId::new(Uuid::from_u128(4)),
+            release_id: release.id,
+            filename: filename.to_string(),
+            kind: ArtifactKind::Wheel,
+            size_bytes,
+            digests: DigestSet::new(expected_sha256, None).expect("digest"),
+            object_key: object_key.to_string(),
+            upstream_url: None,
+            provenance_key: None,
+            yanked: None,
+            created_at: now,
+        };
+
+        RegistryDistributionValidationTarget {
+            tenant,
+            project,
+            release,
+            artifact,
         }
     }
 }

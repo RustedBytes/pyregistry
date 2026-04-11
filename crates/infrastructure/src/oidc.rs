@@ -176,10 +176,17 @@ fn parse_claims_unverified(token: &str) -> Result<JwtClaims, ApplicationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pyregistry_domain::TrustedPublisherProvider;
 
     fn unsigned_token(payload: serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"RS256","kid":"test"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
+        format!("{header}.{payload}.signature")
+    }
+
+    fn unsigned_token_without_kid(payload: serde_json::Value) -> String {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256"}"#);
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
         format!("{header}.{payload}.signature")
     }
@@ -222,6 +229,61 @@ mod tests {
         );
         assert!(matches!(
             parse_claims_unverified(&token),
+            Err(ApplicationError::Unauthorized(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn verifier_rejects_unknown_issuer_before_fetching_jwks() {
+        let verifier = SimpleJwksOidcVerifier::new(Vec::new());
+        let token = unsigned_token(serde_json::json!({
+            "iss": "https://unknown.example",
+            "sub": "repo:acme/demo",
+            "aud": "pyregistry"
+        }));
+
+        assert!(matches!(
+            verifier.verify(&token, "pyregistry").await,
+            Err(ApplicationError::Unauthorized(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn verifier_rejects_mismatched_configured_audience_before_fetching_jwks() {
+        let verifier = SimpleJwksOidcVerifier::new(vec![OidcIssuerConfig {
+            provider: TrustedPublisherProvider::GitHubActions,
+            issuer: "https://issuer.example".into(),
+            jwks_url: "http://127.0.0.1:9/jwks".into(),
+            audience: "expected-audience".into(),
+        }]);
+        let token = unsigned_token(serde_json::json!({
+            "iss": "https://issuer.example",
+            "sub": "repo:acme/demo",
+            "aud": "pyregistry"
+        }));
+
+        assert!(matches!(
+            verifier.verify(&token, "pyregistry").await,
+            Err(ApplicationError::Unauthorized(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn verifier_requires_kid_for_known_issuer() {
+        let verifier = SimpleJwksOidcVerifier::new(vec![OidcIssuerConfig {
+            provider: TrustedPublisherProvider::GitLab,
+            issuer: "https://issuer.example".into(),
+            jwks_url: "http://127.0.0.1:9/jwks".into(),
+            audience: "pyregistry".into(),
+        }]);
+        let token = unsigned_token_without_kid(serde_json::json!({
+            "iss": "https://issuer.example",
+            "sub": "project_path:acme/demo",
+            "aud": "pyregistry"
+        }));
+
+        assert!(matches!(
+            verifier.verify(&token, "pyregistry").await,
             Err(ApplicationError::Unauthorized(_))
         ));
     }

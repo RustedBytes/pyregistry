@@ -623,6 +623,126 @@ mod tests {
         server.await.expect("server task");
     }
 
+    #[tokio::test]
+    async fn fetch_project_maps_all_versions_and_skips_unsupported_files() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut buffer = [0_u8; 2048];
+            let _ = socket.read(&mut buffer).await.expect("read request");
+            let body = serde_json::json!({
+                "info": {
+                    "name": "Demo_Pkg",
+                    "summary": "demo summary",
+                    "description": "demo description"
+                },
+                "releases": {
+                    "0.1.0": [
+                        {
+                            "filename": "demo_pkg-0.1.0-py3-none-any.whl",
+                            "packagetype": "bdist_wheel",
+                            "size": 2,
+                            "url": format!("http://{address}/files/demo.whl"),
+                            "digests": {
+                                "sha256": "a".repeat(64),
+                                "blake2b_256": null
+                            }
+                        },
+                        {
+                            "filename": "demo_pkg-0.1.0.exe",
+                            "packagetype": "bdist_wininst",
+                            "size": 3,
+                            "url": format!("http://{address}/files/demo.exe"),
+                            "digests": {
+                                "sha256": "b".repeat(64),
+                                "blake2b_256": null
+                            }
+                        }
+                    ],
+                    "0.2.0": [
+                        {
+                            "filename": "demo_pkg-0.2.0.zip",
+                            "packagetype": null,
+                            "size": 4,
+                            "url": format!("http://{address}/files/demo.zip"),
+                            "digests": {
+                                "sha256": "c".repeat(64),
+                                "blake2b_256": "d".repeat(64)
+                            }
+                        }
+                    ]
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        let client = PypiMirrorClient::new(&format!("http://{address}")).expect("client");
+
+        let project = client
+            .fetch_project("demo-pkg")
+            .await
+            .expect("fetch project")
+            .expect("project");
+
+        assert_eq!(project.canonical_name, "Demo_Pkg");
+        assert_eq!(project.summary, "demo summary");
+        assert_eq!(project.artifacts.len(), 2);
+        assert!(
+            project
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.version == "0.1.0" && artifact.filename.ends_with(".whl"))
+        );
+        assert!(
+            project
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.version == "0.2.0"
+                    && artifact.blake2b_256.as_deref() == Some(&"d".repeat(64)))
+        );
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn fetch_project_returns_none_for_404() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut buffer = [0_u8; 1024];
+            let _ = socket.read(&mut buffer).await.expect("read request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write response");
+        });
+        let client = PypiMirrorClient::new(&format!("http://{address}")).expect("client");
+
+        assert!(
+            client
+                .fetch_project("missing")
+                .await
+                .expect("fetch")
+                .is_none()
+        );
+        server.await.expect("server task");
+    }
+
     #[test]
     fn filters_legacy_pypi_installers_from_mirroring() {
         let wheel = release_file(

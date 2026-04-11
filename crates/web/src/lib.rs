@@ -107,24 +107,245 @@ mod tests {
         http::{Request, StatusCode, header},
     };
     use base64::Engine;
+    use chrono::{TimeZone, Utc};
     use http_body_util::BodyExt;
-    use pyregistry_application::IssueApiTokenCommand;
-    use pyregistry_domain::TokenScope;
-    use pyregistry_infrastructure::{
-        DatabaseStoreKind, Settings, build_application, seed_application,
+    use pyregistry_application::{
+        ApplicationError, AttestationSigner, Clock, CreateTenantCommand, IdGenerator,
+        IssueApiTokenCommand, MirrorClient, MirroredProjectSnapshot, ObjectStorage, OidcVerifier,
+        PackageVulnerabilityQuery, PackageVulnerabilityReport, PasswordHasher, PyregistryApp,
+        TokenHasher, VulnerabilityScanner, WheelArchiveEntry, WheelArchiveReader,
+        WheelArchiveSnapshot, WheelSourceSecurityScanResult, WheelSourceSecurityScanner,
+        WheelVirusScanResult, WheelVirusScanner,
     };
+    use pyregistry_domain::{Artifact, ProjectName, PublishIdentity, ReleaseVersion, TokenScope};
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::RwLock;
     use tower::ServiceExt;
     use uuid::Uuid;
 
+    struct MemoryObjectStorage {
+        objects: RwLock<HashMap<String, Vec<u8>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStorage for MemoryObjectStorage {
+        async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<(), ApplicationError> {
+            self.objects.write().await.insert(key.to_string(), bytes);
+            Ok(())
+        }
+
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, ApplicationError> {
+            Ok(self.objects.read().await.get(key).cloned())
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ApplicationError> {
+            self.objects.write().await.remove(key);
+            Ok(())
+        }
+    }
+
+    struct EmptyMirrorClient;
+
+    #[async_trait::async_trait]
+    impl MirrorClient for EmptyMirrorClient {
+        async fn fetch_project(
+            &self,
+            _project_name: &str,
+        ) -> Result<Option<MirroredProjectSnapshot>, ApplicationError> {
+            Ok(None)
+        }
+
+        async fn fetch_artifact_bytes(
+            &self,
+            _download_url: &str,
+        ) -> Result<Vec<u8>, ApplicationError> {
+            Err(ApplicationError::NotFound("artifact".into()))
+        }
+    }
+
+    struct RejectingOidcVerifier;
+
+    #[async_trait::async_trait]
+    impl OidcVerifier for RejectingOidcVerifier {
+        async fn verify(
+            &self,
+            _token: &str,
+            _audience: &str,
+        ) -> Result<PublishIdentity, ApplicationError> {
+            Err(ApplicationError::Unauthorized("invalid OIDC token".into()))
+        }
+    }
+
+    struct TestAttestationSigner;
+
+    #[async_trait::async_trait]
+    impl AttestationSigner for TestAttestationSigner {
+        async fn build_attestation(
+            &self,
+            project_name: &ProjectName,
+            version: &ReleaseVersion,
+            artifact: &Artifact,
+            identity: &PublishIdentity,
+        ) -> Result<String, ApplicationError> {
+            Ok(serde_json::json!({
+                "project": project_name.normalized(),
+                "version": version.as_str(),
+                "filename": artifact.filename,
+                "issuer": identity.issuer
+            })
+            .to_string())
+        }
+    }
+
+    struct PlainPasswordHasher;
+
+    impl PasswordHasher for PlainPasswordHasher {
+        fn hash(&self, password: &str) -> Result<String, ApplicationError> {
+            Ok(password.to_string())
+        }
+
+        fn verify(&self, password: &str, hash: &str) -> Result<bool, ApplicationError> {
+            Ok(password == hash)
+        }
+    }
+
+    struct PlainTokenHasher;
+
+    impl TokenHasher for PlainTokenHasher {
+        fn hash(&self, secret: &str) -> Result<String, ApplicationError> {
+            Ok(secret.to_string())
+        }
+    }
+
+    struct CleanVulnerabilityScanner;
+
+    #[async_trait::async_trait]
+    impl VulnerabilityScanner for CleanVulnerabilityScanner {
+        async fn scan_package_versions(
+            &self,
+            packages: &[PackageVulnerabilityQuery],
+        ) -> Result<Vec<PackageVulnerabilityReport>, ApplicationError> {
+            Ok(packages
+                .iter()
+                .map(PackageVulnerabilityReport::clean)
+                .collect())
+        }
+    }
+
+    struct StaticWheelArchiveReader;
+
+    impl WheelArchiveReader for StaticWheelArchiveReader {
+        fn read_wheel(
+            &self,
+            path: &std::path::Path,
+        ) -> Result<WheelArchiveSnapshot, ApplicationError> {
+            Ok(WheelArchiveSnapshot {
+                wheel_filename: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("demo.whl")
+                    .to_string(),
+                entries: vec![WheelArchiveEntry {
+                    path: "demo/__init__.py".into(),
+                    contents: b"print('ok')".to_vec(),
+                }],
+            })
+        }
+
+        fn read_wheel_bytes(
+            &self,
+            wheel_filename: &str,
+            _bytes: &[u8],
+        ) -> Result<WheelArchiveSnapshot, ApplicationError> {
+            Ok(WheelArchiveSnapshot {
+                wheel_filename: wheel_filename.to_string(),
+                entries: vec![WheelArchiveEntry {
+                    path: "demo/__init__.py".into(),
+                    contents: b"print('ok')".to_vec(),
+                }],
+            })
+        }
+    }
+
+    struct NoopVirusScanner;
+
+    impl WheelVirusScanner for NoopVirusScanner {
+        fn scan_archive(
+            &self,
+            archive: &WheelArchiveSnapshot,
+        ) -> Result<WheelVirusScanResult, ApplicationError> {
+            Ok(WheelVirusScanResult {
+                scanned_file_count: archive.entries.len(),
+                signature_rule_count: 0,
+                skipped_rule_count: 0,
+                findings: Vec::new(),
+            })
+        }
+    }
+
+    struct NoopSourceSecurityScanner;
+
+    impl WheelSourceSecurityScanner for NoopSourceSecurityScanner {
+        fn scan_archive(
+            &self,
+            archive: &WheelArchiveSnapshot,
+        ) -> Result<WheelSourceSecurityScanResult, ApplicationError> {
+            Ok(WheelSourceSecurityScanResult {
+                scanned_file_count: archive.entries.len(),
+                findings: Vec::new(),
+            })
+        }
+    }
+
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 4, 11, 12, 0, 0)
+                .single()
+                .expect("timestamp")
+        }
+    }
+
+    struct RandomIds;
+
+    impl IdGenerator for RandomIds {
+        fn next(&self) -> Uuid {
+            Uuid::new_v4()
+        }
+    }
+
     async fn state() -> AppState {
-        let mut settings = Settings::new_local_template();
-        settings.database_store = DatabaseStoreKind::InMemory;
-        settings.blob_root =
-            std::env::temp_dir().join(format!("pyregistry-web-{}", Uuid::new_v4()));
-        let app = build_application(&settings).await.expect("application");
-        seed_application(&app, &settings).await.expect("seed");
+        let app = Arc::new(PyregistryApp::new(
+            Arc::new(pyregistry_infrastructure::InMemoryRegistryStore::default()),
+            Arc::new(MemoryObjectStorage {
+                objects: RwLock::new(HashMap::new()),
+            }),
+            Arc::new(EmptyMirrorClient),
+            Arc::new(RejectingOidcVerifier),
+            Arc::new(TestAttestationSigner),
+            Arc::new(PlainPasswordHasher),
+            Arc::new(PlainTokenHasher),
+            Arc::new(CleanVulnerabilityScanner),
+            Arc::new(StaticWheelArchiveReader),
+            Arc::new(NoopVirusScanner),
+            Arc::new(NoopSourceSecurityScanner),
+            Arc::new(FixedClock),
+            Arc::new(RandomIds),
+            4,
+        ));
+        app.bootstrap_superadmin("admin@pyregistry.local", "change-me-now")
+            .await
+            .expect("superadmin");
+        app.create_tenant(CreateTenantCommand {
+            slug: "acme".into(),
+            display_name: "Acme Corp".into(),
+            mirroring_enabled: true,
+            admin_email: "tenant-admin@acme.local".into(),
+            admin_password: "change-me-now".into(),
+        })
+        .await
+        .expect("tenant");
 
         AppState {
             app,
@@ -148,6 +369,87 @@ mod tests {
         let encoded =
             base64::engine::general_purpose::STANDARD.encode(format!("__token__:{secret}"));
         format!("Basic {encoded}")
+    }
+
+    async fn login_cookie(app: Router) -> String {
+        let login = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "email=admin%40pyregistry.local&password=change-me-now",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(login.status(), StatusCode::SEE_OTHER);
+        login
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("set-cookie")
+            .to_str()
+            .expect("cookie")
+            .split(';')
+            .next()
+            .expect("cookie pair")
+            .to_string()
+    }
+
+    async fn issue_token(state: &AppState, scopes: Vec<TokenScope>) -> String {
+        state
+            .app
+            .issue_api_token(IssueApiTokenCommand {
+                tenant_slug: "acme".into(),
+                label: "test-token".into(),
+                scopes,
+                ttl_hours: None,
+            })
+            .await
+            .expect("token")
+            .secret
+    }
+
+    async fn upload_demo_package(app: Router, auth: &str) {
+        let boundary = "PYREGISTRY_TEST_BOUNDARY";
+        let body = concat!(
+            "--PYREGISTRY_TEST_BOUNDARY\r\n",
+            "Content-Disposition: form-data; name=\"name\"\r\n\r\n",
+            "Demo_Pkg\r\n",
+            "--PYREGISTRY_TEST_BOUNDARY\r\n",
+            "Content-Disposition: form-data; name=\"version\"\r\n\r\n",
+            "1.0.0\r\n",
+            "--PYREGISTRY_TEST_BOUNDARY\r\n",
+            "Content-Disposition: form-data; name=\"summary\"\r\n\r\n",
+            "A demo package\r\n",
+            "--PYREGISTRY_TEST_BOUNDARY\r\n",
+            "Content-Disposition: form-data; name=\"description\"\r\n\r\n",
+            "Long description\r\n",
+            "--PYREGISTRY_TEST_BOUNDARY\r\n",
+            "Content-Disposition: form-data; name=\"content\"; filename=\"demo_pkg-1.0.0-py3-none-any.whl\"\r\n",
+            "Content-Type: application/octet-stream\r\n\r\n",
+            "fake wheel bytes",
+            "\r\n--PYREGISTRY_TEST_BOUNDARY--\r\n"
+        );
+
+        let upload = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/t/acme/legacy/")
+                    .header(header::AUTHORIZATION, auth)
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("upload response");
+        assert_eq!(upload.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -224,56 +526,10 @@ mod tests {
     #[tokio::test]
     async fn package_api_uploads_lists_and_downloads_artifacts() {
         let state = state().await;
-        let issued = state
-            .app
-            .issue_api_token(IssueApiTokenCommand {
-                tenant_slug: "acme".into(),
-                label: "test-publish".into(),
-                scopes: vec![TokenScope::Read, TokenScope::Publish],
-                ttl_hours: None,
-            })
-            .await
-            .expect("token");
-        let auth = basic_token(&issued.secret);
+        let auth =
+            basic_token(&issue_token(&state, vec![TokenScope::Read, TokenScope::Publish]).await);
         let app = router(state);
-        let boundary = "PYREGISTRY_TEST_BOUNDARY";
-        let body = concat!(
-            "--PYREGISTRY_TEST_BOUNDARY\r\n",
-            "Content-Disposition: form-data; name=\"name\"\r\n\r\n",
-            "Demo_Pkg\r\n",
-            "--PYREGISTRY_TEST_BOUNDARY\r\n",
-            "Content-Disposition: form-data; name=\"version\"\r\n\r\n",
-            "1.0.0\r\n",
-            "--PYREGISTRY_TEST_BOUNDARY\r\n",
-            "Content-Disposition: form-data; name=\"summary\"\r\n\r\n",
-            "A demo package\r\n",
-            "--PYREGISTRY_TEST_BOUNDARY\r\n",
-            "Content-Disposition: form-data; name=\"description\"\r\n\r\n",
-            "Long description\r\n",
-            "--PYREGISTRY_TEST_BOUNDARY\r\n",
-            "Content-Disposition: form-data; name=\"content\"; filename=\"demo_pkg-1.0.0-py3-none-any.whl\"\r\n",
-            "Content-Type: application/octet-stream\r\n\r\n",
-            "fake wheel bytes\r\n",
-            "--PYREGISTRY_TEST_BOUNDARY--\r\n"
-        );
-
-        let upload = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/t/acme/legacy/")
-                    .header(header::AUTHORIZATION, auth.clone())
-                    .header(
-                        header::CONTENT_TYPE,
-                        format!("multipart/form-data; boundary={boundary}"),
-                    )
-                    .body(Body::from(body))
-                    .expect("request"),
-            )
-            .await
-            .expect("upload response");
-        assert_eq!(upload.status(), StatusCode::OK);
+        upload_demo_package(app.clone(), &auth).await;
 
         let project = app
             .clone()
@@ -352,31 +608,7 @@ mod tests {
             .expect("response");
         assert_eq!(login_form.status(), StatusCode::OK);
 
-        let login = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(
-                        "email=admin%40pyregistry.local&password=change-me-now",
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(login.status(), StatusCode::SEE_OTHER);
-        let cookie = login
-            .headers()
-            .get(header::SET_COOKIE)
-            .expect("set-cookie")
-            .to_str()
-            .expect("cookie")
-            .split(';')
-            .next()
-            .expect("cookie pair")
-            .to_string();
+        let cookie = login_cookie(app.clone()).await;
 
         let dashboard = app
             .oneshot(
@@ -390,5 +622,244 @@ mod tests {
             .expect("response");
         assert_eq!(dashboard.status(), StatusCode::OK);
         assert!(body_text(dashboard).await.contains("Dashboard"));
+    }
+
+    #[tokio::test]
+    async fn admin_can_create_tenant_issue_token_register_publisher_and_reject_blank_mirror() {
+        let app = router(state().await);
+        let cookie = login_cookie(app.clone()).await;
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/tenants")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "slug=omega&display_name=Omega+Corp&admin_email=admin%40omega.test&admin_password=secret&mirroring_enabled=on",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create tenant");
+        assert_eq!(create.status(), StatusCode::OK);
+        assert!(body_text(create).await.contains("Tenant created"));
+
+        let token = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/omega/tokens")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "label=ci&ttl_hours=&scopes=read&scopes=publish&scopes=admin",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("token response");
+        assert_eq!(token.status(), StatusCode::OK);
+        let token_body = body_text(token).await;
+        assert!(token_body.contains("Token issued"));
+        assert!(token_body.contains("pyr_"));
+
+        let publisher = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/omega/publishers")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "project_name=demo&provider=gitlab&issuer=https%3A%2F%2Fgitlab.example&audience=pyregistry&claim_repository=omega%2Fdemo&claim_workflow=release.yml&claim_ref=refs%2Fheads%2Fmain",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("publisher response");
+        assert_eq!(publisher.status(), StatusCode::OK);
+        assert!(
+            body_text(publisher)
+                .await
+                .contains("Trusted publisher saved")
+        );
+
+        let mirror = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/omega/mirror-cache")
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("project_name=+++"))
+                    .expect("request"),
+            )
+            .await
+            .expect("mirror response");
+        assert_eq!(mirror.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn admin_package_governance_download_scan_and_purge_flow() {
+        let state = state().await;
+        let auth =
+            basic_token(&issue_token(&state, vec![TokenScope::Read, TokenScope::Publish]).await);
+        let app = router(state);
+        upload_demo_package(app.clone(), &auth).await;
+        let cookie = login_cookie(app.clone()).await;
+
+        let detail = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/t/acme/packages/demo-pkg")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::HOST, "127.0.0.1:3000")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("detail response");
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail_body = body_text(detail).await;
+        assert!(detail_body.contains("demo_pkg-1.0.0-py3-none-any.whl"));
+        assert!(detail_body.contains("uv pip install"));
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/t/acme/packages?q=demo")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("list response");
+        assert_eq!(list.status(), StatusCode::OK);
+        assert!(body_text(list).await.contains("Demo_Pkg"));
+
+        let yank_release = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/demo-pkg/releases/1.0.0/yank")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("reason=bad+metadata"))
+                    .expect("request"),
+            )
+            .await
+            .expect("yank release");
+        assert_eq!(yank_release.status(), StatusCode::SEE_OTHER);
+
+        let unyank_release = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/demo-pkg/releases/1.0.0/unyank")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("unyank release");
+        assert_eq!(unyank_release.status(), StatusCode::SEE_OTHER);
+
+        let yank_artifact = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/demo-pkg/releases/1.0.0/artifacts/demo_pkg-1.0.0-py3-none-any.whl/yank")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("reason=bad+wheel"))
+                    .expect("request"),
+            )
+            .await
+            .expect("yank artifact");
+        assert_eq!(yank_artifact.status(), StatusCode::SEE_OTHER);
+
+        let yanked_detail = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/t/acme/packages/demo-pkg")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("yanked detail");
+        assert_eq!(yanked_detail.status(), StatusCode::OK);
+        assert!(body_text(yanked_detail).await.contains("File is yanked"));
+
+        let unyank_artifact = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/demo-pkg/releases/1.0.0/artifacts/demo_pkg-1.0.0-py3-none-any.whl/unyank")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("unyank artifact");
+        assert_eq!(unyank_artifact.status(), StatusCode::SEE_OTHER);
+
+        let download = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/t/acme/packages/demo-pkg/releases/1.0.0/artifacts/demo_pkg-1.0.0-py3-none-any.whl/download")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("admin download");
+        assert_eq!(download.status(), StatusCode::OK);
+        assert_eq!(
+            download.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"demo_pkg-1.0.0-py3-none-any.whl\""
+        );
+        assert_eq!(body_text(download).await, "fake wheel bytes");
+
+        let scan = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/demo-pkg/releases/1.0.0/artifacts/demo_pkg-1.0.0-py3-none-any.whl/scan")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("scan response");
+        assert_eq!(scan.status(), StatusCode::OK);
+        assert!(body_text(scan).await.contains("Wheel audit"));
+
+        let purge_artifact = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/demo-pkg/releases/1.0.0/artifacts/demo_pkg-1.0.0-py3-none-any.whl/purge")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("purge artifact");
+        assert_eq!(purge_artifact.status(), StatusCode::SEE_OTHER);
     }
 }

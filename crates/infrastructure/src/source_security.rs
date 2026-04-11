@@ -212,6 +212,7 @@ mod tests {
 
         assert!(safe_archive_path(root, "../escape.py").is_none());
         assert!(safe_archive_path(root, "/absolute.py").is_none());
+        assert!(safe_archive_path(root, "./pkg/./module.py").is_some());
         assert!(safe_archive_path(root, "pkg/module.py").is_some());
     }
 
@@ -236,5 +237,105 @@ mod tests {
                     .iter()
                     .any(|value| value.contains("secret/aws-access-key-id"))
         }));
+    }
+
+    #[test]
+    fn materializes_only_safe_archive_entries() {
+        let root =
+            std::env::temp_dir().join(format!("pyregistry-foxguard-test-{}", Uuid::new_v4()));
+        let archive = WheelArchiveSnapshot {
+            wheel_filename: "demo.whl".into(),
+            entries: vec![
+                WheelArchiveEntry {
+                    path: "pkg/module.py".into(),
+                    contents: b"print('ok')".to_vec(),
+                },
+                WheelArchiveEntry {
+                    path: "../escape.py".into(),
+                    contents: b"bad".to_vec(),
+                },
+                WheelArchiveEntry {
+                    path: ".".into(),
+                    contents: b"skip".to_vec(),
+                },
+            ],
+        };
+
+        let paths = materialize_archive_entries(&archive, &root).expect("materialize");
+
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("pkg/module.py"));
+        assert_eq!(fs::read(&paths[0]).expect("contents"), b"print('ok')");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn relative_paths_and_snippets_are_sanitized_for_findings() {
+        let root = Path::new("/tmp/pyregistry-foxguard-test");
+
+        assert_eq!(
+            relative_finding_path(root, "/tmp/pyregistry-foxguard-test/pkg/module.py").as_deref(),
+            Some("pkg/module.py")
+        );
+        assert_eq!(
+            relative_finding_path(root, "./pkg\\module.py").as_deref(),
+            Some("pkg/module.py")
+        );
+        assert_eq!(truncate("short", MAX_SNIPPET_LEN), "short");
+        assert!(truncate(&"a".repeat(MAX_SNIPPET_LEN + 10), MAX_SNIPPET_LEN).ends_with("..."));
+    }
+
+    #[test]
+    fn scan_archive_in_temp_dir_reports_creation_failure() {
+        let scanner = FoxGuardWheelSourceSecurityScanner::default();
+        let root =
+            std::env::temp_dir().join(format!("pyregistry-foxguard-file-root-{}", Uuid::new_v4()));
+        fs::write(&root, b"not a directory").expect("write file root");
+        let archive = WheelArchiveSnapshot {
+            wheel_filename: "demo.whl".into(),
+            entries: vec![WheelArchiveEntry {
+                path: "pkg/module.py".into(),
+                contents: b"print('ok')".to_vec(),
+            }],
+        };
+
+        let error = scanner
+            .scan_archive_in_temp_dir(&archive, &root)
+            .expect_err("file root should fail");
+
+        assert!(error.to_string().contains("temp directory creation failed"));
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn maps_foxguard_finding_with_cwe_and_truncated_snippet() {
+        let root = Path::new("/tmp/pyregistry-foxguard-test");
+        let finding = Finding {
+            rule_id: "python/dangerous-eval".into(),
+            severity: foxguard::Severity::High,
+            cwe: Some("CWE-95".into()),
+            description: "dynamic code execution".into(),
+            file: "/tmp/pyregistry-foxguard-test/pkg/module.py".into(),
+            line: 7,
+            column: 11,
+            end_line: 7,
+            end_column: 20,
+            snippet: "x".repeat(MAX_SNIPPET_LEN + 20),
+        };
+
+        let mapped = map_foxguard_finding("source-rule", root, finding);
+
+        assert_eq!(mapped.kind, WheelAuditFindingKind::SourceSecurityFinding);
+        assert_eq!(mapped.path.as_deref(), Some("pkg/module.py"));
+        assert!(mapped.summary.contains("HIGH"));
+        assert!(mapped.evidence.iter().any(|value| value == "cwe=CWE-95"));
+        assert!(
+            mapped
+                .evidence
+                .iter()
+                .any(|value| { value.starts_with("snippet=") && value.ends_with("...") })
+        );
+        assert_eq!(relative_finding_path(root, "").as_deref(), None);
     }
 }

@@ -28,6 +28,24 @@ fn rejects_bad_tenant_slug() {
 }
 
 #[test]
+fn rejects_empty_project_names_and_invalid_versions() {
+    assert!(matches!(
+        ProjectName::new("   ").expect_err("empty project"),
+        DomainError::InvalidValue {
+            field: "project_name",
+            ..
+        }
+    ));
+    assert!(matches!(
+        ReleaseVersion::new(" bad/version ").expect_err("invalid version"),
+        DomainError::InvalidValue {
+            field: "release_version",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn validates_artifact_filename() {
     assert_eq!(
         ArtifactKind::from_filename("demo-1.0.0-py3-none-any.whl").expect("wheel"),
@@ -135,6 +153,27 @@ fn matches_trusted_publisher_claims() {
     };
 
     assert!(publisher.matches(&identity).is_ok());
+
+    let mut wrong_provider = identity.clone();
+    wrong_provider.provider = TrustedPublisherProvider::GitLab;
+    assert_eq!(
+        publisher.matches(&wrong_provider),
+        Err(DomainError::TrustedPublisherMismatch)
+    );
+
+    let mut wrong_issuer = identity.clone();
+    wrong_issuer.issuer = "https://issuer.example".into();
+    assert_eq!(
+        publisher.matches(&wrong_issuer),
+        Err(DomainError::TrustedPublisherMismatch)
+    );
+
+    let mut missing_claim = identity;
+    missing_claim.claims.remove("workflow");
+    assert_eq!(
+        publisher.matches(&missing_claim),
+        Err(DomainError::TrustedPublisherMismatch)
+    );
 }
 
 #[test]
@@ -146,6 +185,33 @@ fn orders_release_versions_using_pep_440_rules() {
 
     assert!(newer > older);
     assert!(stable > prerelease);
+
+    let non_pep440_left = ReleaseVersion::new("build-z").expect("version");
+    let non_pep440_right = ReleaseVersion::new("build-a").expect("version");
+    assert!(non_pep440_left > non_pep440_right);
+}
+
+#[test]
+fn validates_and_normalizes_digest_sets() {
+    let digest = DigestSet::new("A".repeat(64), Some("B".repeat(64))).expect("digest");
+
+    assert_eq!(digest.sha256, "a".repeat(64));
+    assert_eq!(digest.blake2b_256, Some("b".repeat(64)));
+
+    assert!(matches!(
+        DigestSet::new("not-hex", None).expect_err("sha"),
+        DomainError::InvalidValue {
+            field: "sha256",
+            ..
+        }
+    ));
+    assert!(matches!(
+        DigestSet::new("a".repeat(64), Some("not-hex".into())).expect_err("blake"),
+        DomainError::InvalidValue {
+            field: "blake2b_256",
+            ..
+        }
+    ));
 }
 
 #[test]

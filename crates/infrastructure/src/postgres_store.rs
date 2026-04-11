@@ -1658,4 +1658,123 @@ mod tests {
             TrustedPublisherProvider::GitHubActions
         );
     }
+
+    #[test]
+    fn parses_latest_release_versions_using_pep440_ordering() {
+        assert_eq!(
+            latest_release_version_from_values(vec!["0.1.9".into(), "0.1.14".into()])
+                .expect("latest"),
+            Some("0.1.14".into())
+        );
+        assert_eq!(
+            latest_release_version_from_values(Vec::new()).expect("empty"),
+            None
+        );
+        assert!(latest_release_version_from_values(vec!["not a version".into()]).is_err());
+    }
+
+    #[test]
+    fn escapes_like_patterns_for_literal_searches() {
+        assert_eq!(escape_like_pattern(r"demo\_%"), r"demo\\\_\%");
+        assert_eq!(escape_like_pattern("plain"), "plain");
+    }
+
+    #[test]
+    fn parses_json_backed_scopes_claims_and_publish_identity() {
+        assert_eq!(
+            parse_scopes_json(r#"["read","publish","admin"]"#.into()).expect("scopes"),
+            vec![TokenScope::Read, TokenScope::Publish, TokenScope::Admin]
+        );
+        assert_eq!(
+            parse_claims_json(r#"{"repository":"acme/demo"}"#.into())
+                .expect("claims")
+                .get("repository")
+                .map(String::as_str),
+            Some("acme/demo")
+        );
+
+        let identity = parse_publish_identity(
+            Some("https://issuer.example".into()),
+            Some("repo:acme/demo".into()),
+            Some("pyregistry".into()),
+            Some("github-actions".into()),
+            Some(r#"{"repository":"acme/demo"}"#.into()),
+        )
+        .expect("identity")
+        .expect("some identity");
+        assert_eq!(identity.provider, TrustedPublisherProvider::GitHubActions);
+        assert_eq!(
+            identity.claims.get("repository").map(String::as_str),
+            Some("acme/demo")
+        );
+
+        assert!(
+            parse_publish_identity(None, None, None, None, None)
+                .expect("empty identity")
+                .is_none()
+        );
+        assert!(parse_publish_identity(Some("issuer".into()), None, None, None, None).is_err());
+        assert!(parse_scopes_json(r#"["invalid"]"#.into()).is_err());
+        assert!(parse_json::<BTreeMap<String, String>>("not json".into()).is_err());
+    }
+
+    #[test]
+    fn parses_yank_columns_and_stringifies_domain_enums() {
+        let now = Utc::now();
+
+        assert_eq!(parse_yank(None, None), None);
+        assert_eq!(
+            parse_yank(Some("bad".into()), Some(now)),
+            Some(YankState {
+                reason: Some("bad".into()),
+                changed_at: now
+            })
+        );
+        assert!(parse_yank(Some("legacy".into()), None).is_some());
+
+        let yanked = Some(YankState {
+            reason: Some("bad".into()),
+            changed_at: now,
+        });
+        assert_eq!(yank_columns(&yanked), (Some("bad".into()), Some(now)));
+        assert_eq!(yank_columns(&None), (None, None));
+
+        assert_eq!(project_source_str(&ProjectSource::Local), "local");
+        assert_eq!(project_source_str(&ProjectSource::Mirrored), "mirrored");
+        assert_eq!(artifact_kind_str(&ArtifactKind::Wheel), "wheel");
+        assert_eq!(
+            artifact_kind_str(&ArtifactKind::SourceDistribution),
+            "sdist"
+        );
+        assert_eq!(token_scope_str(&TokenScope::Read), "read");
+        assert_eq!(token_scope_str(&TokenScope::Publish), "publish");
+        assert_eq!(token_scope_str(&TokenScope::Admin), "admin");
+        assert_eq!(
+            provider_str(&TrustedPublisherProvider::GitHubActions),
+            "github-actions"
+        );
+        assert_eq!(provider_str(&TrustedPublisherProvider::GitLab), "gitlab");
+        assert_eq!(
+            attestation_source_str(&AttestationSource::Mirrored),
+            "mirrored"
+        );
+        assert_eq!(
+            attestation_source_str(&AttestationSource::TrustedPublish),
+            "trusted-publish"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_metadata_enums() {
+        assert!(parse_project_source("remote".into()).is_err());
+        assert!(parse_artifact_kind("egg".into()).is_err());
+        assert!(parse_token_scope("owner".into()).is_err());
+        assert!(parse_provider("bitbucket".into()).is_err());
+        assert!(parse_attestation_source("custom".into()).is_err());
+        assert!(
+            invalid_enum("thing", "value".into())
+                .to_string()
+                .contains("thing")
+        );
+    }
 }

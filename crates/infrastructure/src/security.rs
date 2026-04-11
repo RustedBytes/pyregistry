@@ -231,6 +231,53 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn returns_empty_report_without_network_lookup_for_empty_input() {
+        let scanner = PySentryVulnerabilityScanner::new(
+            std::env::temp_dir().join(format!("pyregistry-pysentry-{}", Uuid::new_v4())),
+        );
+
+        let reports = scanner
+            .scan_package_versions(&[])
+            .await
+            .expect("empty scan");
+
+        assert!(reports.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reports_invalid_package_names_without_network_lookup() {
+        let scanner = PySentryVulnerabilityScanner::new(
+            std::env::temp_dir().join(format!("pyregistry-pysentry-{}", Uuid::new_v4())),
+        );
+
+        let reports = scanner
+            .scan_package_versions(&[PackageVulnerabilityQuery {
+                package_name: "bad package name!".into(),
+                version: "1.0.0".into(),
+            }])
+            .await
+            .expect("scan result");
+
+        assert_eq!(reports.len(), 1);
+        assert!(
+            reports[0]
+                .scan_error
+                .as_deref()
+                .is_some_and(|error| error.contains("invalid package name for PySentry"))
+        );
+    }
+
+    #[test]
+    fn query_keys_preserve_requested_name_and_version() {
+        let query = PackageVulnerabilityQuery {
+            package_name: "Demo-Pkg".into(),
+            version: "1.0.0".into(),
+        };
+
+        assert_eq!(query_key(&query), ("Demo-Pkg".into(), "1.0.0".into()));
+    }
+
     #[test]
     fn derives_unknown_pysentry_severity_from_cvss_score() {
         assert_eq!(severity_label(Severity::Unknown, Some(9.8)), "CRITICAL");
@@ -243,5 +290,41 @@ mod tests {
     #[test]
     fn keeps_explicit_pysentry_severity_over_cvss_score() {
         assert_eq!(severity_label(Severity::High, Some(9.8)), "HIGH");
+    }
+
+    #[test]
+    fn maps_pysentry_vulnerability_matches_to_application_dtos() {
+        let vulnerability = pysentry::vulnerability::database::Vulnerability {
+            id: "GHSA-demo".into(),
+            summary: "demo vulnerability".into(),
+            description: Some("long description".into()),
+            severity: Severity::Unknown,
+            affected_versions: Vec::new(),
+            fixed_versions: vec![Version::from_str("1.2.3").expect("version")],
+            references: vec!["https://example.test/advisory".into()],
+            cvss_score: Some(9.8),
+            cvss_version: Some(3),
+            published: None,
+            modified: None,
+            source: Some("pypa".into()),
+            withdrawn: None,
+            aliases: vec!["CVE-2026-0001".into()],
+        };
+        let vulnerability_match = pysentry::vulnerability::database::VulnerabilityMatch {
+            package_name: PackageName::from_str("demo").expect("package"),
+            installed_version: Version::from_str("1.0.0").expect("version"),
+            vulnerability,
+            is_direct: true,
+        };
+
+        let mapped = map_vulnerability(vulnerability_match);
+
+        assert_eq!(mapped.id, "GHSA-demo");
+        assert_eq!(mapped.summary, "demo vulnerability");
+        assert_eq!(mapped.severity, "CRITICAL");
+        assert_eq!(mapped.fixed_versions, vec!["1.2.3"]);
+        assert_eq!(mapped.references, vec!["https://example.test/advisory"]);
+        assert_eq!(mapped.source.as_deref(), Some("pypa"));
+        assert_eq!(mapped.cvss_score, Some(9.8));
     }
 }

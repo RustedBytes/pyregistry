@@ -115,6 +115,160 @@ async fn refresh_mirrored_projects_stops_before_work_when_cancelled() {
 }
 
 #[tokio::test]
+async fn mirrored_artifact_download_refetches_and_recaches_missing_payload() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(1));
+    let app = test_app(store, storage.clone(), mirror.clone(), 1);
+
+    app.resolve_project_from_mirror("acme", "demo")
+        .await
+        .expect("mirror resolution")
+        .expect("mirrored project");
+    assert_eq!(mirror.fetch_count(), 1);
+
+    let object_key = "acme/demo/1.0.0/demo-1.0.0-py3-none-any.whl";
+    storage
+        .delete(object_key)
+        .await
+        .expect("delete cached object");
+    assert_eq!(storage.object_count(), 0);
+
+    let bytes = app
+        .download_artifact("acme", "demo", "1.0.0", "demo-1.0.0-py3-none-any.whl")
+        .await
+        .expect("download mirrored artifact");
+
+    assert_eq!(bytes, b"artifact-0");
+    assert_eq!(mirror.fetch_count(), 2);
+    assert_eq!(storage.object_count(), 1);
+}
+
+#[tokio::test]
+async fn evict_mirror_cache_purges_mirrored_projects_but_ignores_local_projects() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true));
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(1));
+    let app = test_app(store.clone(), storage.clone(), mirror, 1);
+
+    app.resolve_project_from_mirror("acme", "demo")
+        .await
+        .expect("mirror resolution")
+        .expect("mirrored project");
+    assert_eq!(store.artifact_count(), 1);
+    assert_eq!(storage.object_count(), 1);
+
+    app.evict_mirror_cache("acme", "internal")
+        .await
+        .expect("local project eviction is a no-op");
+    let tenant = store
+        .get_tenant_by_slug("acme")
+        .await
+        .expect("tenant lookup")
+        .expect("tenant");
+    assert!(
+        store
+            .get_project_by_normalized_name(tenant.id, "internal")
+            .await
+            .expect("local lookup")
+            .is_some()
+    );
+    assert_eq!(store.artifact_count(), 1);
+
+    app.evict_mirror_cache("acme", "demo")
+        .await
+        .expect("evict mirrored project");
+    assert!(
+        store
+            .get_project_by_normalized_name(tenant.id, "demo")
+            .await
+            .expect("mirrored lookup")
+            .is_none()
+    );
+    assert_eq!(store.artifact_count(), 0);
+    assert_eq!(storage.object_count(), 0);
+}
+
+#[test]
+fn mirrored_artifact_payload_validation_checks_size_and_sha256() {
+    let bytes = b"expected artifact bytes";
+    let sha256 = hex::encode(Sha256::digest(bytes));
+    let artifact = Artifact::new(
+        ArtifactId::new(Uuid::from_u128(900)),
+        ReleaseId::new(Uuid::from_u128(901)),
+        "demo-1.0.0-py3-none-any.whl",
+        bytes.len() as u64,
+        DigestSet::new(sha256, None).expect("digest"),
+        "objects/demo.whl",
+        fixed_now(),
+    )
+    .expect("artifact");
+
+    validate_mirrored_artifact_payload(&artifact, bytes).expect("valid payload");
+
+    let mut wrong_size = artifact.clone();
+    wrong_size.size_bytes += 1;
+    assert!(matches!(
+        validate_mirrored_artifact_payload(&wrong_size, bytes),
+        Err(ApplicationError::External(_))
+    ));
+
+    let mut wrong_digest = artifact;
+    wrong_digest.digests = DigestSet::new("a".repeat(64), None).expect("digest");
+    assert!(matches!(
+        validate_mirrored_artifact_payload(&wrong_digest, bytes),
+        Err(ApplicationError::External(_))
+    ));
+}
+
+#[test]
+fn cancellation_guard_reports_operation_name() {
+    let error =
+        fail_if_cancelled(&AlwaysCancelled, "test operation").expect_err("cancelled operation");
+
+    assert!(matches!(error, ApplicationError::Cancelled(message) if message == "test operation"));
+}
+
+#[tokio::test]
+async fn service_helpers_report_not_found_for_missing_registry_objects() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(false));
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(0));
+    let app = test_app(store, storage, mirror, 1);
+
+    assert!(matches!(
+        app.ensure_project_available("acme", "missing").await,
+        Err(ApplicationError::NotFound(_))
+    ));
+    assert!(matches!(
+        app.find_release("acme", "internal", "9.9.9").await,
+        Err(ApplicationError::NotFound(_))
+    ));
+    assert!(matches!(
+        app.find_artifact("acme", "internal", "9.9.9", "missing.whl")
+            .await,
+        Err(ApplicationError::NotFound(_))
+    ));
+    assert!(matches!(
+        app.require_tenant("unknown").await,
+        Err(ApplicationError::NotFound(_))
+    ));
+}
+
+#[test]
+fn outermost_clock_and_uuid_adapters_produce_runtime_values() {
+    let before = Utc::now();
+    let observed = crate::SystemClock.now();
+    let after = Utc::now();
+    assert!(observed >= before);
+    assert!(observed <= after);
+
+    let first = crate::UuidGenerator.next();
+    let second = crate::UuidGenerator.next();
+    assert_ne!(first, second);
+}
+
+#[tokio::test]
 async fn validate_registry_distributions_reports_checksum_and_missing_blob_failures() {
     let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true));
     let storage = Arc::new(FakeObjectStorage::default());

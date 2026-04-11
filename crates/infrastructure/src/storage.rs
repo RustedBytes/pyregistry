@@ -270,6 +270,77 @@ mod tests {
             Some(&"false".to_string())
         );
     }
+
+    #[tokio::test]
+    async fn filesystem_storage_round_trips_and_ignores_missing_deletes() {
+        let root = std::env::temp_dir().join(format!("pyregistry-fs-{}", Uuid::new_v4()));
+        let storage = FileSystemObjectStorage::new(root.clone());
+
+        assert_eq!(storage.get("missing.whl").await.expect("missing"), None);
+        storage
+            .put("tenant/project/file.whl", b"wheel".to_vec())
+            .await
+            .expect("put");
+        assert_eq!(
+            storage.get("tenant/project/file.whl").await.expect("get"),
+            Some(b"wheel".to_vec())
+        );
+        storage
+            .delete("tenant/project/file.whl")
+            .await
+            .expect("delete");
+        storage
+            .delete("tenant/project/file.whl")
+            .await
+            .expect("missing delete");
+        assert_eq!(
+            storage
+                .get("tenant/project/file.whl")
+                .await
+                .expect("deleted"),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn normalizes_fs_roots_and_rejects_missing_storage_options() {
+        let mut options = BTreeMap::from([("root".into(), "relative-blobs".into())]);
+        normalize_fs_options(&mut options).expect("normalize fs");
+        assert!(
+            Path::new(options.get("root").expect("root")).is_absolute(),
+            "relative root should be resolved to absolute path"
+        );
+
+        assert!(normalize_fs_options(&mut BTreeMap::new()).is_err());
+        assert!(normalize_fs_options(&mut BTreeMap::from([("root".into(), " ".into())])).is_err());
+        assert!(normalize_opendal_options("memory", &mut BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_s3_options() {
+        assert!(normalize_s3_options(&mut BTreeMap::new()).is_err());
+        assert!(
+            normalize_s3_options(&mut BTreeMap::from([("bucket".into(), " ".into())])).is_err()
+        );
+        assert!(
+            normalize_s3_options(&mut BTreeMap::from([
+                ("bucket".into(), "pyregistry".into()),
+                ("endpoint".into(), " ".into()),
+            ]))
+            .is_err()
+        );
+        assert!(
+            normalize_s3_options(&mut BTreeMap::from([
+                ("bucket".into(), "pyregistry".into()),
+                ("root".into(), "relative".into()),
+            ]))
+            .is_err()
+        );
+        assert!(is_local_s3_endpoint("http://minio:9000"));
+        assert!(!is_local_s3_endpoint("https://s3.amazonaws.com"));
+    }
 }
 
 #[async_trait]
