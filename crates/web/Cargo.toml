@@ -26,4 +26,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
+pyregistry-infrastructure = { path = "../infrastructure" }
 tower.workspace = true

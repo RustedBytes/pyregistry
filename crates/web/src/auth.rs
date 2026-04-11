@@ -209,4 +209,107 @@ mod tests {
             "pyr_secret"
         );
     }
+
+    #[test]
+    fn parses_known_scopes_and_defaults_to_read() {
+        assert_eq!(
+            parse_scopes(vec!["read".into(), "publish".into(), "admin".into()]),
+            vec![TokenScope::Read, TokenScope::Publish, TokenScope::Admin]
+        );
+        assert_eq!(parse_scopes(vec!["unknown".into()]), vec![TokenScope::Read]);
+        assert_eq!(parse_scopes(Vec::new()), vec![TokenScope::Read]);
+    }
+
+    #[test]
+    fn formats_bytes_for_ui() {
+        assert_eq!(human_bytes(0), "0.0 B");
+        assert_eq!(human_bytes(1023), "1023.0 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(1024 * 1024 * 5 + 512 * 1024), "5.5 MB");
+        assert_eq!(human_bytes(1024_u64.pow(4) * 2), "2.0 TB");
+    }
+
+    #[test]
+    fn tenant_access_allows_superadmins_and_matching_tenant_admins() {
+        let superadmin = AdminSession {
+            email: "root@example.com".into(),
+            tenant_slug: None,
+            is_superadmin: true,
+        };
+        let tenant_admin = AdminSession {
+            email: "admin@example.com".into(),
+            tenant_slug: Some("acme".into()),
+            is_superadmin: false,
+        };
+
+        assert!(ensure_tenant_access(&superadmin, "other").is_ok());
+        assert!(ensure_tenant_access(&tenant_admin, "acme").is_ok());
+    }
+
+    #[test]
+    fn tenant_access_rejects_other_tenants() {
+        let session = AdminSession {
+            email: "admin@example.com".into(),
+            tenant_slug: Some("acme".into()),
+            is_superadmin: false,
+        };
+
+        let error = ensure_tenant_access(&session, "other").expect_err("forbidden");
+
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn rejects_missing_or_invalid_basic_auth_headers() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            extract_basic_secret(&headers).expect_err("missing").status,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer nope"),
+        );
+        assert!(
+            extract_basic_secret(&headers)
+                .expect_err("wrong scheme")
+                .message
+                .contains("Basic")
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic !!!"));
+        assert!(
+            extract_basic_secret(&headers)
+                .expect_err("bad base64")
+                .message
+                .contains("encoding")
+        );
+    }
+
+    #[test]
+    fn accepts_token_without_colon_when_basic_payload_is_single_secret() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, basic_header("pyr_secret"));
+
+        assert_eq!(
+            extract_basic_secret(&headers).expect("secret"),
+            "pyr_secret"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_basic_payload() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, basic_header("   "));
+
+        assert!(
+            extract_basic_secret(&headers)
+                .expect_err("empty secret")
+                .message
+                .contains("Missing token")
+        );
+    }
 }

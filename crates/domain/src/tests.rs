@@ -1,9 +1,10 @@
 #![cfg(test)]
 
 use crate::{
-    ArtifactKind, AuditEvent, AuditEventId, DomainError, ProjectName, ProjectSource,
-    PublishIdentity, ReleaseVersion, TenantId, TenantSlug, TrustedPublisher, TrustedPublisherId,
-    TrustedPublisherProvider, ensure_purge_allowed,
+    Artifact, ArtifactId, ArtifactKind, AuditEvent, AuditEventId, DigestSet, DomainError,
+    MirrorRule, ProjectName, ProjectSource, PublishIdentity, ReleaseId, ReleaseVersion, Tenant,
+    TenantId, TenantSlug, TrustedPublisher, TrustedPublisherId, TrustedPublisherProvider,
+    ensure_purge_allowed, ensure_unique_filenames,
 };
 use chrono::Utc;
 use std::collections::BTreeMap;
@@ -59,6 +60,51 @@ fn validates_artifact_filename() {
 fn prevents_mirrored_project_purge() {
     let error = ensure_purge_allowed(&ProjectSource::Mirrored).expect_err("must fail");
     assert_eq!(error, DomainError::MirroredProjectPurgeForbidden);
+    assert!(ensure_purge_allowed(&ProjectSource::Local).is_ok());
+}
+
+#[test]
+fn rejects_empty_tenant_display_name() {
+    let error = Tenant::new(
+        TenantId::default(),
+        TenantSlug::new("acme").expect("slug"),
+        "   ",
+        MirrorRule { enabled: false },
+        Utc::now(),
+    )
+    .expect_err("display name");
+
+    assert!(matches!(
+        error,
+        DomainError::InvalidValue {
+            field: "tenant_display_name",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn detects_duplicate_artifact_filenames() {
+    let release_id = ReleaseId::default();
+    let first = Artifact::new(
+        ArtifactId::default(),
+        release_id,
+        "demo-1.0.0-py3-none-any.whl",
+        10,
+        DigestSet::new("a".repeat(64), None).expect("digest"),
+        "objects/demo.whl",
+        Utc::now(),
+    )
+    .expect("artifact");
+    let mut duplicate = first.clone();
+    duplicate.id = ArtifactId::default();
+
+    let error = ensure_unique_filenames(&[first, duplicate]).expect_err("duplicate");
+
+    assert_eq!(
+        error,
+        DomainError::DuplicateArtifactFilename("demo-1.0.0-py3-none-any.whl".into())
+    );
 }
 
 #[test]

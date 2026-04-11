@@ -172,3 +172,57 @@ fn parse_claims_unverified(token: &str) -> Result<JwtClaims, ApplicationError> {
     serde_json::from_slice(&bytes)
         .map_err(|error| ApplicationError::Unauthorized(error.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unsigned_token(payload: serde_json::Value) -> String {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"RS256","kid":"test"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
+        format!("{header}.{payload}.signature")
+    }
+
+    #[test]
+    fn parses_unverified_claims_with_extra_values() {
+        let token = unsigned_token(serde_json::json!({
+            "iss": "https://issuer.example",
+            "sub": "repo:acme/demo",
+            "aud": ["pyregistry", "other"],
+            "repository": "acme/demo",
+            "run_id": 42
+        }));
+
+        let claims = parse_claims_unverified(&token).expect("claims");
+
+        assert_eq!(claims.iss, "https://issuer.example");
+        assert_eq!(claims.sub, "repo:acme/demo");
+        assert_eq!(claims.aud, serde_json::json!(["pyregistry", "other"]));
+        assert_eq!(
+            claims.extra.get("repository"),
+            Some(&serde_json::json!("acme/demo"))
+        );
+        assert_eq!(claims.extra.get("run_id"), Some(&serde_json::json!(42)));
+    }
+
+    #[test]
+    fn rejects_malformed_unverified_tokens() {
+        assert!(matches!(
+            parse_claims_unverified("missing-parts"),
+            Err(ApplicationError::Unauthorized(_))
+        ));
+        assert!(matches!(
+            parse_claims_unverified("header.not-base64.signature"),
+            Err(ApplicationError::Unauthorized(_))
+        ));
+        let token = format!(
+            "header.{}.signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("not json")
+        );
+        assert!(matches!(
+            parse_claims_unverified(&token),
+            Err(ApplicationError::Unauthorized(_))
+        ));
+    }
+}

@@ -1556,4 +1556,273 @@ mod tests {
 
         let _ = fs::remove_file(path);
     }
+
+    #[tokio::test]
+    async fn sqlite_store_round_trips_extended_registry_state() {
+        let path = std::env::temp_dir().join(format!("pyregistry-{}.sqlite3", Uuid::new_v4()));
+        let store = SqliteRegistryStore::open(&path).expect("open sqlite store");
+        let now = Utc::now();
+        let tenant = Tenant::new(
+            TenantId::new(Uuid::new_v4()),
+            TenantSlug::new("acme").expect("tenant slug"),
+            "Acme Corp",
+            MirrorRule { enabled: true },
+            now,
+        )
+        .expect("tenant");
+        let other_tenant = Tenant::new(
+            TenantId::new(Uuid::new_v4()),
+            TenantSlug::new("beta").expect("tenant slug"),
+            "Beta Corp",
+            MirrorRule { enabled: false },
+            now,
+        )
+        .expect("tenant");
+        store
+            .save_tenant(other_tenant.clone())
+            .await
+            .expect("other tenant");
+        store.save_tenant(tenant.clone()).await.expect("tenant");
+
+        let admin = AdminUser {
+            id: AdminUserId::new(Uuid::new_v4()),
+            tenant_id: Some(tenant.id),
+            email: "admin@acme.test".into(),
+            password_hash: "hash".into(),
+            is_superadmin: false,
+            created_at: now,
+        };
+        store
+            .save_admin_user(admin.clone())
+            .await
+            .expect("admin user");
+        assert_eq!(
+            store
+                .get_admin_user_by_email("admin@acme.test")
+                .await
+                .expect("admin lookup"),
+            Some(admin)
+        );
+
+        let identity = PublishIdentity {
+            issuer: "https://gitlab.example".into(),
+            subject: "project_path:acme/demo".into(),
+            audience: "pyregistry".into(),
+            provider: TrustedPublisherProvider::GitLab,
+            claims: BTreeMap::from([("project_path".into(), "acme/demo".into())]),
+        };
+        let token = ApiToken {
+            id: TokenId::new(Uuid::new_v4()),
+            tenant_id: tenant.id,
+            label: "publish".into(),
+            secret_hash: "secret-hash".into(),
+            scopes: vec![TokenScope::Read, TokenScope::Publish, TokenScope::Admin],
+            publish_identity: Some(identity.clone()),
+            created_at: now,
+            expires_at: None,
+        };
+        store.save_api_token(token.clone()).await.expect("token");
+        assert_eq!(
+            store.list_api_tokens(tenant.id).await.expect("tokens"),
+            vec![token.clone()]
+        );
+
+        let project = Project::new(
+            ProjectId::new(Uuid::new_v4()),
+            tenant.id,
+            ProjectName::new("Demo_Pkg").expect("project name"),
+            ProjectSource::Mirrored,
+            "summary",
+            "description",
+            now,
+        );
+        let other_project = Project::new(
+            ProjectId::new(Uuid::new_v4()),
+            other_tenant.id,
+            ProjectName::new("Hidden").expect("project name"),
+            ProjectSource::Local,
+            "summary",
+            "description",
+            now,
+        );
+        store.save_project(project.clone()).await.expect("project");
+        store
+            .save_project(other_project)
+            .await
+            .expect("other project");
+        assert_eq!(
+            store
+                .get_project_by_normalized_name(tenant.id, "demo-pkg")
+                .await
+                .expect("project lookup"),
+            Some(project.clone())
+        );
+        assert_eq!(
+            store
+                .search_projects(tenant.id, "")
+                .await
+                .expect("all search")
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .registry_overview()
+                .await
+                .expect("overview")
+                .mirrored_project_count,
+            1
+        );
+
+        let mut release = Release {
+            id: ReleaseId::new(Uuid::new_v4()),
+            project_id: project.id,
+            version: ReleaseVersion::new("1.0.0").expect("version"),
+            yanked: None,
+            created_at: now,
+        };
+        release.yank(Some("bad build".into()), now);
+        store.save_release(release.clone()).await.expect("release");
+        assert_eq!(
+            store
+                .get_release_by_version(project.id, &release.version)
+                .await
+                .expect("release lookup"),
+            Some(release.clone())
+        );
+
+        let mut artifact = Artifact::new(
+            ArtifactId::new(Uuid::new_v4()),
+            release.id,
+            "demo_pkg-1.0.0-py3-none-any.whl",
+            42,
+            DigestSet::new("a".repeat(64), Some("b".repeat(64))).expect("digests"),
+            "acme/demo-pkg/1.0.0/demo_pkg-1.0.0-py3-none-any.whl",
+            now,
+        )
+        .expect("artifact");
+        artifact.upstream_url = Some("https://files.example/demo.whl".into());
+        artifact.provenance_key = Some("provenance/demo.json".into());
+        artifact.yank(Some("replaced".into()), now);
+        store
+            .save_artifact(artifact.clone())
+            .await
+            .expect("artifact");
+        assert_eq!(
+            store
+                .get_artifact_by_filename(release.id, &artifact.filename)
+                .await
+                .expect("artifact lookup"),
+            Some(artifact.clone())
+        );
+
+        let attestation = AttestationBundle {
+            artifact_id: artifact.id,
+            media_type: "application/json".into(),
+            payload: "{}".into(),
+            source: AttestationSource::Mirrored,
+            recorded_at: now,
+        };
+        store
+            .save_attestation(attestation.clone())
+            .await
+            .expect("attestation");
+        assert_eq!(
+            store
+                .get_attestation_by_artifact(artifact.id)
+                .await
+                .expect("attestation lookup"),
+            Some(attestation)
+        );
+
+        let publisher = TrustedPublisher {
+            id: TrustedPublisherId::new(Uuid::new_v4()),
+            tenant_id: tenant.id,
+            project_name: project.name.clone(),
+            provider: TrustedPublisherProvider::GitLab,
+            issuer: identity.issuer,
+            audience: identity.audience,
+            claim_rules: BTreeMap::from([("project_path".into(), "acme/demo".into())]),
+            created_at: now,
+        };
+        store
+            .save_trusted_publisher(publisher.clone())
+            .await
+            .expect("publisher");
+        assert_eq!(
+            store
+                .list_trusted_publishers(tenant.id, "demo-pkg")
+                .await
+                .expect("publishers"),
+            vec![publisher]
+        );
+
+        let first_event = AuditEvent::new(
+            AuditEventId::new(Uuid::new_v4()),
+            now - Duration::minutes(1),
+            "admin@acme.test",
+            "first",
+            Some("acme".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .expect("event");
+        let second_event = AuditEvent::new(
+            AuditEventId::new(Uuid::new_v4()),
+            now,
+            "admin@acme.test",
+            "second",
+            Some("acme".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .expect("event");
+        store
+            .save_audit_event(first_event)
+            .await
+            .expect("first event");
+        store
+            .save_audit_event(second_event)
+            .await
+            .expect("second event");
+        let events = store
+            .list_audit_events(None, 1)
+            .await
+            .expect("audit events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "second");
+
+        store
+            .revoke_api_token(tenant.id, token.id)
+            .await
+            .expect("revoke token");
+        assert!(
+            store
+                .list_api_tokens(tenant.id)
+                .await
+                .expect("tokens")
+                .is_empty()
+        );
+        store
+            .delete_artifact(artifact.id)
+            .await
+            .expect("delete artifact");
+        assert!(
+            store
+                .get_attestation_by_artifact(artifact.id)
+                .await
+                .expect("attestation lookup")
+                .is_none()
+        );
+        store
+            .delete_release(release.id)
+            .await
+            .expect("delete release");
+        store
+            .delete_project(project.id)
+            .await
+            .expect("delete project");
+
+        let _ = fs::remove_file(path);
+    }
 }

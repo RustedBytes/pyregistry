@@ -201,3 +201,146 @@ pub enum InfrastructureError {
     #[error("artifact object storage is not configured correctly: {0}")]
     ObjectStorageConfiguration(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{OpenDalStorageConfig, PostgresConfig, SqliteConfig};
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
+
+    fn in_memory_settings() -> Settings {
+        let mut settings = Settings::new_local_template();
+        settings.database_store = DatabaseStoreKind::InMemory;
+        settings.blob_root =
+            std::env::temp_dir().join(format!("pyregistry-wiring-{}", Uuid::new_v4()));
+        settings
+    }
+
+    #[tokio::test]
+    async fn builds_application_with_in_memory_store_and_filesystem_storage() {
+        let settings = in_memory_settings();
+
+        let app = build_application(&settings).await.expect("application");
+
+        assert_eq!(app.list_tenants().await.expect("tenants"), Vec::new());
+        assert_eq!(
+            app.get_registry_overview()
+                .await
+                .expect("overview")
+                .tenant_count,
+            0
+        );
+
+        let _ = std::fs::remove_dir_all(settings.blob_root);
+    }
+
+    #[tokio::test]
+    async fn seed_application_creates_superadmin_and_bootstrap_tenant_once() {
+        let settings = in_memory_settings();
+        let app = build_application(&settings).await.expect("application");
+
+        seed_application(&app, &settings).await.expect("first seed");
+        seed_application(&app, &settings)
+            .await
+            .expect("second seed");
+
+        assert_eq!(app.list_tenants().await.expect("tenants").len(), 1);
+        assert!(
+            app.login_admin(&settings.superadmin_email, &settings.superadmin_password)
+                .await
+                .is_ok()
+        );
+
+        let _ = std::fs::remove_dir_all(settings.blob_root);
+    }
+
+    #[tokio::test]
+    async fn build_registry_store_requires_selected_database_configuration() {
+        let mut sqlite_settings = in_memory_settings();
+        sqlite_settings.database_store = DatabaseStoreKind::Sqlite;
+        sqlite_settings.sqlite = None;
+        assert!(matches!(
+            build_registry_store(&sqlite_settings).await,
+            Err(InfrastructureError::SqliteConfigurationRequired)
+        ));
+
+        let mut postgres_settings = in_memory_settings();
+        postgres_settings.database_store = DatabaseStoreKind::Pgsql;
+        postgres_settings.postgres = None;
+        assert!(matches!(
+            build_registry_store(&postgres_settings).await,
+            Err(InfrastructureError::PostgresConfigurationRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn build_registry_store_opens_sqlite_metadata_store() {
+        let path =
+            std::env::temp_dir().join(format!("pyregistry-wiring-{}.sqlite", Uuid::new_v4()));
+        let mut settings = in_memory_settings();
+        settings.database_store = DatabaseStoreKind::Sqlite;
+        settings.sqlite = Some(SqliteConfig { path: path.clone() });
+
+        let store = build_registry_store(&settings)
+            .await
+            .expect("sqlite registry store");
+
+        assert_eq!(
+            store
+                .registry_overview()
+                .await
+                .expect("overview")
+                .tenant_count,
+            0
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn build_registry_store_reports_postgres_connection_errors() {
+        let mut settings = in_memory_settings();
+        settings.database_store = DatabaseStoreKind::Pgsql;
+        settings.postgres = Some(PostgresConfig {
+            connection_url: "postgres://invalid:invalid@127.0.0.1:1/pyregistry".into(),
+            max_connections: 1,
+            min_connections: 0,
+            acquire_timeout_seconds: 1,
+        });
+
+        assert!(matches!(
+            build_registry_store(&settings).await,
+            Err(InfrastructureError::MetadataStoreConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn build_object_storage_uses_filesystem_or_reports_opendal_config_errors() {
+        let settings = in_memory_settings();
+        let storage = build_object_storage(&settings).expect("filesystem storage");
+        assert!(Arc::strong_count(&storage) >= 1);
+
+        let mut broken = settings.clone();
+        broken.artifact_storage.backend = ArtifactStorageBackend::OpenDal;
+        broken.artifact_storage.opendal = OpenDalStorageConfig {
+            scheme: "fs".into(),
+            options: BTreeMap::new(),
+        };
+
+        assert!(matches!(
+            build_object_storage(&broken),
+            Err(InfrastructureError::ObjectStorageConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn pysentry_cache_dir_is_sibling_to_blob_root_parent() {
+        let mut settings = in_memory_settings();
+        settings.blob_root = PathBuf::from("/tmp/pyregistry/blobs");
+
+        assert_eq!(
+            pysentry_cache_dir(&settings),
+            PathBuf::from("/tmp/pyregistry/pysentry-cache")
+        );
+    }
+}

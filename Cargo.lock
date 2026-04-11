@@ -3414,6 +3414,7 @@ dependencies = [
  "mime",
  "pyregistry-application",
  "pyregistry-domain",
+ "pyregistry-infrastructure",
  "serde",
  "serde_json",
  "tokio",

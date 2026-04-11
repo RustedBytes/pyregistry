@@ -59,7 +59,7 @@ impl MirrorJobStatus {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MirrorJobPhase {
     Queued,
     Running,
@@ -84,4 +84,41 @@ pub struct AppState {
     pub sessions: Arc<RwLock<HashMap<String, AdminSession>>>,
     pub mirror_jobs: MirrorJobs,
     pub rate_limiter: RateLimiter,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mirror_job_status_factories_set_expected_phase_and_detail() {
+        let queued = MirrorJobStatus::queued("Acme".into(), "RsLoop".into());
+        assert_eq!(queued.tenant_slug, "Acme");
+        assert_eq!(queued.project_name, "RsLoop");
+        assert_eq!(queued.phase, MirrorJobPhase::Queued);
+        assert!(queued.is_active());
+        assert!(queued.detail.contains("Waiting"));
+
+        let running = MirrorJobStatus::running("acme".into(), "rsloop".into());
+        assert_eq!(running.phase, MirrorJobPhase::Running);
+        assert!(running.is_active());
+        assert!(running.detail.contains("Downloading"));
+
+        let completed =
+            MirrorJobStatus::completed("acme".into(), "rsloop".into(), "cached 12 files".into());
+        assert_eq!(completed.phase, MirrorJobPhase::Completed);
+        assert!(!completed.is_active());
+        assert_eq!(completed.detail, "cached 12 files");
+
+        let failed =
+            MirrorJobStatus::failed("acme".into(), "rsloop".into(), "network timeout".into());
+        assert_eq!(failed.phase, MirrorJobPhase::Failed);
+        assert!(!failed.is_active());
+        assert_eq!(failed.detail, "network timeout");
+    }
+
+    #[test]
+    fn mirror_job_key_is_case_and_space_normalized() {
+        assert_eq!(mirror_job_key(" Acme ", " RsLoop "), "acme:rsloop");
+    }
 }

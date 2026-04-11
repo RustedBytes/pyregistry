@@ -388,3 +388,419 @@ impl RegistryStore for InMemoryRegistryStore {
         Ok(events)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use pyregistry_application::RegistryStore;
+    use pyregistry_domain::{
+        AdminUserId, AttestationSource, AuditEventId, DigestSet, MirrorRule, ProjectName,
+        TenantSlug, TokenScope, TrustedPublisherId, TrustedPublisherProvider,
+    };
+    use std::collections::BTreeMap;
+
+    fn now() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 4, 11, 12, 0, 0)
+            .single()
+            .expect("timestamp")
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_round_trips_registry_state() {
+        let store = InMemoryRegistryStore::default();
+        let tenant = Tenant::new(
+            TenantId::new(Uuid::from_u128(1)),
+            TenantSlug::new("acme").expect("slug"),
+            "Acme",
+            MirrorRule { enabled: true },
+            now(),
+        )
+        .expect("tenant");
+        store.save_tenant(tenant.clone()).await.expect("tenant");
+
+        let admin = AdminUser {
+            id: AdminUserId::new(Uuid::from_u128(2)),
+            tenant_id: Some(tenant.id),
+            email: "admin@acme.test".into(),
+            password_hash: "hash".into(),
+            is_superadmin: false,
+            created_at: now(),
+        };
+        store.save_admin_user(admin.clone()).await.expect("admin");
+
+        let token = ApiToken {
+            id: TokenId::new(Uuid::from_u128(3)),
+            tenant_id: tenant.id,
+            label: "read".into(),
+            secret_hash: "secret-hash".into(),
+            scopes: vec![TokenScope::Read],
+            publish_identity: None,
+            created_at: now(),
+            expires_at: None,
+        };
+        store.save_api_token(token.clone()).await.expect("token");
+
+        let project = Project::new(
+            ProjectId::new(Uuid::from_u128(4)),
+            tenant.id,
+            ProjectName::new("Demo_Pkg").expect("project"),
+            ProjectSource::Local,
+            "Demo summary",
+            "Demo description",
+            now(),
+        );
+        store.save_project(project.clone()).await.expect("project");
+        let release = Release {
+            id: ReleaseId::new(Uuid::from_u128(5)),
+            project_id: project.id,
+            version: ReleaseVersion::new("1.0.0").expect("version"),
+            yanked: None,
+            created_at: now(),
+        };
+        store.save_release(release.clone()).await.expect("release");
+        let artifact = Artifact::new(
+            ArtifactId::new(Uuid::from_u128(6)),
+            release.id,
+            "demo-pkg-1.0.0-py3-none-any.whl",
+            11,
+            DigestSet::new("a".repeat(64), None).expect("digest"),
+            "objects/demo.whl",
+            now(),
+        )
+        .expect("artifact");
+        store
+            .save_artifact(artifact.clone())
+            .await
+            .expect("artifact");
+        let attestation = AttestationBundle {
+            artifact_id: artifact.id,
+            media_type: "application/json".into(),
+            payload: "{}".into(),
+            source: AttestationSource::TrustedPublish,
+            recorded_at: now(),
+        };
+        store
+            .save_attestation(attestation.clone())
+            .await
+            .expect("attestation");
+        let publisher = TrustedPublisher {
+            id: TrustedPublisherId::new(Uuid::from_u128(7)),
+            tenant_id: tenant.id,
+            project_name: project.name.clone(),
+            provider: TrustedPublisherProvider::GitHubActions,
+            issuer: "https://issuer.example".into(),
+            audience: "pyregistry".into(),
+            claim_rules: BTreeMap::from([("repository".into(), "acme/demo".into())]),
+            created_at: now(),
+        };
+        store
+            .save_trusted_publisher(publisher.clone())
+            .await
+            .expect("publisher");
+        let event = AuditEvent::new(
+            AuditEventId::new(Uuid::from_u128(8)),
+            now(),
+            "admin@acme.test",
+            "artifact.upload",
+            Some("acme".into()),
+            Some("demo-pkg".into()),
+            BTreeMap::from([("filename".into(), artifact.filename.clone())]),
+        )
+        .expect("event");
+        store.save_audit_event(event.clone()).await.expect("event");
+
+        assert_eq!(
+            store
+                .registry_overview()
+                .await
+                .expect("overview")
+                .artifact_count,
+            1
+        );
+        assert_eq!(
+            store.list_tenants().await.expect("tenants"),
+            vec![tenant.clone()]
+        );
+        assert_eq!(
+            store
+                .get_tenant_by_slug("acme")
+                .await
+                .expect("tenant lookup"),
+            Some(tenant.clone())
+        );
+        assert_eq!(
+            store
+                .get_admin_user_by_email("admin@acme.test")
+                .await
+                .expect("admin lookup"),
+            Some(admin)
+        );
+        assert_eq!(
+            store.list_api_tokens(tenant.id).await.expect("tokens"),
+            vec![token.clone()]
+        );
+        assert_eq!(
+            store
+                .get_project_by_normalized_name(tenant.id, "demo-pkg")
+                .await
+                .expect("project lookup"),
+            Some(project.clone())
+        );
+        assert_eq!(
+            store
+                .search_projects(tenant.id, "summary")
+                .await
+                .expect("search")[0]
+                .latest_version,
+            Some("1.0.0".into())
+        );
+        assert_eq!(
+            store
+                .list_release_artifacts(project.id)
+                .await
+                .expect("groups")[0]
+                .artifacts[0]
+                .filename,
+            artifact.filename
+        );
+        assert_eq!(
+            store
+                .get_attestation_by_artifact(artifact.id)
+                .await
+                .expect("attestation lookup"),
+            Some(attestation)
+        );
+        assert_eq!(
+            store
+                .list_trusted_publishers(tenant.id, "demo-pkg")
+                .await
+                .expect("publishers"),
+            vec![publisher]
+        );
+        assert_eq!(
+            store
+                .list_audit_events(Some("acme"), 10)
+                .await
+                .expect("events"),
+            vec![event]
+        );
+
+        store
+            .revoke_api_token(tenant.id, token.id)
+            .await
+            .expect("revoke");
+        assert!(
+            store
+                .list_api_tokens(tenant.id)
+                .await
+                .expect("tokens")
+                .is_empty()
+        );
+        store
+            .delete_artifact(artifact.id)
+            .await
+            .expect("delete artifact");
+        assert!(
+            store
+                .get_attestation_by_artifact(artifact.id)
+                .await
+                .expect("attestation lookup")
+                .is_none()
+        );
+        store
+            .delete_release(release.id)
+            .await
+            .expect("delete release");
+        store
+            .delete_project(project.id)
+            .await
+            .expect("delete project");
+        assert!(
+            store
+                .list_projects(tenant.id)
+                .await
+                .expect("projects")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_sorts_filters_and_keeps_unmatched_tokens() {
+        let store = InMemoryRegistryStore::default();
+        let acme = Tenant::new(
+            TenantId::new(Uuid::from_u128(11)),
+            TenantSlug::new("acme").expect("slug"),
+            "Acme",
+            MirrorRule { enabled: true },
+            now(),
+        )
+        .expect("tenant");
+        let beta = Tenant::new(
+            TenantId::new(Uuid::from_u128(12)),
+            TenantSlug::new("beta").expect("slug"),
+            "Beta",
+            MirrorRule { enabled: false },
+            now(),
+        )
+        .expect("tenant");
+        store.save_tenant(beta.clone()).await.expect("beta");
+        store.save_tenant(acme.clone()).await.expect("acme");
+
+        assert_eq!(
+            store
+                .list_tenants()
+                .await
+                .expect("tenants")
+                .into_iter()
+                .map(|tenant| tenant.slug.as_str().to_string())
+                .collect::<Vec<_>>(),
+            vec!["acme", "beta"]
+        );
+
+        let token = ApiToken {
+            id: TokenId::new(Uuid::from_u128(13)),
+            tenant_id: acme.id,
+            label: "read".into(),
+            secret_hash: "hash".into(),
+            scopes: vec![TokenScope::Read],
+            publish_identity: None,
+            created_at: now(),
+            expires_at: None,
+        };
+        store.save_api_token(token.clone()).await.expect("token");
+        store
+            .revoke_api_token(beta.id, token.id)
+            .await
+            .expect("wrong tenant revoke");
+        assert_eq!(
+            store.list_api_tokens(acme.id).await.expect("tokens"),
+            vec![token]
+        );
+
+        let mirrored_project = Project::new(
+            ProjectId::new(Uuid::from_u128(14)),
+            acme.id,
+            ProjectName::new("Alpha").expect("project"),
+            ProjectSource::Mirrored,
+            "shared summary",
+            "",
+            now(),
+        );
+        let local_project = Project::new(
+            ProjectId::new(Uuid::from_u128(15)),
+            acme.id,
+            ProjectName::new("Zulu").expect("project"),
+            ProjectSource::Local,
+            "other summary",
+            "",
+            now(),
+        );
+        let other_tenant_project = Project::new(
+            ProjectId::new(Uuid::from_u128(16)),
+            beta.id,
+            ProjectName::new("Hidden").expect("project"),
+            ProjectSource::Local,
+            "shared summary",
+            "",
+            now(),
+        );
+        store
+            .save_project(local_project.clone())
+            .await
+            .expect("local");
+        store
+            .save_project(mirrored_project.clone())
+            .await
+            .expect("mirrored");
+        store
+            .save_project(other_tenant_project)
+            .await
+            .expect("other");
+
+        assert_eq!(
+            store
+                .registry_overview()
+                .await
+                .expect("overview")
+                .mirrored_project_count,
+            1
+        );
+        assert_eq!(
+            store.list_projects(acme.id).await.expect("projects").len(),
+            2
+        );
+
+        let release_019 = Release {
+            id: ReleaseId::new(Uuid::from_u128(17)),
+            project_id: mirrored_project.id,
+            version: ReleaseVersion::new("0.1.9").expect("version"),
+            yanked: None,
+            created_at: now(),
+        };
+        let release_0114 = Release {
+            id: ReleaseId::new(Uuid::from_u128(18)),
+            project_id: mirrored_project.id,
+            version: ReleaseVersion::new("0.1.14").expect("version"),
+            yanked: None,
+            created_at: now(),
+        };
+        store.save_release(release_019).await.expect("old release");
+        store.save_release(release_0114).await.expect("new release");
+
+        let hits = store
+            .search_projects(acme.id, "")
+            .await
+            .expect("all search hits");
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit.project_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alpha", "Zulu"]
+        );
+        assert_eq!(hits[0].latest_version.as_deref(), Some("0.1.14"));
+        assert!(
+            store
+                .search_projects(acme.id, "missing")
+                .await
+                .expect("empty search")
+                .is_empty()
+        );
+
+        let first_event = AuditEvent::new(
+            AuditEventId::new(Uuid::from_u128(19)),
+            now(),
+            "admin@example.test",
+            "first",
+            Some("acme".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .expect("event");
+        let second_event = AuditEvent::new(
+            AuditEventId::new(Uuid::from_u128(20)),
+            now(),
+            "admin@example.test",
+            "second",
+            Some("acme".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .expect("event");
+        store
+            .save_audit_event(first_event)
+            .await
+            .expect("first event");
+        store
+            .save_audit_event(second_event)
+            .await
+            .expect("second event");
+
+        let events = store
+            .list_audit_events(None, 1)
+            .await
+            .expect("limited events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "second");
+    }
+}
