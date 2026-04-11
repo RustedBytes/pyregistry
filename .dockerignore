@@ -1,0 +1,15 @@
+target/
+.git/
+.github/
+.cargo/
+.pyregistry/
+docker/
+docs/
+scripts/
+
+.env
+.env.*
+pyregistry.toml
+
+*.log
+*.tmp
