@@ -11,6 +11,8 @@ pub enum ApplicationError {
     Conflict(String),
     #[error("unauthorized: {0}")]
     Unauthorized(String),
+    #[error("cancelled: {0}")]
+    Cancelled(String),
     #[error("external dependency failure: {0}")]
     External(String),
 }

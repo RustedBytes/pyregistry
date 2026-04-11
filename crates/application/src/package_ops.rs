@@ -1,8 +1,13 @@
 use crate::{
-    ApplicationError, MirrorRefreshFailure, MirrorRefreshReport, MirroredProjectSnapshot,
-    ProvenanceDescriptor, PyregistryApp, SimpleArtifactLink, SimpleProject, SimpleProjectPage,
+    ApplicationError, CancellationSignal, MirrorRefreshFailure, MirrorRefreshReport,
+    MirroredProjectSnapshot, NeverCancelled, ProvenanceDescriptor, PyregistryApp,
+    SimpleArtifactLink, SimpleProject, SimpleProjectPage,
 };
-use futures_util::{StreamExt, stream};
+use futures_util::{
+    FutureExt, StreamExt,
+    future::{self, Either},
+    stream,
+};
 use log::{debug, info, warn};
 use pyregistry_domain::{
     Artifact, ArtifactId, AttestationBundle, AttestationSource, DigestSet, Project, ProjectId,
@@ -16,9 +21,21 @@ impl PyregistryApp {
         tenant_slug: &str,
         project_name: &str,
     ) -> Result<Option<Project>, ApplicationError> {
+        let cancellation = NeverCancelled;
+        self.resolve_project_from_mirror_with_cancellation(tenant_slug, project_name, &cancellation)
+            .await
+    }
+
+    pub async fn resolve_project_from_mirror_with_cancellation(
+        &self,
+        tenant_slug: &str,
+        project_name: &str,
+        cancellation: &dyn CancellationSignal,
+    ) -> Result<Option<Project>, ApplicationError> {
         info!(
             "resolving tenant `{tenant_slug}` project `{project_name}` from local storage or mirror"
         );
+        fail_if_cancelled(cancellation, "mirror project resolution")?;
         let tenant = self.require_tenant(tenant_slug).await?;
         let project_name = ProjectName::new(project_name)?;
 
@@ -44,11 +61,19 @@ impl PyregistryApp {
             return Ok(None);
         }
 
-        let Some(snapshot) = self
+        let fetch_project = self
             .mirror_client
             .fetch_project(project_name.original())
-            .await?
-        else {
+            .boxed();
+        let cancelled = cancellation.cancelled().boxed();
+        let snapshot = match future::select(fetch_project, cancelled).await {
+            Either::Left((result, _)) => result?,
+            Either::Right(((), _)) => {
+                return Err(ApplicationError::Cancelled("mirror metadata fetch".into()));
+            }
+        };
+
+        let Some(snapshot) = snapshot else {
             info!(
                 "mirror lookup did not find upstream project `{}` for tenant `{tenant_slug}`",
                 project_name.original()
@@ -60,7 +85,7 @@ impl PyregistryApp {
             "mirror lookup fetched upstream project `{}` for tenant `{tenant_slug}`",
             project_name.original()
         );
-        self.store_mirrored_project(tenant_slug, tenant.id, snapshot)
+        self.store_mirrored_project(tenant_slug, tenant.id, snapshot, cancellation)
             .await
     }
 
@@ -93,11 +118,21 @@ impl PyregistryApp {
     }
 
     pub async fn refresh_mirrored_projects(&self) -> Result<MirrorRefreshReport, ApplicationError> {
+        let cancellation = NeverCancelled;
+        self.refresh_mirrored_projects_with_cancellation(&cancellation)
+            .await
+    }
+
+    pub async fn refresh_mirrored_projects_with_cancellation(
+        &self,
+        cancellation: &dyn CancellationSignal,
+    ) -> Result<MirrorRefreshReport, ApplicationError> {
         info!("starting background refresh for mirrored projects");
         let tenants = self.store.list_tenants().await?;
         let mut report = MirrorRefreshReport::default();
 
         for tenant in tenants {
+            fail_if_cancelled(cancellation, "mirrored project refresh")?;
             if !tenant.mirror_rule.enabled {
                 debug!(
                     "skipping mirrored project refresh for tenant `{}` because mirroring is disabled",
@@ -112,11 +147,16 @@ impl PyregistryApp {
                 .into_iter()
                 .filter(|project| matches!(project.source, ProjectSource::Mirrored))
             {
+                fail_if_cancelled(cancellation, "mirrored project refresh")?;
                 report.mirrored_project_count += 1;
                 let tenant_slug = tenant.slug.as_str().to_string();
                 let project_name = project.name.original().to_string();
                 match self
-                    .resolve_project_from_mirror(&tenant_slug, &project_name)
+                    .resolve_project_from_mirror_with_cancellation(
+                        &tenant_slug,
+                        &project_name,
+                        cancellation,
+                    )
                     .await
                 {
                     Ok(Some(_)) => {
@@ -314,6 +354,7 @@ impl PyregistryApp {
         tenant_slug: &str,
         tenant_id: pyregistry_domain::TenantId,
         snapshot: MirroredProjectSnapshot,
+        cancellation: &dyn CancellationSignal,
     ) -> Result<Option<Project>, ApplicationError> {
         let artifact_total = snapshot.artifacts.len();
         let now = self.clock.now();
@@ -341,6 +382,7 @@ impl PyregistryApp {
 
         let mut cache_candidates = Vec::new();
         for mirrored in snapshot.artifacts {
+            fail_if_cancelled(cancellation, "storing mirrored project metadata")?;
             let version = ReleaseVersion::new(mirrored.version.clone())?;
             let release = self
                 .store
@@ -409,6 +451,7 @@ impl PyregistryApp {
                 tenant_slug,
                 project.name.normalized(),
                 cache_candidates,
+                cancellation,
             )
             .await?;
 
@@ -426,10 +469,12 @@ impl PyregistryApp {
         tenant_slug: &str,
         normalized_project_name: &str,
         candidates: Vec<MirroredArtifactCacheCandidate>,
+        cancellation: &dyn CancellationSignal,
     ) -> Result<usize, ApplicationError> {
         if candidates.is_empty() {
             return Ok(0);
         }
+        fail_if_cancelled(cancellation, "mirrored artifact downloads")?;
 
         let candidate_count = candidates.len();
         let concurrency = self.mirror_download_concurrency.min(candidate_count).max(1);
@@ -449,9 +494,26 @@ impl PyregistryApp {
         .buffer_unordered(concurrency);
 
         let mut cached_artifact_count = 0usize;
-        while let Some(result) = downloads.next().await {
-            if result? {
-                cached_artifact_count += 1;
+        loop {
+            fail_if_cancelled(cancellation, "mirrored artifact downloads")?;
+
+            let next_download = downloads.next().boxed();
+            let cancelled = cancellation.cancelled().boxed();
+            match future::select(next_download, cancelled).await {
+                Either::Left((Some(result), _)) => {
+                    if result? {
+                        cached_artifact_count += 1;
+                    }
+                }
+                Either::Left((None, _)) => break,
+                Either::Right(((), _)) => {
+                    warn!(
+                        "cancelling mirrored artifact downloads for tenant `{tenant_slug}` project `{normalized_project_name}` after caching {cached_artifact_count} of {candidate_count} payload(s)"
+                    );
+                    return Err(ApplicationError::Cancelled(
+                        "mirrored artifact downloads".into(),
+                    ));
+                }
             }
         }
 
@@ -533,6 +595,17 @@ fn validate_mirrored_artifact_payload(
             "mirrored artifact `{}` sha256 mismatch",
             artifact.filename
         )));
+    }
+
+    Ok(())
+}
+
+fn fail_if_cancelled(
+    cancellation: &dyn CancellationSignal,
+    operation: &'static str,
+) -> Result<(), ApplicationError> {
+    if cancellation.is_cancelled() {
+        return Err(ApplicationError::Cancelled(operation.into()));
     }
 
     Ok(())

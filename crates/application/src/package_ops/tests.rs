@@ -1,9 +1,10 @@
 use super::*;
 use crate::{
-    AttestationSigner, Clock, IdGenerator, MirrorClient, MirroredArtifactSnapshot, ObjectStorage,
-    OidcVerifier, PackageVulnerabilityQuery, PackageVulnerabilityReport, PasswordHasher,
-    RegistryOverview, RegistryStore, SearchHit, TokenHasher, VulnerabilityScanner,
-    WheelArchiveReader, WheelArchiveSnapshot, WheelVirusScanResult, WheelVirusScanner,
+    AttestationSigner, CancellationSignal, Clock, IdGenerator, MirrorClient,
+    MirroredArtifactSnapshot, ObjectStorage, OidcVerifier, PackageVulnerabilityQuery,
+    PackageVulnerabilityReport, PasswordHasher, RegistryOverview, RegistryStore, SearchHit,
+    TokenHasher, VulnerabilityScanner, WheelArchiveReader, WheelArchiveSnapshot,
+    WheelVirusScanResult, WheelVirusScanner,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -84,6 +85,23 @@ async fn refresh_mirrored_projects_skips_disabled_tenants() {
     assert_eq!(report.tenant_count, 0);
     assert_eq!(report.mirrored_project_count, 0);
     assert_eq!(report.refreshed_project_count, 0);
+    assert_eq!(mirror.project_fetch_count(), 0);
+    assert_eq!(mirror.fetch_count(), 0);
+}
+
+#[tokio::test]
+async fn refresh_mirrored_projects_stops_before_work_when_cancelled() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true));
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(3));
+    let app = test_app(store, storage, mirror.clone(), 2);
+
+    let error = app
+        .refresh_mirrored_projects_with_cancellation(&AlwaysCancelled)
+        .await
+        .expect_err("refresh should be cancelled");
+
+    assert!(matches!(error, ApplicationError::Cancelled(_)));
     assert_eq!(mirror.project_fetch_count(), 0);
     assert_eq!(mirror.fetch_count(), 0);
 }
@@ -683,6 +701,17 @@ impl VulnerabilityScanner for UnusedVulnerabilityScanner {
             .map(PackageVulnerabilityReport::clean)
             .collect())
     }
+}
+
+struct AlwaysCancelled;
+
+#[async_trait]
+impl CancellationSignal for AlwaysCancelled {
+    fn is_cancelled(&self) -> bool {
+        true
+    }
+
+    async fn cancelled(&self) {}
 }
 
 struct UnusedWheelArchiveReader;

@@ -20,6 +20,7 @@ impl From<ApplicationError> for WebError {
             ApplicationError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApplicationError::Conflict(_) => StatusCode::CONFLICT,
             ApplicationError::Domain(_) => StatusCode::BAD_REQUEST,
+            ApplicationError::Cancelled(_) => StatusCode::REQUEST_TIMEOUT,
             ApplicationError::External(_) => StatusCode::BAD_GATEWAY,
         };
         Self {

@@ -1,10 +1,12 @@
 use anyhow::Context;
+use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
 use env_logger::Env;
 use log::{debug, error, info, warn};
 use pyregistry_application::{
-    AuditWheelCommand, MirrorRefreshReport, PyregistryApp, RegistrySecurityReport,
-    WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport, WheelAuditUseCase,
+    ApplicationError, AuditWheelCommand, CancellationSignal, MirrorRefreshReport, PyregistryApp,
+    RegistrySecurityReport, WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport,
+    WheelAuditUseCase,
 };
 use pyregistry_infrastructure::{
     LoggingConfig, LoggingTimestamp, PypiMirrorClient, Settings, YaraWheelVirusScanner,
@@ -23,6 +25,9 @@ use tokio::net::TcpListener;
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use tower_http::trace::TraceLayer;
+
+const FORCED_HTTP_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+const MIRROR_UPDATER_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -206,7 +211,8 @@ async fn serve(settings: Settings, config_source: String) -> anyhow::Result<()> 
     info!("bootstrap data ready");
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let mirror_updater = spawn_mirror_updater(app.clone(), &settings, shutdown_rx);
+    let mirror_updater = spawn_mirror_updater(app.clone(), &settings, shutdown_rx.clone());
+    let forced_shutdown_rx = shutdown_rx.clone();
 
     info!("binding TCP listener on {}", settings.bind_address);
     let listener = TcpListener::bind(&settings.bind_address)
@@ -231,12 +237,22 @@ async fn serve(settings: Settings, config_source: String) -> anyhow::Result<()> 
     let router = router(state).layer(TraceLayer::new_for_http());
 
     info!("pyregistry listening on http://{}", settings.bind_address);
-    let serve_result = axum::serve(
+    let server = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal(shutdown_tx.clone()))
-    .await;
+    .with_graceful_shutdown(shutdown_signal(shutdown_tx.clone()));
+
+    let serve_result = tokio::select! {
+        result = server => result,
+        () = force_http_shutdown_after_signal(forced_shutdown_rx, FORCED_HTTP_SHUTDOWN_GRACE) => {
+            warn!(
+                "forcing HTTP shutdown after {:.1}s grace period",
+                FORCED_HTTP_SHUTDOWN_GRACE.as_secs_f64()
+            );
+            Ok(())
+        }
+    };
 
     let _ = shutdown_tx.send(true);
     wait_for_mirror_updater(mirror_updater).await;
@@ -269,7 +285,13 @@ fn spawn_mirror_updater(
 
     Some(tokio::spawn(async move {
         if run_on_startup {
-            run_mirror_update_cycle(&app).await;
+            run_mirror_update_cycle(&app, &shutdown).await;
+            if *shutdown.borrow() {
+                info!(
+                    "background mirrored package updater stopping after startup cycle cancellation"
+                );
+                return;
+            }
         }
 
         loop {
@@ -292,7 +314,7 @@ fn spawn_mirror_updater(
                         info!("background mirrored package updater stopping before next cycle");
                         break;
                     }
-                    run_mirror_update_cycle(&app).await;
+                    run_mirror_update_cycle(&app, &shutdown).await;
                 }
             }
         }
@@ -302,19 +324,73 @@ fn spawn_mirror_updater(
 }
 
 async fn wait_for_mirror_updater(handle: Option<JoinHandle<()>>) {
-    if let Some(handle) = handle
-        && let Err(error) = handle.await
-    {
-        error!("background mirrored package updater task failed: {error}");
+    if let Some(mut handle) = handle {
+        tokio::select! {
+            result = &mut handle => {
+                if let Err(error) = result {
+                    error!("background mirrored package updater task failed: {error}");
+                }
+            }
+            _ = tokio::time::sleep(MIRROR_UPDATER_SHUTDOWN_GRACE) => {
+                warn!(
+                    "background mirrored package updater did not stop within {:.1}s; aborting task",
+                    MIRROR_UPDATER_SHUTDOWN_GRACE.as_secs_f64()
+                );
+                handle.abort();
+                if let Err(error) = handle.await
+                    && !error.is_cancelled()
+                {
+                    error!("background mirrored package updater task failed during abort: {error}");
+                }
+            }
+        }
     }
 }
 
-async fn run_mirror_update_cycle(app: &Arc<PyregistryApp>) {
+async fn run_mirror_update_cycle(app: &Arc<PyregistryApp>, shutdown: &watch::Receiver<bool>) {
     let started = Instant::now();
     info!("background mirrored package updater cycle started");
-    match app.refresh_mirrored_projects().await {
+    let cancellation = WatchCancellation::new(shutdown.clone());
+    match app
+        .refresh_mirrored_projects_with_cancellation(&cancellation)
+        .await
+    {
         Ok(report) => log_mirror_refresh_report(&report, started.elapsed()),
+        Err(ApplicationError::Cancelled(reason)) => {
+            info!("background mirrored package updater cycle cancelled: {reason}")
+        }
         Err(error) => warn!("background mirrored package updater cycle failed: {error}"),
+    }
+}
+
+#[derive(Clone)]
+struct WatchCancellation {
+    shutdown: watch::Receiver<bool>,
+}
+
+impl WatchCancellation {
+    fn new(shutdown: watch::Receiver<bool>) -> Self {
+        Self { shutdown }
+    }
+}
+
+#[async_trait]
+impl CancellationSignal for WatchCancellation {
+    fn is_cancelled(&self) -> bool {
+        *self.shutdown.borrow()
+    }
+
+    async fn cancelled(&self) {
+        let mut shutdown = self.shutdown.clone();
+        if *shutdown.borrow() {
+            return;
+        }
+
+        loop {
+            if shutdown.changed().await.is_err() || *shutdown.borrow() {
+                return;
+            }
+        }
     }
 }
 
@@ -369,6 +445,24 @@ async fn shutdown_signal(shutdown_tx: watch::Sender<bool>) {
     };
     info!("received {received_signal}; starting graceful HTTP shutdown");
     let _ = shutdown_tx.send(true);
+}
+
+async fn force_http_shutdown_after_signal(
+    mut shutdown: watch::Receiver<bool>,
+    grace_period: Duration,
+) {
+    if !*shutdown.borrow() {
+        loop {
+            if shutdown.changed().await.is_err() {
+                return;
+            }
+            if *shutdown.borrow() {
+                break;
+            }
+        }
+    }
+
+    tokio::time::sleep(grace_period).await;
 }
 
 fn init_logging(logging: &LoggingConfig) {
@@ -479,15 +573,22 @@ async fn ensure_wheel_is_available(project: &str, wheel: &Path) -> anyhow::Resul
     );
 
     let mirror_client = PypiMirrorClient::default();
-    mirror_client
-        .download_project_artifact_by_filename(project, filename, wheel)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to download `{filename}` for project `{project}` into {}",
-                wheel.display()
-            )
-        })?;
+    tokio::select! {
+        result = mirror_client.download_project_artifact_by_filename(project, filename, wheel) => {
+            result.with_context(|| {
+                format!(
+                    "failed to download `{filename}` for project `{project}` into {}",
+                    wheel.display()
+                )
+            })?;
+        }
+        signal = tokio::signal::ctrl_c() => {
+            match signal {
+                Ok(()) => anyhow::bail!("wheel download cancelled by Ctrl+C"),
+                Err(error) => return Err(error).context("failed to listen for Ctrl+C while downloading wheel"),
+            }
+        }
+    }
     Ok(())
 }
 

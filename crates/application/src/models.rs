@@ -8,6 +8,7 @@ use pyregistry_domain::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::future;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -637,6 +638,25 @@ pub trait Clock: Send + Sync {
 
 pub trait IdGenerator: Send + Sync {
     fn next(&self) -> Uuid;
+}
+
+#[async_trait]
+pub trait CancellationSignal: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+    async fn cancelled(&self);
+}
+
+pub struct NeverCancelled;
+
+#[async_trait]
+impl CancellationSignal for NeverCancelled {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    async fn cancelled(&self) {
+        future::pending::<()>().await;
+    }
 }
 
 #[must_use]
