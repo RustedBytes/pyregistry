@@ -1,3 +1,4 @@
+use crate::supplied_assets::bundled_yara_rule_files;
 use log::{debug, info, warn};
 use pyregistry_application::{
     ApplicationError, WheelArchiveSnapshot, WheelAuditFinding, WheelAuditFindingKind,
@@ -11,7 +12,7 @@ use yara_x::{Compiler, MetaValue, Scanner, SourceCode};
 const YARA_EVIDENCE_LIMIT: usize = 8;
 
 pub struct YaraWheelVirusScanner {
-    rules_path: PathBuf,
+    rules_source: String,
     rules: Option<Arc<yara_x::Rules>>,
     signature_rule_count: usize,
     skipped_rule_count: usize,
@@ -31,7 +32,7 @@ impl YaraWheelVirusScanner {
                     compiled.skipped_rule_count
                 );
                 Self {
-                    rules_path,
+                    rules_source: rules_path.display().to_string(),
                     rules: Some(Arc::new(compiled.rules)),
                     signature_rule_count: compiled.signature_rule_count,
                     skipped_rule_count: compiled.skipped_rule_count,
@@ -40,16 +41,38 @@ impl YaraWheelVirusScanner {
             }
             Err(error) => {
                 warn!(
-                    "YARA virus scanning is unavailable from {}: {}",
+                    "YARA virus signature rules are unavailable from {}: {}; falling back to bundled supplied rules",
                     rules_path.display(),
                     error
                 );
-                Self {
-                    rules_path,
-                    rules: None,
-                    signature_rule_count: 0,
-                    skipped_rule_count: 0,
-                    load_error: Some(error),
+                match compile_bundled_rules() {
+                    Ok(compiled) => {
+                        info!(
+                            "loaded {} bundled YARA virus signature rule(s) from supplied/signature-base (skipped {} incompatible file(s))",
+                            compiled.signature_rule_count, compiled.skipped_rule_count
+                        );
+                        Self {
+                            rules_source: "bundled supplied/signature-base".into(),
+                            rules: Some(Arc::new(compiled.rules)),
+                            signature_rule_count: compiled.signature_rule_count,
+                            skipped_rule_count: compiled.skipped_rule_count,
+                            load_error: None,
+                        }
+                    }
+                    Err(bundled_error) => {
+                        warn!(
+                            "YARA virus scanning is unavailable: configured rules failed ({error}); bundled rules failed ({bundled_error})"
+                        );
+                        Self {
+                            rules_source: rules_path.display().to_string(),
+                            rules: None,
+                            signature_rule_count: 0,
+                            skipped_rule_count: 0,
+                            load_error: Some(format!(
+                                "configured rules failed: {error}; bundled rules failed: {bundled_error}"
+                            )),
+                        }
+                    }
                 }
             }
         }
@@ -64,7 +87,7 @@ impl WheelVirusScanner for YaraWheelVirusScanner {
         let rules = self.rules.as_ref().ok_or_else(|| {
             ApplicationError::External(format!(
                 "YARA rules are not loaded from {}: {}",
-                self.rules_path.display(),
+                self.rules_source,
                 self.load_error
                     .as_deref()
                     .unwrap_or("no compatible rules were compiled")
@@ -72,10 +95,11 @@ impl WheelVirusScanner for YaraWheelVirusScanner {
         })?;
 
         debug!(
-            "running YARA virus scan over {} wheel entrie(s) from `{}` with {} signature rule(s)",
+            "running YARA virus scan over {} wheel entrie(s) from `{}` with {} signature rule(s) from {}",
             archive.entries.len(),
             archive.wheel_filename,
-            self.signature_rule_count
+            self.signature_rule_count,
+            self.rules_source
         );
 
         let mut scanner = Scanner::new(rules);
@@ -186,12 +210,50 @@ fn compile_rules_dir(path: &Path) -> Result<CompiledYaraRules, String> {
         }
     }
 
+    finish_compiler(compiler, rule_files.len(), skipped_rule_count)
+}
+
+fn compile_bundled_rules() -> Result<CompiledYaraRules, String> {
+    let mut rule_files = bundled_yara_rule_files();
+    rule_files.sort_by(|left, right| left.relative_path.cmp(right.relative_path));
+
+    if rule_files.is_empty() {
+        return Err("bundled supplied/signature-base does not contain YARA rule files".into());
+    }
+
+    let mut compiler = Compiler::new();
+    define_loki_style_globals(&mut compiler)?;
+
+    let mut skipped_rule_count = 0usize;
+    for file in &rule_files {
+        compiler.new_namespace(&namespace_for_relative(file.relative_path));
+        if let Err(error) = compiler.add_source(
+            SourceCode::from(file.contents)
+                .with_origin(format!("bundled:{}", file.relative_path.display())),
+        ) {
+            skipped_rule_count += 1;
+            warn!(
+                "skipping incompatible bundled YARA rule file {}: {}",
+                file.relative_path.display(),
+                error
+            );
+        }
+    }
+
+    finish_compiler(compiler, rule_files.len(), skipped_rule_count)
+}
+
+fn finish_compiler(
+    compiler: Compiler<'_>,
+    source_file_count: usize,
+    skipped_rule_count: usize,
+) -> Result<CompiledYaraRules, String> {
     let rules = compiler.build();
     let signature_rule_count = rules.iter().len();
     if signature_rule_count == 0 {
         return Err(format!(
             "no compatible YARA rules compiled from {} file(s)",
-            rule_files.len()
+            source_file_count
         ));
     }
     if !rules.warnings().is_empty() {
@@ -281,6 +343,10 @@ fn set_entry_globals(scanner: &mut Scanner<'_>, path: &str) -> Result<(), Applic
 
 fn namespace_for(root: &Path, file: &Path) -> String {
     let relative = file.strip_prefix(root).unwrap_or(file);
+    namespace_for_relative(relative)
+}
+
+fn namespace_for_relative(relative: &Path) -> String {
     let mut namespace = String::from("sig");
     for ch in relative.to_string_lossy().chars() {
         if ch.is_ascii_alphanumeric() {
@@ -354,5 +420,16 @@ rule Pyregistry_Eicar_Test {
         );
 
         let _ = fs::remove_dir_all(rules_dir);
+    }
+
+    #[test]
+    fn falls_back_to_bundled_rules_when_configured_dir_is_missing() {
+        let missing_rules_dir =
+            std::env::temp_dir().join(format!("pyregistry-missing-yara-{}", Uuid::new_v4()));
+        let scanner = YaraWheelVirusScanner::from_rules_dir(&missing_rules_dir);
+
+        assert_eq!(scanner.rules_source, "bundled supplied/signature-base");
+        assert!(scanner.rules.is_some());
+        assert!(scanner.signature_rule_count > 0);
     }
 }

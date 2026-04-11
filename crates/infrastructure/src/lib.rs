@@ -6,6 +6,7 @@ mod settings;
 mod sqlite_store;
 mod storage;
 mod store;
+mod supplied_assets;
 mod virus;
 mod wheel_archive;
 mod wiring;

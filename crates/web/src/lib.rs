@@ -64,6 +64,10 @@ pub fn router(state: AppState) -> Router {
             post(admin::purge_artifact),
         )
         .route(
+            "/admin/t/{tenant}/packages/{project}/releases/{version}/artifacts/{filename}/download",
+            get(admin::download_artifact),
+        )
+        .route(
             "/admin/t/{tenant}/packages/{project}/releases/{version}/artifacts/{filename}/scan",
             post(admin::scan_artifact),
         )

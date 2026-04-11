@@ -117,6 +117,7 @@ pub(crate) struct PackageArtifactView {
     pub(crate) sha256: String,
     pub(crate) yanked_reason: Option<String>,
     pub(crate) is_wheel: bool,
+    pub(crate) download_url: String,
     pub(crate) scan_url: String,
     pub(crate) security: ArtifactSecurityView,
 }

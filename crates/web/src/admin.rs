@@ -13,10 +13,10 @@ use crate::{
 };
 use axum::{
     Form, Json,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::{Html, IntoResponse, Redirect},
+    response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use log::{debug, info, warn};
@@ -493,6 +493,34 @@ pub(crate) async fn purge_artifact(
     )))
 }
 
+pub(crate) async fn download_artifact(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project, version, filename)): Path<(String, String, String, String)>,
+) -> Result<Response, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` is downloading artifact `{}` for package `{}` version `{}` in tenant `{}`",
+        session.email, filename, project, version, tenant
+    );
+
+    let bytes = state
+        .app
+        .download_artifact(&tenant, &project, &version, &filename)
+        .await?;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, bytes.len().to_string())
+        .header(
+            header::CONTENT_DISPOSITION,
+            attachment_content_disposition(&filename),
+        )
+        .body(Body::from(bytes))
+        .expect("valid artifact download response"))
+}
+
 pub(crate) async fn scan_artifact(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -718,6 +746,10 @@ fn package_detail_view(
                         .into_iter()
                         .map(|artifact| PackageArtifactView {
                             is_wheel: artifact.filename.ends_with(".whl"),
+                            download_url: format!(
+                                "/admin/t/{}/packages/{}/releases/{}/artifacts/{}/download",
+                                tenant_slug, normalized_name, release_version, artifact.filename
+                            ),
                             scan_url: format!(
                                 "/admin/t/{}/packages/{}/releases/{}/artifacts/{}/scan",
                                 tenant_slug, normalized_name, release_version, artifact.filename
@@ -766,6 +798,18 @@ fn artifact_security_view(
         hidden_vulnerability_count,
         scan_error: security.scan_error,
     }
+}
+
+fn attachment_content_disposition(filename: &str) -> String {
+    let safe_filename = filename
+        .chars()
+        .map(|ch| match ch {
+            '"' | '\\' => '_',
+            ch if ch.is_ascii_graphic() || ch == ' ' => ch,
+            _ => '_',
+        })
+        .collect::<String>();
+    format!("attachment; filename=\"{safe_filename}\"")
 }
 
 fn registry_base_url(headers: &HeaderMap) -> String {
@@ -913,11 +957,14 @@ fn forwarded_value<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        authenticated_index_url, default_scheme_for, package_detail_view, parse_issue_token_form,
-        parse_optional_ttl_hours,
+        attachment_content_disposition, authenticated_index_url, default_scheme_for,
+        package_detail_view, parse_issue_token_form, parse_optional_ttl_hours,
     };
     use axum::http::StatusCode;
-    use pyregistry_application::{PackageDetails, PackageSecuritySummary};
+    use pyregistry_application::{
+        ArtifactSecurityDetails, PackageArtifactDetails, PackageDetails, PackageReleaseDetails,
+        PackageSecuritySummary,
+    };
 
     #[test]
     fn blank_ttl_hours_becomes_none() {
@@ -991,6 +1038,53 @@ mod tests {
             !view
                 .uv_install_command
                 .starts_with("PYREGISTRY_TOKEN=<token> uv")
+        );
+    }
+
+    #[test]
+    fn package_detail_view_exposes_admin_download_url_for_release_files() {
+        let details = PackageDetails {
+            tenant_slug: "acme".into(),
+            project_name: "rsloop".into(),
+            normalized_name: "rsloop".into(),
+            summary: String::new(),
+            description: String::new(),
+            source: "Local".into(),
+            security: PackageSecuritySummary::default(),
+            releases: vec![PackageReleaseDetails {
+                version: "0.1.14".into(),
+                yanked_reason: None,
+                artifacts: vec![PackageArtifactDetails {
+                    filename: "rsloop-0.1.14-py3-none-any.whl".into(),
+                    version: "0.1.14".into(),
+                    size_bytes: 42,
+                    sha256: "abc123".into(),
+                    yanked_reason: None,
+                    security: ArtifactSecurityDetails::pending(),
+                }],
+            }],
+            trusted_publishers: Vec::new(),
+        };
+
+        let view = package_detail_view(details, "http://127.0.0.1:3000");
+        let artifact = &view.releases[0].artifacts[0];
+
+        assert_eq!(
+            artifact.download_url,
+            "/admin/t/acme/packages/rsloop/releases/0.1.14/artifacts/rsloop-0.1.14-py3-none-any.whl/download"
+        );
+        assert_eq!(artifact.size_human, "42.0 B");
+    }
+
+    #[test]
+    fn attachment_content_disposition_sanitizes_unsafe_filename_chars() {
+        assert_eq!(
+            attachment_content_disposition("safe-1.0.0.whl"),
+            "attachment; filename=\"safe-1.0.0.whl\""
+        );
+        assert_eq!(
+            attachment_content_disposition("bad\"name\\file.whl"),
+            "attachment; filename=\"bad_name_file.whl\""
         );
     }
 

@@ -32,6 +32,15 @@
         color: white;
         cursor: pointer;
       }
+      .button-link {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: #166040;
+        color: white;
+        text-decoration: none;
+      }
       .danger { background: #a33434; }
       .secondary {
         background: #eef5f0;
@@ -360,6 +369,8 @@
                 {% endmatch %}
 
                 <div class="file-actions">
+                  <a class="button-link" href="{{ artifact.download_url }}" download="{{ artifact.filename }}">Download</a>
+
                   {% if artifact.is_wheel %}
                   <button
                     class="secondary scan-wheel-button"

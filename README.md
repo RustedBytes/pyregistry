@@ -6,7 +6,8 @@ private search, PyPI mirroring, provenance, trusted publishing, and lightweight
 package security checks without running a full PyPI clone.
 
 The project is intentionally server-rendered and minimal: Axum for HTTP, Askama
-templates for HTML, TOML configuration, and no frontend build pipeline.
+templates compiled into the binary, TOML configuration, and no frontend build
+pipeline.
 
 ## Current Status
 
@@ -29,6 +30,8 @@ Implemented today:
 - Per-client rate limiting for package and OIDC API endpoints.
 - Wheel audit CLI and UI modal with RustPython AST checks, heuristics, and YARA virus signatures.
 - PySentry-backed known vulnerability checks for package versions.
+- Bundled HTML templates and vendored YARA signature material, so the binary can
+  run without a repository checkout.
 
 Important limitations:
 
@@ -334,6 +337,9 @@ Pyregistry has two separate security scan paths:
 The repository vendors Neo23x0 `signature-base` YARA rules under
 `supplied/signature-base`. The supplied rules are licensed separately under the
 Detection Rule License in `supplied/signature-base/LICENSE`.
+Those supplied files are embedded into the binary at compile time. If
+`security.yara_rules_path` points to a readable directory, Pyregistry uses that
+external rule set; otherwise it falls back to the bundled supplied rules.
 
 ## Mirroring
 
