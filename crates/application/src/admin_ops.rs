@@ -1,7 +1,7 @@
 use crate::{
     AdminSession, ApplicationError, CreateTenantCommand, DashboardMetrics, PackageArtifactDetails,
-    PackageDetails, PackageReleaseDetails, PyregistryApp, RecentActivity, RegistryOverview,
-    SearchHit, TrustedPublisherDescriptor,
+    PackageDetails, PackageReleaseDetails, PyregistryApp, RegistryOverview, SearchHit,
+    TrustedPublisherDescriptor,
 };
 use log::{debug, info, warn};
 use pyregistry_domain::{AdminUser, AdminUserId, MirrorRule, Tenant, TenantId, TenantSlug};
@@ -159,38 +159,16 @@ impl PyregistryApp {
     ) -> Result<DashboardMetrics, ApplicationError> {
         debug!("loading tenant dashboard for `{tenant_slug}`");
         let tenant = self.require_tenant(tenant_slug).await?;
-        let projects = self.store.list_projects(tenant.id).await?;
-
-        let mut release_count = 0usize;
-        let mut artifact_count = 0usize;
-        let mut recent_activity = Vec::new();
-        for project in &projects {
-            let releases = self.store.list_releases(project.id).await?;
-            release_count += releases.len();
-            for release in releases {
-                artifact_count += self.store.list_artifacts(release.id).await?.len();
-            }
-            recent_activity.push(RecentActivity {
-                project_name: project.name.original().to_string(),
-                tenant_slug: tenant.slug.as_str().to_string(),
-                source: format!("{:?}", project.source).to_ascii_lowercase(),
-                updated_at: project.updated_at,
-            });
-        }
-        recent_activity.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        let stats = self.store.tenant_dashboard_stats(&tenant).await?;
 
         let metrics = DashboardMetrics {
             tenant_slug: tenant.slug.as_str().to_string(),
-            project_count: projects.len(),
-            release_count,
-            artifact_count,
-            token_count: self.store.list_api_tokens(tenant.id).await?.len(),
-            trusted_publisher_count: self
-                .store
-                .list_trusted_publishers(tenant.id, "")
-                .await?
-                .len(),
-            recent_activity: recent_activity.into_iter().take(6).collect(),
+            project_count: stats.project_count,
+            release_count: stats.release_count,
+            artifact_count: stats.artifact_count,
+            token_count: stats.token_count,
+            trusted_publisher_count: stats.trusted_publisher_count,
+            recent_activity: stats.recent_activity,
         };
         debug!(
             "tenant dashboard ready for `{}`: projects={}, releases={}, artifacts={}, tokens={}, trusted_publishers={}",
@@ -236,18 +214,19 @@ impl PyregistryApp {
             .ensure_project_available(tenant_slug, project_name)
             .await?;
         let tenant = self.require_tenant(tenant_slug).await?;
-        let mut releases = self.store.list_releases(project.id).await?;
-        releases.sort_by(|left, right| right.version.cmp(&left.version));
+        let mut release_artifact_groups = self.store.list_release_artifacts(project.id).await?;
+        release_artifact_groups
+            .sort_by(|left, right| right.release.version.cmp(&left.release.version));
 
         let mut release_details = Vec::new();
-        for release in releases {
-            let mut artifacts = self.store.list_artifacts(release.id).await?;
+        for group in release_artifact_groups {
+            let mut artifacts = group.artifacts;
             artifacts.sort_by(|left, right| left.filename.cmp(&right.filename));
             let artifacts = artifacts
                 .into_iter()
                 .map(|artifact| PackageArtifactDetails {
                     filename: artifact.filename,
-                    version: release.version.as_str().to_string(),
+                    version: group.release.version.as_str().to_string(),
                     size_bytes: artifact.size_bytes,
                     sha256: artifact.digests.sha256,
                     yanked_reason: artifact.yanked.and_then(|state| state.reason),
@@ -256,8 +235,8 @@ impl PyregistryApp {
                 .collect();
 
             release_details.push(PackageReleaseDetails {
-                version: release.version.as_str().to_string(),
-                yanked_reason: release.yanked.and_then(|state| state.reason),
+                version: group.release.version.as_str().to_string(),
+                yanked_reason: group.release.yanked.and_then(|state| state.reason),
                 artifacts,
             });
         }

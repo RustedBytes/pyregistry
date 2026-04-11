@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use pyregistry_application::{ApplicationError, RegistryOverview, RegistryStore, SearchHit};
+use pyregistry_application::{
+    ApplicationError, RecentActivity, RegistryOverview, RegistryStore, ReleaseArtifacts, SearchHit,
+    TenantDashboardStats,
+};
 use pyregistry_domain::{
     AdminUser, AdminUserId, ApiToken, Artifact, ArtifactId, ArtifactKind, AttestationBundle,
     AttestationSource, AuditEvent, AuditEventId, DigestSet, MirrorRule, Project, ProjectId,
@@ -41,11 +44,17 @@ impl SqliteRegistryStore {
                 r#"
                 PRAGMA foreign_keys = ON;
                 PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
                 PRAGMA busy_timeout = 5000;
+                PRAGMA temp_store = MEMORY;
+                PRAGMA cache_size = -20000;
                 "#,
             )
             .map_err(sqlite_error)?;
         migrate(&connection)?;
+        connection
+            .execute_batch("PRAGMA optimize;")
+            .map_err(sqlite_error)?;
 
         Ok(Self {
             connection: Mutex::new(connection),
@@ -67,22 +76,28 @@ impl SqliteRegistryStore {
 impl RegistryStore for SqliteRegistryStore {
     async fn registry_overview(&self) -> Result<RegistryOverview, ApplicationError> {
         self.with_connection(|connection| {
-            Ok(RegistryOverview {
-                tenant_count: count_table(connection, "tenants")?,
-                project_count: count_table(connection, "projects")?,
-                release_count: count_table(connection, "releases")?,
-                artifact_count: count_table(connection, "artifacts")?,
-                total_storage_bytes: connection.query_row(
-                    "SELECT COALESCE(SUM(size_bytes), 0) FROM artifacts",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )? as u64,
-                mirrored_project_count: connection.query_row(
-                    "SELECT COUNT(*) FROM projects WHERE source = 'mirrored'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )? as usize,
-            })
+            connection.query_row(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM tenants) AS tenant_count,
+                    (SELECT COUNT(*) FROM projects) AS project_count,
+                    (SELECT COUNT(*) FROM releases) AS release_count,
+                    (SELECT COUNT(*) FROM artifacts) AS artifact_count,
+                    (SELECT COALESCE(SUM(size_bytes), 0) FROM artifacts) AS total_storage_bytes,
+                    (SELECT COUNT(*) FROM projects WHERE source = 'mirrored') AS mirrored_project_count
+                "#,
+                [],
+                |row| {
+                    Ok(RegistryOverview {
+                        tenant_count: row.get::<_, i64>(0)? as usize,
+                        project_count: row.get::<_, i64>(1)? as usize,
+                        release_count: row.get::<_, i64>(2)? as usize,
+                        artifact_count: row.get::<_, i64>(3)? as usize,
+                        total_storage_bytes: row.get::<_, i64>(4)? as u64,
+                        mirrored_project_count: row.get::<_, i64>(5)? as usize,
+                    })
+                },
+            )
         })
     }
 
@@ -128,6 +143,79 @@ impl RegistryStore for SqliteRegistryStore {
                     map_tenant,
                 )
                 .optional()
+        })
+    }
+
+    async fn tenant_dashboard_stats(
+        &self,
+        tenant: &Tenant,
+    ) -> Result<TenantDashboardStats, ApplicationError> {
+        let tenant_id = uuid_string(tenant.id.into_inner());
+        self.with_connection(|connection| {
+            let (
+                project_count,
+                release_count,
+                artifact_count,
+                token_count,
+                trusted_publisher_count,
+            ) = connection.query_row(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM projects WHERE tenant_id = ?1) AS project_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM releases r
+                        INNER JOIN projects p ON p.id = r.project_id
+                        WHERE p.tenant_id = ?1
+                    ) AS release_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM artifacts a
+                        INNER JOIN releases r ON r.id = a.release_id
+                        INNER JOIN projects p ON p.id = r.project_id
+                        WHERE p.tenant_id = ?1
+                    ) AS artifact_count,
+                    (SELECT COUNT(*) FROM api_tokens WHERE tenant_id = ?1) AS token_count,
+                    (SELECT COUNT(*) FROM trusted_publishers WHERE tenant_id = ?1) AS trusted_publisher_count
+                "#,
+                params![tenant_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as usize,
+                        row.get::<_, i64>(1)? as usize,
+                        row.get::<_, i64>(2)? as usize,
+                        row.get::<_, i64>(3)? as usize,
+                        row.get::<_, i64>(4)? as usize,
+                    ))
+                },
+            )?;
+
+            let mut statement = connection.prepare(
+                r#"
+                SELECT original_name, source, updated_at
+                FROM projects
+                WHERE tenant_id = ?1
+                ORDER BY updated_at DESC, normalized_name
+                LIMIT 6
+                "#,
+            )?;
+            let recent_activity = collect_rows(statement.query_map(params![tenant_id], |row| {
+                Ok(RecentActivity {
+                    project_name: row.get(0)?,
+                    tenant_slug: tenant.slug.as_str().to_string(),
+                    source: row.get(1)?,
+                    updated_at: parse_datetime(row.get(2)?, 2)?,
+                })
+            })?)?;
+
+            Ok(TenantDashboardStats {
+                project_count,
+                release_count,
+                artifact_count,
+                token_count,
+                trusted_publisher_count,
+                recent_activity,
+            })
         })
     }
 
@@ -331,37 +419,48 @@ impl RegistryStore for SqliteRegistryStore {
         query: &str,
     ) -> Result<Vec<SearchHit>, ApplicationError> {
         let query = query.trim().to_ascii_lowercase();
+        let contains_pattern = format!("%{}%", escape_like_pattern(&query));
+        let prefix_pattern = format!("{}%", escape_like_pattern(&query));
         self.with_connection(|connection| {
-            let tenant_slug = connection
-                .query_row(
-                    "SELECT slug FROM tenants WHERE id = ?1",
-                    params![uuid_string(tenant_id.into_inner())],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-                .unwrap_or_default();
-
             let mut statement = connection.prepare(
                 r#"
-                SELECT id, original_name, normalized_name, source, summary
-                FROM projects
-                WHERE tenant_id = ?1
-                  AND (?2 = '' OR lower(normalized_name || ' ' || summary) LIKE '%' || ?2 || '%')
-                ORDER BY normalized_name
+                SELECT t.slug, p.original_name, p.normalized_name, p.source, p.summary,
+                       GROUP_CONCAT(r.version, ',') AS release_versions
+                FROM projects p
+                INNER JOIN tenants t ON t.id = p.tenant_id
+                LEFT JOIN releases r ON r.project_id = p.id
+                WHERE p.tenant_id = ?1
+                  AND (
+                      ?2 = ''
+                      OR p.normalized_name LIKE ?3 ESCAPE '\'
+                      OR lower(p.summary) LIKE ?3 ESCAPE '\'
+                  )
+                GROUP BY p.id, t.slug, p.original_name, p.normalized_name, p.source, p.summary
+                ORDER BY
+                    CASE
+                        WHEN p.normalized_name = ?2 THEN 0
+                        WHEN p.normalized_name LIKE ?4 ESCAPE '\' THEN 1
+                        WHEN lower(p.summary) LIKE ?4 ESCAPE '\' THEN 2
+                        ELSE 3
+                    END,
+                    p.normalized_name
                 "#,
             )?;
             let rows = statement.query_map(
-                params![uuid_string(tenant_id.into_inner()), query],
+                params![
+                    uuid_string(tenant_id.into_inner()),
+                    query,
+                    contains_pattern,
+                    prefix_pattern
+                ],
                 |row| {
-                    let project_id = parse_uuid(row.get::<_, String>(0)?, 0)?;
-                    let latest_version = latest_release_version(connection, project_id)?;
                     Ok(SearchHit {
-                        tenant_slug: tenant_slug.clone(),
+                        tenant_slug: row.get(0)?,
                         project_name: row.get(1)?,
                         normalized_name: row.get(2)?,
                         source: row.get(3)?,
                         summary: row.get(4)?,
-                        latest_version,
+                        latest_version: latest_release_version_from_joined(row.get(5)?, 5)?,
                     })
                 },
             )?;
@@ -423,6 +522,7 @@ impl RegistryStore for SqliteRegistryStore {
                 SELECT id, project_id, version, yanked_reason, yanked_changed_at, created_at
                 FROM releases
                 WHERE project_id = ?1
+                ORDER BY created_at DESC, version DESC
                 "#,
             )?;
             collect_rows(
@@ -530,6 +630,58 @@ impl RegistryStore for SqliteRegistryStore {
             collect_rows(
                 statement.query_map(params![uuid_string(release_id.into_inner())], map_artifact)?,
             )
+        })
+    }
+
+    async fn list_release_artifacts(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<ReleaseArtifacts>, ApplicationError> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                r#"
+                SELECT r.id, r.project_id, r.version, r.yanked_reason, r.yanked_changed_at, r.created_at,
+                       a.id, a.release_id, a.filename, a.kind, a.size_bytes, a.sha256, a.blake2b_256,
+                       a.object_key, a.upstream_url, a.provenance_key, a.yanked_reason,
+                       a.yanked_changed_at, a.created_at
+                FROM releases r
+                LEFT JOIN artifacts a ON a.release_id = r.id
+                WHERE r.project_id = ?1
+                ORDER BY r.created_at DESC, r.version DESC, a.filename
+                "#,
+            )?;
+            let mut rows = statement.query(params![uuid_string(project_id.into_inner())])?;
+            let mut grouped = Vec::<ReleaseArtifacts>::new();
+            let mut release_positions = BTreeMap::<Uuid, usize>::new();
+
+            while let Some(row) = rows.next()? {
+                let release = map_release(row)?;
+                let release_id = release.id.into_inner();
+                let artifact_id = row.get::<_, Option<String>>(6)?;
+                let artifact = if artifact_id.is_some() {
+                    Some(map_artifact_at(row, 6)?)
+                } else {
+                    None
+                };
+
+                let index = match release_positions.get(&release_id) {
+                    Some(index) => *index,
+                    None => {
+                        grouped.push(ReleaseArtifacts {
+                            release,
+                            artifacts: Vec::new(),
+                        });
+                        let index = grouped.len() - 1;
+                        release_positions.insert(release_id, index);
+                        index
+                    }
+                };
+                if let Some(artifact) = artifact {
+                    grouped[index].artifacts.push(artifact);
+                }
+            }
+
+            Ok(grouped)
         })
     }
 
@@ -848,9 +1000,17 @@ fn migrate(connection: &Connection) -> Result<(), ApplicationError> {
             );
 
             CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant ON api_tokens(tenant_id);
+            CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant_created
+                ON api_tokens(tenant_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id);
+            CREATE INDEX IF NOT EXISTS idx_projects_tenant_updated
+                ON projects(tenant_id, updated_at DESC, normalized_name);
             CREATE INDEX IF NOT EXISTS idx_releases_project ON releases(project_id);
+            CREATE INDEX IF NOT EXISTS idx_releases_project_created
+                ON releases(project_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_artifacts_release ON artifacts(release_id);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_release_filename
+                ON artifacts(release_id, filename);
             CREATE INDEX IF NOT EXISTS idx_trusted_publishers_tenant_project
                 ON trusted_publishers(tenant_id, project_normalized_name);
             CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_time
@@ -862,27 +1022,36 @@ fn migrate(connection: &Connection) -> Result<(), ApplicationError> {
         .map_err(sqlite_error)
 }
 
-fn count_table(connection: &Connection, table: &str) -> rusqlite::Result<usize> {
-    let sql = format!("SELECT COUNT(*) FROM {table}");
-    connection
-        .query_row(&sql, [], |row| row.get::<_, i64>(0))
-        .map(|count| count as usize)
-}
-
-fn latest_release_version(
-    connection: &Connection,
-    project_id: Uuid,
+fn latest_release_version_from_joined(
+    release_versions: Option<String>,
+    column: usize,
 ) -> rusqlite::Result<Option<String>> {
-    let mut statement = connection.prepare("SELECT version FROM releases WHERE project_id = ?1")?;
-    let versions = collect_rows(
-        statement.query_map(params![uuid_string(project_id)], |row| {
-            domain_value(ReleaseVersion::new(row.get::<_, String>(0)?), 0)
-        })?,
-    )?;
+    let Some(release_versions) = release_versions else {
+        return Ok(None);
+    };
+    let versions = release_versions
+        .split(',')
+        .filter(|version| !version.is_empty())
+        .map(|version| domain_value(ReleaseVersion::new(version.to_string()), column))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(versions
         .into_iter()
         .max()
         .map(|version| version.as_str().to_string()))
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' | '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn map_tenant(row: &Row<'_>) -> rusqlite::Result<Tenant> {
@@ -960,30 +1129,37 @@ fn map_release(row: &Row<'_>) -> rusqlite::Result<Release> {
 }
 
 fn map_artifact(row: &Row<'_>) -> rusqlite::Result<Artifact> {
-    let size_bytes = row.get::<_, i64>(4)?;
+    map_artifact_at(row, 0)
+}
+
+fn map_artifact_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<Artifact> {
+    let size_bytes = row.get::<_, i64>(offset + 4)?;
     if size_bytes < 0 {
         return Err(rusqlite::Error::FromSqlConversionFailure(
-            4,
+            offset + 4,
             Type::Integer,
             "artifact size cannot be negative".into(),
         ));
     }
 
     Ok(Artifact {
-        id: ArtifactId::new(parse_uuid(row.get(0)?, 0)?),
-        release_id: ReleaseId::new(parse_uuid(row.get(1)?, 1)?),
-        filename: row.get(2)?,
-        kind: parse_artifact_kind(row.get(3)?, 3)?,
+        id: ArtifactId::new(parse_uuid(row.get(offset)?, offset)?),
+        release_id: ReleaseId::new(parse_uuid(row.get(offset + 1)?, offset + 1)?),
+        filename: row.get(offset + 2)?,
+        kind: parse_artifact_kind(row.get(offset + 3)?, offset + 3)?,
         size_bytes: size_bytes as u64,
         digests: domain_value(
-            DigestSet::new(row.get::<_, String>(5)?, row.get::<_, Option<String>>(6)?),
-            5,
+            DigestSet::new(
+                row.get::<_, String>(offset + 5)?,
+                row.get::<_, Option<String>>(offset + 6)?,
+            ),
+            offset + 5,
         )?,
-        object_key: row.get(7)?,
-        upstream_url: row.get(8)?,
-        provenance_key: row.get(9)?,
-        yanked: parse_yank(row.get(10)?, row.get(11)?, 10)?,
-        created_at: parse_datetime(row.get(12)?, 12)?,
+        object_key: row.get(offset + 7)?,
+        upstream_url: row.get(offset + 8)?,
+        provenance_key: row.get(offset + 9)?,
+        yanked: parse_yank(row.get(offset + 10)?, row.get(offset + 11)?, offset + 10)?,
+        created_at: parse_datetime(row.get(offset + 12)?, offset + 12)?,
     })
 }
 
@@ -1340,6 +1516,28 @@ mod tests {
             .expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].latest_version.as_deref(), Some("1.0.0"));
+
+        let tenant = reopened
+            .get_tenant_by_slug("acme")
+            .await
+            .expect("tenant lookup")
+            .expect("tenant");
+        let stats = reopened
+            .tenant_dashboard_stats(&tenant)
+            .await
+            .expect("dashboard stats");
+        assert_eq!(stats.project_count, 1);
+        assert_eq!(stats.release_count, 1);
+        assert_eq!(stats.artifact_count, 1);
+        assert_eq!(stats.token_count, 1);
+        assert_eq!(stats.recent_activity.len(), 1);
+
+        let release_artifacts = reopened
+            .list_release_artifacts(project_id)
+            .await
+            .expect("release artifacts");
+        assert_eq!(release_artifacts.len(), 1);
+        assert_eq!(release_artifacts[0].artifacts.len(), 1);
 
         let tokens = reopened.list_api_tokens(tenant_id).await.expect("tokens");
         assert_eq!(tokens.len(), 1);

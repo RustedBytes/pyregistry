@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use pyregistry_application::{ApplicationError, RegistryOverview, RegistryStore, SearchHit};
+use pyregistry_application::{
+    ApplicationError, RecentActivity, RegistryOverview, RegistryStore, ReleaseArtifacts, SearchHit,
+    TenantDashboardStats,
+};
 use pyregistry_domain::{
     AdminUser, AdminUserId, ApiToken, Artifact, ArtifactId, ArtifactKind, AttestationBundle,
     AttestationSource, AuditEvent, AuditEventId, DigestSet, MirrorRule, Project, ProjectId,
@@ -119,10 +122,20 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant ON api_tokens(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant_created
+    ON api_tokens(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_projects_tenant_search ON projects(tenant_id, normalized_name);
+CREATE INDEX IF NOT EXISTS idx_projects_tenant_normalized_prefix
+    ON projects(tenant_id, normalized_name text_pattern_ops);
+CREATE INDEX IF NOT EXISTS idx_projects_tenant_updated
+    ON projects(tenant_id, updated_at DESC, normalized_name);
 CREATE INDEX IF NOT EXISTS idx_releases_project ON releases(project_id);
+CREATE INDEX IF NOT EXISTS idx_releases_project_created
+    ON releases(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_artifacts_release ON artifacts(release_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_release_filename
+    ON artifacts(release_id, filename);
 CREATE INDEX IF NOT EXISTS idx_trusted_publishers_tenant_project
     ON trusted_publishers(tenant_id, project_normalized_name);
 CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_time
@@ -168,30 +181,40 @@ impl PostgresRegistryStore {
 #[async_trait]
 impl RegistryStore for PostgresRegistryStore {
     async fn registry_overview(&self) -> Result<RegistryOverview, ApplicationError> {
+        let row = self
+            .client
+            .query_one(
+                r#"
+                SELECT
+                    (SELECT COUNT(*)::BIGINT FROM tenants) AS tenant_count,
+                    (SELECT COUNT(*)::BIGINT FROM projects) AS project_count,
+                    (SELECT COUNT(*)::BIGINT FROM releases) AS release_count,
+                    (SELECT COUNT(*)::BIGINT FROM artifacts) AS artifact_count,
+                    (SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM artifacts) AS total_storage_bytes,
+                    (SELECT COUNT(*)::BIGINT FROM projects WHERE source = 'mirrored') AS mirrored_project_count
+                "#,
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
         Ok(RegistryOverview {
-            tenant_count: count_table(&self.client, "tenants").await?,
-            project_count: count_table(&self.client, "projects").await?,
-            release_count: count_table(&self.client, "releases").await?,
-            artifact_count: count_table(&self.client, "artifacts").await?,
-            total_storage_bytes: self
-                .client
-                .query_one(
-                    "SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM artifacts",
-                    &[],
-                )
-                .await
-                .map_err(postgres_error)?
-                .try_get::<_, i64>(0)
+            tenant_count: row
+                .try_get::<_, i64>("tenant_count")
+                .map_err(postgres_error)? as usize,
+            project_count: row
+                .try_get::<_, i64>("project_count")
+                .map_err(postgres_error)? as usize,
+            release_count: row
+                .try_get::<_, i64>("release_count")
+                .map_err(postgres_error)? as usize,
+            artifact_count: row
+                .try_get::<_, i64>("artifact_count")
+                .map_err(postgres_error)? as usize,
+            total_storage_bytes: row
+                .try_get::<_, i64>("total_storage_bytes")
                 .map_err(postgres_error)? as u64,
-            mirrored_project_count: self
-                .client
-                .query_one(
-                    "SELECT COUNT(*)::BIGINT FROM projects WHERE source = 'mirrored'",
-                    &[],
-                )
-                .await
-                .map_err(postgres_error)?
-                .try_get::<_, i64>(0)
+            mirrored_project_count: row
+                .try_get::<_, i64>("mirrored_project_count")
                 .map_err(postgres_error)? as usize,
         })
     }
@@ -245,6 +268,86 @@ impl RegistryStore for PostgresRegistryStore {
             .await
             .map_err(postgres_error)?;
         row.as_ref().map(map_tenant).transpose()
+    }
+
+    async fn tenant_dashboard_stats(
+        &self,
+        tenant: &Tenant,
+    ) -> Result<TenantDashboardStats, ApplicationError> {
+        let tenant_id = tenant.id.into_inner();
+        let counts = self
+            .client
+            .query_one(
+                r#"
+                SELECT
+                    (SELECT COUNT(*)::BIGINT FROM projects WHERE tenant_id = $1) AS project_count,
+                    (
+                        SELECT COUNT(*)::BIGINT
+                        FROM releases r
+                        INNER JOIN projects p ON p.id = r.project_id
+                        WHERE p.tenant_id = $1
+                    ) AS release_count,
+                    (
+                        SELECT COUNT(*)::BIGINT
+                        FROM artifacts a
+                        INNER JOIN releases r ON r.id = a.release_id
+                        INNER JOIN projects p ON p.id = r.project_id
+                        WHERE p.tenant_id = $1
+                    ) AS artifact_count,
+                    (SELECT COUNT(*)::BIGINT FROM api_tokens WHERE tenant_id = $1) AS token_count,
+                    (SELECT COUNT(*)::BIGINT FROM trusted_publishers WHERE tenant_id = $1) AS trusted_publisher_count
+                "#,
+                &[&tenant_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT original_name, source, updated_at
+                FROM projects
+                WHERE tenant_id = $1
+                ORDER BY updated_at DESC, normalized_name
+                LIMIT 6
+                "#,
+                &[&tenant_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut recent_activity = Vec::with_capacity(rows.len());
+        for row in rows {
+            recent_activity.push(RecentActivity {
+                project_name: row
+                    .try_get::<_, String>("original_name")
+                    .map_err(postgres_error)?,
+                tenant_slug: tenant.slug.as_str().to_string(),
+                source: row.try_get::<_, String>("source").map_err(postgres_error)?,
+                updated_at: row
+                    .try_get::<_, DateTime<Utc>>("updated_at")
+                    .map_err(postgres_error)?,
+            });
+        }
+
+        Ok(TenantDashboardStats {
+            project_count: counts
+                .try_get::<_, i64>("project_count")
+                .map_err(postgres_error)? as usize,
+            release_count: counts
+                .try_get::<_, i64>("release_count")
+                .map_err(postgres_error)? as usize,
+            artifact_count: counts
+                .try_get::<_, i64>("artifact_count")
+                .map_err(postgres_error)? as usize,
+            token_count: counts
+                .try_get::<_, i64>("token_count")
+                .map_err(postgres_error)? as usize,
+            trusted_publisher_count: counts
+                .try_get::<_, i64>("trusted_publisher_count")
+                .map_err(postgres_error)? as usize,
+            recent_activity,
+        })
     }
 
     async fn save_admin_user(&self, user: AdminUser) -> Result<(), ApplicationError> {
@@ -465,35 +568,51 @@ impl RegistryStore for PostgresRegistryStore {
     ) -> Result<Vec<SearchHit>, ApplicationError> {
         let tenant_id = tenant_id.into_inner();
         let query = query.trim().to_ascii_lowercase();
-        let tenant_slug = self
-            .client
-            .query_opt("SELECT slug FROM tenants WHERE id = $1", &[&tenant_id])
-            .await
-            .map_err(postgres_error)?
-            .map(|row| row.try_get::<_, String>("slug").map_err(postgres_error))
-            .transpose()?
-            .unwrap_or_default();
+        let contains_pattern = format!("%{}%", escape_like_pattern(&query));
+        let prefix_pattern = format!("{}%", escape_like_pattern(&query));
 
         let rows = self
             .client
             .query(
                 r#"
-                SELECT id, original_name, normalized_name, source, summary
-                FROM projects
-                WHERE tenant_id = $1
-                  AND ($2 = '' OR lower(normalized_name || ' ' || summary) LIKE '%' || $2 || '%')
-                ORDER BY normalized_name
+                SELECT t.slug AS tenant_slug, p.original_name, p.normalized_name, p.source, p.summary,
+                       COALESCE(
+                           ARRAY_AGG(r.version) FILTER (WHERE r.version IS NOT NULL),
+                           ARRAY[]::TEXT[]
+                       ) AS release_versions
+                FROM projects p
+                INNER JOIN tenants t ON t.id = p.tenant_id
+                LEFT JOIN releases r ON r.project_id = p.id
+                WHERE p.tenant_id = $1
+                  AND (
+                      $2 = ''
+                      OR p.normalized_name LIKE $3 ESCAPE '\'
+                      OR lower(p.summary) LIKE $3 ESCAPE '\'
+                  )
+                GROUP BY t.slug, p.id, p.original_name, p.normalized_name, p.source, p.summary
+                ORDER BY
+                    CASE
+                        WHEN p.normalized_name = $2 THEN 0
+                        WHEN p.normalized_name LIKE $4 ESCAPE '\' THEN 1
+                        WHEN lower(p.summary) LIKE $4 ESCAPE '\' THEN 2
+                        ELSE 3
+                    END,
+                    p.normalized_name
                 "#,
-                &[&tenant_id, &query],
+                &[&tenant_id, &query, &contains_pattern, &prefix_pattern],
             )
             .await
             .map_err(postgres_error)?;
 
         let mut hits = Vec::new();
         for row in rows {
-            let project_id = row.try_get::<_, Uuid>("id").map_err(postgres_error)?;
+            let release_versions = row
+                .try_get::<_, Vec<String>>("release_versions")
+                .map_err(postgres_error)?;
             hits.push(SearchHit {
-                tenant_slug: tenant_slug.clone(),
+                tenant_slug: row
+                    .try_get::<_, String>("tenant_slug")
+                    .map_err(postgres_error)?,
                 project_name: row
                     .try_get::<_, String>("original_name")
                     .map_err(postgres_error)?,
@@ -504,7 +623,7 @@ impl RegistryStore for PostgresRegistryStore {
                 summary: row
                     .try_get::<_, String>("summary")
                     .map_err(postgres_error)?,
-                latest_version: latest_release_version(&self.client, project_id).await?,
+                latest_version: latest_release_version_from_values(release_versions)?,
             });
         }
         Ok(hits)
@@ -571,6 +690,7 @@ impl RegistryStore for PostgresRegistryStore {
                 SELECT id, project_id, version, yanked_reason, yanked_changed_at, created_at
                 FROM releases
                 WHERE project_id = $1
+                ORDER BY created_at DESC, version DESC
                 "#,
                 &[&project_id],
             )
@@ -686,6 +806,73 @@ impl RegistryStore for PostgresRegistryStore {
             .await
             .map_err(postgres_error)?;
         rows.iter().map(map_artifact).collect()
+    }
+
+    async fn list_release_artifacts(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<ReleaseArtifacts>, ApplicationError> {
+        let project_id = project_id.into_inner();
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT r.id AS release_id, r.project_id AS release_project_id,
+                       r.version AS release_version, r.yanked_reason AS release_yanked_reason,
+                       r.yanked_changed_at AS release_yanked_changed_at,
+                       r.created_at AS release_created_at,
+                       a.id AS artifact_id, a.release_id AS artifact_release_id,
+                       a.filename AS artifact_filename, a.kind AS artifact_kind,
+                       a.size_bytes AS artifact_size_bytes, a.sha256 AS artifact_sha256,
+                       a.blake2b_256 AS artifact_blake2b_256,
+                       a.object_key AS artifact_object_key,
+                       a.upstream_url AS artifact_upstream_url,
+                       a.provenance_key AS artifact_provenance_key,
+                       a.yanked_reason AS artifact_yanked_reason,
+                       a.yanked_changed_at AS artifact_yanked_changed_at,
+                       a.created_at AS artifact_created_at
+                FROM releases r
+                LEFT JOIN artifacts a ON a.release_id = r.id
+                WHERE r.project_id = $1
+                ORDER BY r.created_at DESC, r.version DESC, a.filename
+                "#,
+                &[&project_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+
+        let mut grouped = Vec::<ReleaseArtifacts>::new();
+        let mut release_positions = BTreeMap::<Uuid, usize>::new();
+        for row in rows {
+            let release = map_release_alias(&row)?;
+            let release_id = release.id.into_inner();
+            let artifact_id = row
+                .try_get::<_, Option<Uuid>>("artifact_id")
+                .map_err(postgres_error)?;
+            let artifact = if artifact_id.is_some() {
+                Some(map_artifact_alias(&row)?)
+            } else {
+                None
+            };
+
+            let index = match release_positions.get(&release_id) {
+                Some(index) => *index,
+                None => {
+                    grouped.push(ReleaseArtifacts {
+                        release,
+                        artifacts: Vec::new(),
+                    });
+                    let index = grouped.len() - 1;
+                    release_positions.insert(release_id, index);
+                    index
+                }
+            };
+            if let Some(artifact) = artifact {
+                grouped[index].artifacts.push(artifact);
+            }
+        }
+
+        Ok(grouped)
     }
 
     async fn get_artifact_by_filename(
@@ -918,39 +1105,31 @@ async fn migrate(client: &Client) -> Result<(), ApplicationError> {
         .map_err(postgres_error)
 }
 
-async fn count_table(client: &Client, table: &str) -> Result<usize, ApplicationError> {
-    let sql = format!("SELECT COUNT(*)::BIGINT FROM {table}");
-    client
-        .query_one(&sql, &[])
-        .await
-        .map_err(postgres_error)?
-        .try_get::<_, i64>(0)
-        .map(|count| count as usize)
-        .map_err(postgres_error)
-}
-
-async fn latest_release_version(
-    client: &Client,
-    project_id: Uuid,
+fn latest_release_version_from_values(
+    release_versions: Vec<String>,
 ) -> Result<Option<String>, ApplicationError> {
-    let rows = client
-        .query(
-            "SELECT version FROM releases WHERE project_id = $1",
-            &[&project_id],
-        )
-        .await
-        .map_err(postgres_error)?;
-    let mut versions = Vec::new();
-    for row in rows {
-        versions.push(ReleaseVersion::new(
-            row.try_get::<_, String>("version")
-                .map_err(postgres_error)?,
-        )?);
-    }
+    let versions = release_versions
+        .into_iter()
+        .map(ReleaseVersion::new)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(versions
         .into_iter()
         .max()
         .map(|version| version.as_str().to_string()))
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' | '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn map_tenant(row: &Row) -> Result<Tenant, ApplicationError> {
@@ -1076,6 +1255,32 @@ fn map_release(row: &Row) -> Result<Release, ApplicationError> {
     })
 }
 
+fn map_release_alias(row: &Row) -> Result<Release, ApplicationError> {
+    Ok(Release {
+        id: ReleaseId::new(
+            row.try_get::<_, Uuid>("release_id")
+                .map_err(postgres_error)?,
+        ),
+        project_id: ProjectId::new(
+            row.try_get::<_, Uuid>("release_project_id")
+                .map_err(postgres_error)?,
+        ),
+        version: ReleaseVersion::new(
+            row.try_get::<_, String>("release_version")
+                .map_err(postgres_error)?,
+        )?,
+        yanked: parse_yank(
+            row.try_get::<_, Option<String>>("release_yanked_reason")
+                .map_err(postgres_error)?,
+            row.try_get::<_, Option<DateTime<Utc>>>("release_yanked_changed_at")
+                .map_err(postgres_error)?,
+        ),
+        created_at: row
+            .try_get::<_, DateTime<Utc>>("release_created_at")
+            .map_err(postgres_error)?,
+    })
+}
+
 fn map_artifact(row: &Row) -> Result<Artifact, ApplicationError> {
     let size_bytes = row
         .try_get::<_, i64>("size_bytes")
@@ -1119,6 +1324,60 @@ fn map_artifact(row: &Row) -> Result<Artifact, ApplicationError> {
         ),
         created_at: row
             .try_get::<_, DateTime<Utc>>("created_at")
+            .map_err(postgres_error)?,
+    })
+}
+
+fn map_artifact_alias(row: &Row) -> Result<Artifact, ApplicationError> {
+    let size_bytes = row
+        .try_get::<_, i64>("artifact_size_bytes")
+        .map_err(postgres_error)?;
+    if size_bytes < 0 {
+        return Err(ApplicationError::External(
+            "artifact size cannot be negative".into(),
+        ));
+    }
+
+    Ok(Artifact {
+        id: ArtifactId::new(
+            row.try_get::<_, Uuid>("artifact_id")
+                .map_err(postgres_error)?,
+        ),
+        release_id: ReleaseId::new(
+            row.try_get::<_, Uuid>("artifact_release_id")
+                .map_err(postgres_error)?,
+        ),
+        filename: row
+            .try_get::<_, String>("artifact_filename")
+            .map_err(postgres_error)?,
+        kind: parse_artifact_kind(
+            row.try_get::<_, String>("artifact_kind")
+                .map_err(postgres_error)?,
+        )?,
+        size_bytes: size_bytes as u64,
+        digests: DigestSet::new(
+            row.try_get::<_, String>("artifact_sha256")
+                .map_err(postgres_error)?,
+            row.try_get::<_, Option<String>>("artifact_blake2b_256")
+                .map_err(postgres_error)?,
+        )?,
+        object_key: row
+            .try_get::<_, String>("artifact_object_key")
+            .map_err(postgres_error)?,
+        upstream_url: row
+            .try_get::<_, Option<String>>("artifact_upstream_url")
+            .map_err(postgres_error)?,
+        provenance_key: row
+            .try_get::<_, Option<String>>("artifact_provenance_key")
+            .map_err(postgres_error)?,
+        yanked: parse_yank(
+            row.try_get::<_, Option<String>>("artifact_yanked_reason")
+                .map_err(postgres_error)?,
+            row.try_get::<_, Option<DateTime<Utc>>>("artifact_yanked_changed_at")
+                .map_err(postgres_error)?,
+        ),
+        created_at: row
+            .try_get::<_, DateTime<Utc>>("artifact_created_at")
             .map_err(postgres_error)?,
     })
 }
@@ -1364,6 +1623,22 @@ mod tests {
             assert!(
                 POSTGRES_SCHEMA.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")),
                 "schema should define {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_schema_includes_query_optimization_indexes() {
+        for index in [
+            "idx_projects_tenant_updated",
+            "idx_projects_tenant_normalized_prefix",
+            "idx_releases_project_created",
+            "idx_artifacts_release_filename",
+            "idx_api_tokens_tenant_created",
+        ] {
+            assert!(
+                POSTGRES_SCHEMA.contains(index),
+                "schema should define optimization index {index}"
             );
         }
     }

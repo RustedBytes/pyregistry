@@ -230,30 +230,31 @@ impl PyregistryApp {
         let project = self
             .ensure_project_available(tenant_slug, project_name)
             .await?;
-        let mut releases = self.store.list_releases(project.id).await?;
-        releases.sort_by(|left, right| right.version.cmp(&left.version));
+        let mut release_artifact_groups = self.store.list_release_artifacts(project.id).await?;
+        release_artifact_groups
+            .sort_by(|left, right| right.release.version.cmp(&left.release.version));
         let mut artifacts = Vec::new();
 
-        for release in releases {
-            let mut release_artifacts = self.store.list_artifacts(release.id).await?;
+        for group in release_artifact_groups {
+            let mut release_artifacts = group.artifacts;
             release_artifacts.sort_by(|left, right| left.filename.cmp(&right.filename));
             for artifact in release_artifacts {
                 artifacts.push(SimpleArtifactLink {
                     filename: artifact.filename.clone(),
-                    version: release.version.as_str().to_string(),
+                    version: group.release.version.as_str().to_string(),
                     sha256: artifact.digests.sha256.clone(),
                     url: format!(
                         "/t/{}/files/{}/{}/{}",
                         tenant_slug,
                         project.name.normalized(),
-                        release.version.as_str(),
+                        group.release.version.as_str(),
                         artifact.filename
                     ),
                     provenance_url: Some(format!(
                         "/t/{}/provenance/{}/{}/{}",
                         tenant_slug,
                         project.name.normalized(),
-                        release.version.as_str(),
+                        group.release.version.as_str(),
                         artifact.filename
                     )),
                     yanked_reason: artifact
@@ -261,7 +262,8 @@ impl PyregistryApp {
                         .as_ref()
                         .and_then(|state| state.reason.clone())
                         .or_else(|| {
-                            release
+                            group
+                                .release
                                 .yanked
                                 .as_ref()
                                 .and_then(|state| state.reason.clone())

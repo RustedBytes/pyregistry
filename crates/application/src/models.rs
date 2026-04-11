@@ -68,6 +68,22 @@ pub struct DashboardMetrics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantDashboardStats {
+    pub project_count: usize,
+    pub release_count: usize,
+    pub artifact_count: usize,
+    pub token_count: usize,
+    pub trusted_publisher_count: usize,
+    pub recent_activity: Vec<RecentActivity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReleaseArtifacts {
+    pub release: Release,
+    pub artifacts: Vec<Artifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimpleProject {
     pub name: String,
     pub normalized_name: String,
@@ -687,6 +703,21 @@ pub trait RegistryStore: Send + Sync {
     ) -> Result<Option<Artifact>, ApplicationError>;
     async fn delete_artifact(&self, artifact_id: ArtifactId) -> Result<(), ApplicationError>;
 
+    async fn list_release_artifacts(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<ReleaseArtifacts>, ApplicationError> {
+        let releases = self.list_releases(project_id).await?;
+        let mut grouped = Vec::with_capacity(releases.len());
+        for release in releases {
+            grouped.push(ReleaseArtifacts {
+                artifacts: self.list_artifacts(release.id).await?,
+                release,
+            });
+        }
+        Ok(grouped)
+    }
+
     async fn save_attestation(
         &self,
         attestation: AttestationBundle,
@@ -706,6 +737,40 @@ pub trait RegistryStore: Send + Sync {
         normalized_project_name: &str,
     ) -> Result<Vec<TrustedPublisher>, ApplicationError>;
     async fn delete_project(&self, project_id: ProjectId) -> Result<(), ApplicationError>;
+
+    async fn tenant_dashboard_stats(
+        &self,
+        tenant: &Tenant,
+    ) -> Result<TenantDashboardStats, ApplicationError> {
+        let projects = self.list_projects(tenant.id).await?;
+        let mut release_count = 0usize;
+        let mut artifact_count = 0usize;
+        let mut recent_activity = Vec::new();
+
+        for project in &projects {
+            let releases = self.list_releases(project.id).await?;
+            release_count += releases.len();
+            for release in releases {
+                artifact_count += self.list_artifacts(release.id).await?.len();
+            }
+            recent_activity.push(RecentActivity {
+                project_name: project.name.original().to_string(),
+                tenant_slug: tenant.slug.as_str().to_string(),
+                source: format!("{:?}", project.source).to_ascii_lowercase(),
+                updated_at: project.updated_at,
+            });
+        }
+        recent_activity.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+
+        Ok(TenantDashboardStats {
+            project_count: projects.len(),
+            release_count,
+            artifact_count,
+            token_count: self.list_api_tokens(tenant.id).await?.len(),
+            trusted_publisher_count: self.list_trusted_publishers(tenant.id, "").await?.len(),
+            recent_activity: recent_activity.into_iter().take(6).collect(),
+        })
+    }
 
     async fn save_audit_event(&self, event: AuditEvent) -> Result<(), ApplicationError>;
     async fn list_audit_events(
