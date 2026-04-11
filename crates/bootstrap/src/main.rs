@@ -85,14 +85,14 @@ enum Command {
     #[command(
         name = "validate-dist",
         visible_alias = "validate-artifact",
-        about = "Validate a downloaded wheel or source tar.gz distribution"
+        about = "Validate a downloaded wheel or source distribution"
     )]
     ValidateDist {
         #[arg(
             long,
             alias = "path",
             value_name = "PATH",
-            help = "Path to a .whl, .tar.gz, or .tgz distribution file"
+            help = "Path to a .whl, .tar.gz, .tgz, or .zip distribution file"
         )]
         file: PathBuf,
         #[arg(

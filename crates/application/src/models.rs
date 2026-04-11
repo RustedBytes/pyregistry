@@ -429,6 +429,7 @@ pub struct ValidateRegistryDistributionsCommand {
 pub enum DistributionKind {
     Wheel,
     SourceTarGz,
+    SourceZip,
 }
 
 impl DistributionKind {
@@ -437,6 +438,7 @@ impl DistributionKind {
         match self {
             Self::Wheel => "wheel",
             Self::SourceTarGz => "source tar.gz",
+            Self::SourceZip => "source zip",
         }
     }
 }

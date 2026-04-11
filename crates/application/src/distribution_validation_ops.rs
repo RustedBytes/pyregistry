@@ -211,7 +211,10 @@ async fn validate_registry_target(
             &target.artifact,
             RegistryDistributionValidationStatus::UnsupportedDistribution,
             None,
-            Some("only .whl, .tar.gz, and .tgz files are supported by this validator".to_string()),
+            Some(
+                "only .whl, .tar.gz, .tgz, and .zip files are supported by this validator"
+                    .to_string(),
+            ),
         );
     }
 
@@ -314,7 +317,10 @@ async fn inspect_distribution_bytes_on_rayon(
 
 fn is_supported_distribution_filename(filename: &str) -> bool {
     let filename = filename.to_ascii_lowercase();
-    filename.ends_with(".whl") || filename.ends_with(".tar.gz") || filename.ends_with(".tgz")
+    filename.ends_with(".whl")
+        || filename.ends_with(".tar.gz")
+        || filename.ends_with(".tgz")
+        || filename.ends_with(".zip")
 }
 
 fn registry_distribution_item(
@@ -432,6 +438,17 @@ mod tests {
                 actual
             }
         );
+    }
+
+    #[test]
+    fn recognizes_zip_source_distributions_as_supported() {
+        assert!(is_supported_distribution_filename("scipy-0.12.0.zip"));
+        assert!(is_supported_distribution_filename("demo-0.1.0.tar.gz"));
+        assert!(is_supported_distribution_filename("demo-0.1.0.tgz"));
+        assert!(is_supported_distribution_filename(
+            "demo-0.1.0-py3-none-any.whl"
+        ));
+        assert!(!is_supported_distribution_filename("demo-0.1.0.exe"));
     }
 
     fn fake_inspection(sha256: String) -> DistributionInspection {

@@ -23,6 +23,7 @@ impl DistributionFileInspector for FilesystemDistributionInspector {
         let archive_entry_count = match kind {
             DistributionKind::Wheel => inspect_wheel_archive_path(path)?,
             DistributionKind::SourceTarGz => inspect_source_tar_gz_archive_path(path)?,
+            DistributionKind::SourceZip => inspect_source_zip_archive_path(path)?,
         };
 
         debug!(
@@ -58,6 +59,11 @@ impl DistributionFileInspector for FilesystemDistributionInspector {
             }
             DistributionKind::SourceTarGz => {
                 inspect_source_tar_gz_reader(Cursor::new(bytes), filename)?
+            }
+            DistributionKind::SourceZip => {
+                let archive = ZipArchive::new(Cursor::new(bytes))
+                    .map_err(|error| ApplicationError::External(error.to_string()))?;
+                inspect_source_zip_archive(archive, filename)?
             }
         };
 
@@ -107,8 +113,12 @@ fn distribution_kind_from_filename(
         return Ok(DistributionKind::SourceTarGz);
     }
 
+    if filename.ends_with(".zip") {
+        return Ok(DistributionKind::SourceZip);
+    }
+
     Err(ApplicationError::Conflict(format!(
-        "unsupported distribution file `{subject}`; expected .whl, .tar.gz, or .tgz"
+        "unsupported distribution file `{subject}`; expected .whl, .tar.gz, .tgz, or .zip"
     )))
 }
 
@@ -153,6 +163,13 @@ fn inspect_wheel_archive_path(path: &Path) -> Result<usize, ApplicationError> {
     let archive =
         ZipArchive::new(file).map_err(|error| ApplicationError::External(error.to_string()))?;
     inspect_zip_archive(archive, &path.display().to_string())
+}
+
+fn inspect_source_zip_archive_path(path: &Path) -> Result<usize, ApplicationError> {
+    let file = File::open(path).map_err(|error| ApplicationError::External(error.to_string()))?;
+    let archive =
+        ZipArchive::new(file).map_err(|error| ApplicationError::External(error.to_string()))?;
+    inspect_source_zip_archive(archive, &path.display().to_string())
 }
 
 fn inspect_zip_archive<R: Read + Seek>(
@@ -233,6 +250,39 @@ fn inspect_source_tar_gz_reader<R: Read>(
     if entry_count == 0 {
         return Err(ApplicationError::Conflict(format!(
             "source archive `{label}` does not contain files"
+        )));
+    }
+
+    Ok(entry_count)
+}
+
+fn inspect_source_zip_archive<R: Read + Seek>(
+    mut archive: ZipArchive<R>,
+    label: &str,
+) -> Result<usize, ApplicationError> {
+    if archive.len() == 0 {
+        return Err(ApplicationError::Conflict(format!(
+            "source zip archive `{label}` is empty"
+        )));
+    }
+
+    let mut entry_count = 0;
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| ApplicationError::External(error.to_string()))?;
+        if file.is_dir() {
+            continue;
+        }
+
+        io::copy(&mut file, &mut io::sink())
+            .map_err(|error| ApplicationError::External(error.to_string()))?;
+        entry_count += 1;
+    }
+
+    if entry_count == 0 {
+        return Err(ApplicationError::Conflict(format!(
+            "source zip archive `{label}` does not contain files"
         )));
     }
 
@@ -328,8 +378,47 @@ mod tests {
     }
 
     #[test]
+    fn validates_source_zip_archive_and_computes_sha256() {
+        let bytes = build_zip_bytes(&[
+            ZipFixtureEntry::file(
+                "demo_pkg-0.1.0/pyproject.toml",
+                b"[project]\nname = \"demo-pkg\"\n",
+            ),
+            ZipFixtureEntry::file("demo_pkg-0.1.0/demo_pkg/__init__.py", b"VALUE = 1"),
+        ]);
+        let path = write_temp_file("demo_pkg-0.1.0.zip", &bytes);
+
+        let inspection = FilesystemDistributionInspector
+            .inspect_distribution(&path)
+            .expect("valid source zip");
+
+        fs::remove_file(&path).expect("remove temp source archive");
+        assert_eq!(inspection.kind, DistributionKind::SourceZip);
+        assert_eq!(inspection.size_bytes, bytes.len() as u64);
+        assert_eq!(inspection.archive_entry_count, 2);
+        assert_eq!(inspection.sha256, expected_sha256(&bytes));
+    }
+
+    #[test]
+    fn validates_source_zip_distribution_bytes_without_temp_file() {
+        let bytes = build_zip_bytes(&[ZipFixtureEntry::file(
+            "demo_pkg-0.1.0/pyproject.toml",
+            b"[project]\nname = \"demo-pkg\"\n",
+        )]);
+
+        let inspection = FilesystemDistributionInspector
+            .inspect_distribution_bytes("demo_pkg-0.1.0.zip", &bytes)
+            .expect("valid source zip bytes");
+
+        assert_eq!(inspection.kind, DistributionKind::SourceZip);
+        assert_eq!(inspection.size_bytes, bytes.len() as u64);
+        assert_eq!(inspection.archive_entry_count, 1);
+        assert_eq!(inspection.sha256, expected_sha256(&bytes));
+    }
+
+    #[test]
     fn rejects_unsupported_distribution_extension() {
-        let path = write_temp_file("demo_pkg-0.1.0.zip", b"not supported here");
+        let path = write_temp_file("demo_pkg-0.1.0.exe", b"not supported here");
 
         let error = FilesystemDistributionInspector
             .inspect_distribution(&path)

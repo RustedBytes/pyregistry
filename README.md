@@ -292,17 +292,18 @@ file is not present locally. The audit checks:
 - Suspicious dependencies in `METADATA`.
 - YARA virus signature matches using the configured rule directory.
 
-`validate-dist` checks downloaded `.whl`, `.tar.gz`, and `.tgz` files before you
-trust or import them. It computes SHA-256, optionally compares it with
-`--sha256`, and fully reads the zip or tar.gz archive so corrupt payloads fail
-fast.
+`validate-dist` checks downloaded `.whl`, `.tar.gz`, `.tgz`, and `.zip` files
+before you trust or import them. It computes SHA-256, optionally compares it
+with `--sha256`, and fully reads the zip or tar.gz archive so corrupt payloads
+fail fast.
 
 `validate-dist-all` performs the same checksum and archive checks for stored
 registry artifact blobs. Use `--tenant` and `--project` to narrow the scope; it
 reports missing object-storage blobs, checksum mismatches, corrupt archives, and
-source formats this validator does not yet support. Archive inspection runs in
-parallel with Rayon; tune the default with `[validation].distribution_parallelism`
-or override a single run with `--parallelism`.
+source formats this validator does not yet support. Archive inspection supports
+wheels plus tar.gz/tgz and zip source distributions, and runs in parallel with
+Rayon; tune the default with `[validation].distribution_parallelism` or override
+a single run with `--parallelism`.
 
 `check-registry` checks package versions stored in the current metadata store
 for known vulnerabilities through the PySentry adapter.

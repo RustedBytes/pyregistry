@@ -126,8 +126,10 @@ async fn validate_registry_distributions_reports_checksum_and_missing_blob_failu
     store.save_release(release).await.expect("save release");
 
     let valid_bytes = b"valid wheel bytes".to_vec();
+    let zip_bytes = b"valid source zip bytes".to_vec();
     let mismatch_bytes = b"changed wheel bytes".to_vec();
     let valid_sha256 = hex::encode(Sha256::digest(&valid_bytes));
+    let zip_sha256 = hex::encode(Sha256::digest(&zip_bytes));
     store
         .save_artifact(
             Artifact::new(
@@ -148,6 +150,21 @@ async fn validate_registry_distributions_reports_checksum_and_missing_blob_failu
             Artifact::new(
                 ArtifactId::new(Uuid::from_u128(301)),
                 ReleaseId::new(Uuid::from_u128(200)),
+                "internal-1.0.0.zip",
+                zip_bytes.len() as u64,
+                DigestSet::new(zip_sha256, None).expect("digest"),
+                "objects/source.zip",
+                fixed_now(),
+            )
+            .expect("zip artifact"),
+        )
+        .await
+        .expect("save zip artifact");
+    store
+        .save_artifact(
+            Artifact::new(
+                ArtifactId::new(Uuid::from_u128(302)),
+                ReleaseId::new(Uuid::from_u128(200)),
                 "internal-1.0.0-cp314-cp314-linux_x86_64.whl",
                 mismatch_bytes.len() as u64,
                 DigestSet::new("a".repeat(64), None).expect("digest"),
@@ -161,7 +178,7 @@ async fn validate_registry_distributions_reports_checksum_and_missing_blob_failu
     store
         .save_artifact(
             Artifact::new(
-                ArtifactId::new(Uuid::from_u128(302)),
+                ArtifactId::new(Uuid::from_u128(303)),
                 ReleaseId::new(Uuid::from_u128(200)),
                 "internal-1.0.0.tar.gz",
                 42,
@@ -181,6 +198,10 @@ async fn validate_registry_distributions_reports_checksum_and_missing_blob_failu
         .put("objects/mismatch.whl", mismatch_bytes)
         .await
         .expect("put mismatch bytes");
+    storage
+        .put("objects/source.zip", zip_bytes)
+        .await
+        .expect("put source zip bytes");
 
     let report = app
         .validate_registry_distributions(
@@ -198,8 +219,8 @@ async fn validate_registry_distributions_reports_checksum_and_missing_blob_failu
     assert_eq!(report.tenant_count, 1);
     assert_eq!(report.project_count, 1);
     assert_eq!(report.release_count, 1);
-    assert_eq!(report.artifact_count, 3);
-    assert_eq!(report.valid_count, 1);
+    assert_eq!(report.artifact_count, 4);
+    assert_eq!(report.valid_count, 2);
     assert_eq!(report.invalid_count, 2);
     assert_eq!(report.checksum_mismatch_count, 1);
     assert_eq!(report.missing_blob_count, 1);
@@ -211,6 +232,11 @@ async fn validate_registry_distributions_reports_checksum_and_missing_blob_failu
     assert!(report.items.iter().any(|item| {
         item.filename == "internal-1.0.0.tar.gz"
             && item.status == RegistryDistributionValidationStatus::MissingBlob
+    }));
+    assert!(report.items.iter().any(|item| {
+        item.filename == "internal-1.0.0.zip"
+            && item.status == RegistryDistributionValidationStatus::Valid
+            && item.kind == Some(DistributionKind::SourceZip)
     }));
 }
 
@@ -942,6 +968,8 @@ impl DistributionFileInspector for FakeDistributionInspector {
         Ok(DistributionInspection {
             kind: if filename.ends_with(".whl") {
                 DistributionKind::Wheel
+            } else if filename.ends_with(".zip") {
+                DistributionKind::SourceZip
             } else {
                 DistributionKind::SourceTarGz
             },
@@ -1002,6 +1030,8 @@ impl DistributionFileInspector for ConcurrentDistributionInspector {
         Ok(DistributionInspection {
             kind: if filename.ends_with(".whl") {
                 DistributionKind::Wheel
+            } else if filename.ends_with(".zip") {
+                DistributionKind::SourceZip
             } else {
                 DistributionKind::SourceTarGz
             },
