@@ -462,9 +462,12 @@ cargo nextest run --workspace --profile ci
 ./scripts/coverage.sh --profile ci
 ```
 
-The coverage gate currently requires at least 40% line coverage. To experiment
-with a stricter local threshold, set `COVERAGE_MIN_LINES`, for example
-`COVERAGE_MIN_LINES=45 ./scripts/coverage.sh`.
+The coverage gate requires at least 80% line coverage across the business-core
+and deterministic adapter surface. Delivery glue, database adapters, external
+network adapters, and the large wheel-audit heuristic module are excluded from
+the default gate but still compiled and exercised by `cargo nextest`. To
+experiment with a different local threshold, set `COVERAGE_MIN_LINES`, for
+example `COVERAGE_MIN_LINES=85 ./scripts/coverage.sh`.
 
 The first full build after adding YARA-X can take longer because the dependency
 tree includes the YARA-X scanner and Wasmtime components.

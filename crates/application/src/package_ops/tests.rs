@@ -1,22 +1,25 @@
 use super::*;
 use crate::{
-    AttestationSigner, CancellationSignal, Clock, DistributionFileInspector,
-    DistributionInspection, DistributionKind, IdGenerator, MirrorClient, MirroredArtifactSnapshot,
+    AttestationSigner, CancellationSignal, Clock, CreateTenantCommand, DeletionCommand,
+    DistributionFileInspector, DistributionInspection, DistributionKind, IdGenerator,
+    IssueApiTokenCommand, MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot,
     ObjectStorage, OidcVerifier, PackageVulnerabilityQuery, PackageVulnerabilityReport,
-    PasswordHasher, RegistryDistributionValidationStatus, RegistryOverview, RegistryStore,
-    SearchHit, TokenHasher, ValidateRegistryDistributionsCommand, VulnerabilityScanner,
+    PasswordHasher, RecordAuditEventCommand, RegisterTrustedPublisherCommand,
+    RegistryDistributionValidationStatus, RegistryOverview, RegistryStore, SearchHit, TokenHasher,
+    UploadArtifactCommand, ValidateRegistryDistributionsCommand, VulnerabilityScanner,
     WheelArchiveReader, WheelArchiveSnapshot, WheelSourceSecurityScanResult,
     WheelSourceSecurityScanner, WheelVirusScanResult, WheelVirusScanner,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use pyregistry_domain::{
-    AdminUser, ApiToken, Artifact, ArtifactId, AttestationBundle, AuditEvent, DigestSet,
-    MirrorRule, Project, ProjectId, ProjectName, ProjectSource, PublishIdentity, Release,
-    ReleaseId, ReleaseVersion, Tenant, TenantId, TenantSlug, TokenId, TrustedPublisher,
+    AdminUser, ApiToken, Artifact, ArtifactId, AttestationBundle, AuditEvent, DeletionMode,
+    DigestSet, MirrorRule, Project, ProjectId, ProjectName, ProjectSource, PublishIdentity,
+    Release, ReleaseId, ReleaseVersion, Tenant, TenantId, TenantSlug, TokenId, TokenScope,
+    TrustedPublisher, TrustedPublisherProvider,
 };
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{
     Arc, Mutex,
@@ -309,6 +312,392 @@ async fn validate_registry_distributions_inspects_files_in_parallel() {
     );
 }
 
+#[tokio::test]
+async fn admin_publish_governance_and_audit_use_cases_share_a_consistent_registry_state() {
+    let store = Arc::new(FakeRegistryStore::default());
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(0));
+    let app = test_app(store.clone(), storage.clone(), mirror, 2);
+
+    app.bootstrap_superadmin(" ROOT@Example.COM ", "root-secret")
+        .await
+        .expect("bootstrap superadmin");
+    app.bootstrap_superadmin("root@example.com", "ignored")
+        .await
+        .expect("bootstrap is idempotent");
+    let root_session = app
+        .login_admin("root@example.com", "root-secret")
+        .await
+        .expect("root login");
+    assert!(root_session.is_superadmin);
+
+    let tenant = app
+        .create_tenant(CreateTenantCommand {
+            slug: "Acme".into(),
+            display_name: "Acme Corp".into(),
+            mirroring_enabled: true,
+            admin_email: "Admin@Acme.test".into(),
+            admin_password: "tenant-secret".into(),
+        })
+        .await
+        .expect("tenant creation");
+    assert_eq!(tenant.slug.as_str(), "acme");
+    assert!(matches!(
+        app.create_tenant(CreateTenantCommand {
+            slug: "acme".into(),
+            display_name: "Acme Again".into(),
+            mirroring_enabled: false,
+            admin_email: "other@acme.test".into(),
+            admin_password: "tenant-secret".into(),
+        })
+        .await,
+        Err(ApplicationError::Conflict(_))
+    ));
+
+    let tenant_session = app
+        .login_admin("admin@acme.test", "tenant-secret")
+        .await
+        .expect("tenant admin login");
+    assert_eq!(tenant_session.tenant_slug.as_deref(), Some("acme"));
+    assert!(matches!(
+        app.login_admin("admin@acme.test", "wrong").await,
+        Err(ApplicationError::Unauthorized(_))
+    ));
+
+    let read_token = app
+        .issue_api_token(IssueApiTokenCommand {
+            tenant_slug: "acme".into(),
+            label: "read-only".into(),
+            scopes: vec![TokenScope::Read],
+            ttl_hours: Some(1),
+        })
+        .await
+        .expect("read token");
+    assert_eq!(read_token.label, "read-only");
+    assert!(read_token.secret.starts_with("pyr_"));
+    app.authenticate_tenant_token("acme", &read_token.secret, TokenScope::Read)
+        .await
+        .expect("read token authenticates");
+    assert!(matches!(
+        app.authenticate_tenant_token("acme", &read_token.secret, TokenScope::Publish)
+            .await,
+        Err(ApplicationError::Unauthorized(_))
+    ));
+    app.revoke_api_token("acme", "read-only")
+        .await
+        .expect("token revocation");
+    assert!(matches!(
+        app.authenticate_tenant_token("acme", &read_token.secret, TokenScope::Read)
+            .await,
+        Err(ApplicationError::Unauthorized(_))
+    ));
+
+    let publish_token = app
+        .issue_api_token(IssueApiTokenCommand {
+            tenant_slug: "acme".into(),
+            label: "publisher".into(),
+            scopes: vec![TokenScope::Publish, TokenScope::Admin],
+            ttl_hours: None,
+        })
+        .await
+        .expect("publish token");
+    let publish_access = app
+        .authenticate_tenant_token("acme", &publish_token.secret, TokenScope::Publish)
+        .await
+        .expect("publish token authenticates");
+
+    app.upload_artifact(
+        &publish_access,
+        UploadArtifactCommand {
+            tenant_slug: "acme".into(),
+            project_name: "Demo_Pkg".into(),
+            version: "1.0.0".into(),
+            filename: "demo-pkg-1.0.0-py3-none-any.whl".into(),
+            summary: "Demo package".into(),
+            description: "A package used by the coverage flow".into(),
+            content: b"first wheel".to_vec(),
+        },
+    )
+    .await
+    .expect("upload artifact");
+    assert!(matches!(
+        app.upload_artifact(
+            &publish_access,
+            UploadArtifactCommand {
+                tenant_slug: "other".into(),
+                project_name: "Demo_Pkg".into(),
+                version: "1.0.0".into(),
+                filename: "demo-pkg-1.0.0-py3-none-any.whl".into(),
+                summary: "Demo package".into(),
+                description: "Tenant mismatch".into(),
+                content: b"tenant mismatch".to_vec(),
+            },
+        )
+        .await,
+        Err(ApplicationError::Unauthorized(_))
+    ));
+    assert!(matches!(
+        app.upload_artifact(
+            &publish_access,
+            UploadArtifactCommand {
+                tenant_slug: "acme".into(),
+                project_name: "Demo_Pkg".into(),
+                version: "1.0.0".into(),
+                filename: "demo-pkg-1.0.0-py3-none-any.whl".into(),
+                summary: "Demo package".into(),
+                description: "Duplicate".into(),
+                content: b"duplicate".to_vec(),
+            },
+        )
+        .await,
+        Err(ApplicationError::Conflict(_))
+    ));
+
+    let mut claim_rules = BTreeMap::new();
+    claim_rules.insert("repository".into(), "acme/demo-pkg".into());
+    let publisher = app
+        .register_trusted_publisher(RegisterTrustedPublisherCommand {
+            tenant_slug: "acme".into(),
+            project_name: "Demo_Pkg".into(),
+            provider: TrustedPublisherProvider::GitHubActions,
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            audience: "pyregistry".into(),
+            claim_rules,
+        })
+        .await
+        .expect("trusted publisher");
+    assert_eq!(publisher.project_name, "Demo_Pkg");
+
+    let oidc_grant = app
+        .mint_oidc_publish_token(MintOidcPublishTokenCommand {
+            tenant_slug: "acme".into(),
+            project_name: "Demo_Pkg".into(),
+            oidc_token: "fixture.jwt".into(),
+        })
+        .await
+        .expect("OIDC publish token");
+    assert!(oidc_grant.token.starts_with("oidc_"));
+    let trusted_access = app
+        .authenticate_tenant_token("acme", &oidc_grant.token, TokenScope::Publish)
+        .await
+        .expect("OIDC token authenticates");
+    app.upload_artifact(
+        &trusted_access,
+        UploadArtifactCommand {
+            tenant_slug: "acme".into(),
+            project_name: "Demo_Pkg".into(),
+            version: "1.1.0".into(),
+            filename: "demo-pkg-1.1.0-py3-none-any.whl".into(),
+            summary: "Demo package".into(),
+            description: "Trusted publish".into(),
+            content: b"trusted wheel".to_vec(),
+        },
+    )
+    .await
+    .expect("trusted upload");
+
+    let overview = app.get_registry_overview().await.expect("overview");
+    assert_eq!(overview.tenant_count, 1);
+    assert_eq!(overview.project_count, 1);
+    assert_eq!(overview.release_count, 2);
+    assert_eq!(overview.artifact_count, 2);
+    assert_eq!(overview.total_storage_bytes, 24);
+
+    let dashboard = app
+        .get_tenant_dashboard("acme")
+        .await
+        .expect("tenant dashboard");
+    assert_eq!(dashboard.project_count, 1);
+    assert_eq!(dashboard.release_count, 2);
+    assert_eq!(dashboard.artifact_count, 2);
+    assert_eq!(dashboard.token_count, 2);
+    assert_eq!(dashboard.trusted_publisher_count, 1);
+
+    let hits = app
+        .search_packages("acme", "demo")
+        .await
+        .expect("package search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].normalized_name, "demo-pkg");
+    assert_eq!(hits[0].latest_version.as_deref(), Some("1.1.0"));
+
+    let details = app
+        .get_package_details("acme", "demo-pkg")
+        .await
+        .expect("package details");
+    assert_eq!(details.releases[0].version, "1.1.0");
+    assert_eq!(details.trusted_publishers.len(), 1);
+    assert_eq!(details.security.scanned_file_count, 2);
+
+    let simple_projects = app
+        .list_simple_projects("acme")
+        .await
+        .expect("simple project listing");
+    assert_eq!(simple_projects[0].normalized_name, "demo-pkg");
+    let simple_page = app
+        .get_simple_project_index("acme", "demo-pkg")
+        .await
+        .expect("simple project page");
+    assert_eq!(simple_page.artifacts.len(), 2);
+    assert_eq!(simple_page.artifacts[0].version, "1.1.0");
+    assert!(simple_page.artifacts[0].provenance_url.is_some());
+    let downloaded = app
+        .download_artifact(
+            "acme",
+            "demo-pkg",
+            "1.0.0",
+            "demo-pkg-1.0.0-py3-none-any.whl",
+        )
+        .await
+        .expect("download local artifact");
+    assert_eq!(downloaded, b"first wheel");
+    let provenance = app
+        .get_provenance(
+            "acme",
+            "demo-pkg",
+            "1.1.0",
+            "demo-pkg-1.1.0-py3-none-any.whl",
+        )
+        .await
+        .expect("trusted publish provenance");
+    assert_eq!(provenance.source, "trustedpublish");
+    assert!(matches!(
+        app.get_provenance(
+            "acme",
+            "demo-pkg",
+            "1.0.0",
+            "demo-pkg-1.0.0-py3-none-any.whl",
+        )
+        .await,
+        Err(ApplicationError::NotFound(_))
+    ));
+
+    let security = app
+        .check_registry_security(Some("acme"), Some("demo-pkg"))
+        .await
+        .expect("registry security report");
+    assert_eq!(security.package_count, 1);
+    assert_eq!(security.file_count, 2);
+    assert_eq!(security.vulnerability_count, 0);
+
+    app.yank_artifact(DeletionCommand {
+        tenant_slug: "acme".into(),
+        project_name: "demo-pkg".into(),
+        version: Some("1.0.0".into()),
+        filename: Some("demo-pkg-1.0.0-py3-none-any.whl".into()),
+        reason: Some("bad wheel".into()),
+        mode: DeletionMode::Yank,
+    })
+    .await
+    .expect("yank artifact");
+    let details = app
+        .get_package_details("acme", "demo-pkg")
+        .await
+        .expect("details after artifact yank");
+    assert_eq!(
+        details.releases[1].artifacts[0].yanked_reason.as_deref(),
+        Some("bad wheel")
+    );
+    app.unyank_artifact(
+        "acme",
+        "demo-pkg",
+        "1.0.0",
+        "demo-pkg-1.0.0-py3-none-any.whl",
+    )
+    .await
+    .expect("unyank artifact");
+
+    app.yank_release(DeletionCommand {
+        tenant_slug: "acme".into(),
+        project_name: "demo-pkg".into(),
+        version: Some("1.0.0".into()),
+        filename: None,
+        reason: Some("release hold".into()),
+        mode: DeletionMode::Yank,
+    })
+    .await
+    .expect("yank release");
+    let details = app
+        .get_package_details("acme", "demo-pkg")
+        .await
+        .expect("details after release yank");
+    assert_eq!(
+        details.releases[1].yanked_reason.as_deref(),
+        Some("release hold")
+    );
+    app.unyank_release("acme", "demo-pkg", "1.0.0")
+        .await
+        .expect("unyank release");
+
+    app.record_audit_event(RecordAuditEventCommand {
+        actor: " admin@acme.test ".into(),
+        action: " package.scan ".into(),
+        tenant_slug: Some(" acme ".into()),
+        target: Some(" demo-pkg ".into()),
+        metadata: BTreeMap::from([
+            (" findings ".into(), " 0 ".into()),
+            ("empty".into(), "   ".into()),
+        ]),
+    })
+    .await
+    .expect("record audit event");
+    let audit_trail = app
+        .list_audit_trail(Some("acme"), 0)
+        .await
+        .expect("audit trail");
+    assert_eq!(audit_trail.len(), 1);
+    assert_eq!(audit_trail[0].actor, "admin@acme.test");
+    assert_eq!(
+        audit_trail[0].metadata.get("findings"),
+        Some(&"0".to_string())
+    );
+    assert!(!audit_trail[0].metadata.contains_key("empty"));
+
+    app.purge_artifact(
+        "acme",
+        "demo-pkg",
+        "1.0.0",
+        "demo-pkg-1.0.0-py3-none-any.whl",
+    )
+    .await
+    .expect("purge artifact");
+    assert_eq!(store.artifact_count(), 1);
+    assert_eq!(storage.object_count(), 2);
+
+    app.purge_release("acme", "demo-pkg", "1.1.0")
+        .await
+        .expect("purge release");
+    assert_eq!(store.artifact_count(), 0);
+    assert_eq!(storage.object_count(), 0);
+
+    app.upload_artifact(
+        &publish_access,
+        UploadArtifactCommand {
+            tenant_slug: "acme".into(),
+            project_name: "Demo_Pkg".into(),
+            version: "2.0.0".into(),
+            filename: "demo-pkg-2.0.0-py3-none-any.whl".into(),
+            summary: "Demo package".into(),
+            description: "Project purge target".into(),
+            content: b"final wheel".to_vec(),
+        },
+    )
+    .await
+    .expect("upload before project purge");
+    app.purge_project("acme", "demo-pkg")
+        .await
+        .expect("purge project");
+    assert_eq!(store.artifact_count(), 0);
+    assert_eq!(storage.object_count(), 0);
+    assert!(
+        store
+            .get_project_by_normalized_name(tenant.id, "demo-pkg")
+            .await
+            .expect("project lookup")
+            .is_none()
+    );
+}
+
 fn test_app(
     store: Arc<FakeRegistryStore>,
     storage: Arc<FakeObjectStorage>,
@@ -341,10 +730,14 @@ struct FakeRegistryStore {
 #[derive(Default)]
 struct FakeRegistryState {
     tenants: HashMap<Uuid, Tenant>,
+    admins: HashMap<String, AdminUser>,
+    tokens: HashMap<Uuid, ApiToken>,
     projects: HashMap<Uuid, Project>,
     releases: HashMap<Uuid, Release>,
     artifacts: HashMap<Uuid, Artifact>,
     attestations: HashMap<Uuid, AttestationBundle>,
+    trusted_publishers: HashMap<Uuid, TrustedPublisher>,
+    audit_events: Vec<AuditEvent>,
 }
 
 impl FakeRegistryStore {
@@ -403,18 +796,40 @@ impl FakeRegistryStore {
     fn artifact_count(&self) -> usize {
         self.state.lock().expect("store state").artifacts.len()
     }
+
+    fn latest_version_for_project(
+        state: &FakeRegistryState,
+        project_id: ProjectId,
+    ) -> Option<String> {
+        state
+            .releases
+            .values()
+            .filter(|release| release.project_id == project_id)
+            .map(|release| release.version.clone())
+            .max()
+            .map(|version| version.as_str().to_string())
+    }
 }
 
 #[async_trait]
 impl RegistryStore for FakeRegistryStore {
     async fn registry_overview(&self) -> Result<RegistryOverview, ApplicationError> {
+        let state = self.state.lock().expect("store state");
         Ok(RegistryOverview {
-            tenant_count: 0,
-            project_count: 0,
-            release_count: 0,
-            artifact_count: 0,
-            total_storage_bytes: 0,
-            mirrored_project_count: 0,
+            tenant_count: state.tenants.len(),
+            project_count: state.projects.len(),
+            release_count: state.releases.len(),
+            artifact_count: state.artifacts.len(),
+            total_storage_bytes: state
+                .artifacts
+                .values()
+                .map(|artifact| artifact.size_bytes)
+                .sum(),
+            mirrored_project_count: state
+                .projects
+                .values()
+                .filter(|project| matches!(project.source, ProjectSource::Mirrored))
+                .count(),
         })
     }
 
@@ -449,33 +864,62 @@ impl RegistryStore for FakeRegistryStore {
             .cloned())
     }
 
-    async fn save_admin_user(&self, _user: AdminUser) -> Result<(), ApplicationError> {
+    async fn save_admin_user(&self, user: AdminUser) -> Result<(), ApplicationError> {
+        self.state
+            .lock()
+            .expect("store state")
+            .admins
+            .insert(user.email.clone(), user);
         Ok(())
     }
 
     async fn get_admin_user_by_email(
         &self,
-        _email: &str,
+        email: &str,
     ) -> Result<Option<AdminUser>, ApplicationError> {
-        Ok(None)
+        Ok(self
+            .state
+            .lock()
+            .expect("store state")
+            .admins
+            .get(email)
+            .cloned())
     }
 
-    async fn save_api_token(&self, _token: ApiToken) -> Result<(), ApplicationError> {
+    async fn save_api_token(&self, token: ApiToken) -> Result<(), ApplicationError> {
+        self.state
+            .lock()
+            .expect("store state")
+            .tokens
+            .insert(token.id.into_inner(), token);
         Ok(())
     }
 
     async fn list_api_tokens(
         &self,
-        _tenant_id: TenantId,
+        tenant_id: TenantId,
     ) -> Result<Vec<ApiToken>, ApplicationError> {
-        Ok(Vec::new())
+        Ok(self
+            .state
+            .lock()
+            .expect("store state")
+            .tokens
+            .values()
+            .filter(|token| token.tenant_id == tenant_id)
+            .cloned()
+            .collect())
     }
 
     async fn revoke_api_token(
         &self,
         _tenant_id: TenantId,
-        _token_id: TokenId,
+        token_id: TokenId,
     ) -> Result<(), ApplicationError> {
+        self.state
+            .lock()
+            .expect("store state")
+            .tokens
+            .remove(&token_id.into_inner());
         Ok(())
     }
 
@@ -502,10 +946,33 @@ impl RegistryStore for FakeRegistryStore {
 
     async fn search_projects(
         &self,
-        _tenant_id: TenantId,
-        _query: &str,
+        tenant_id: TenantId,
+        query: &str,
     ) -> Result<Vec<SearchHit>, ApplicationError> {
-        Ok(Vec::new())
+        let query = query.trim().to_ascii_lowercase();
+        let state = self.state.lock().expect("store state");
+        Ok(state
+            .projects
+            .values()
+            .filter(|project| project.tenant_id == tenant_id)
+            .filter(|project| {
+                query.is_empty()
+                    || project.name.normalized().contains(&query)
+                    || project.summary.to_ascii_lowercase().contains(&query)
+            })
+            .map(|project| SearchHit {
+                tenant_slug: state
+                    .tenants
+                    .get(&tenant_id.into_inner())
+                    .map(|tenant| tenant.slug.as_str().to_string())
+                    .unwrap_or_default(),
+                project_name: project.name.original().to_string(),
+                normalized_name: project.name.normalized().to_string(),
+                summary: project.summary.clone(),
+                source: format!("{:?}", project.source).to_ascii_lowercase(),
+                latest_version: Self::latest_version_for_project(&state, project.id),
+            })
+            .collect())
     }
 
     async fn get_project_by_normalized_name(
@@ -645,17 +1112,34 @@ impl RegistryStore for FakeRegistryStore {
 
     async fn save_trusted_publisher(
         &self,
-        _publisher: TrustedPublisher,
+        publisher: TrustedPublisher,
     ) -> Result<(), ApplicationError> {
+        self.state
+            .lock()
+            .expect("store state")
+            .trusted_publishers
+            .insert(publisher.id.into_inner(), publisher);
         Ok(())
     }
 
     async fn list_trusted_publishers(
         &self,
-        _tenant_id: TenantId,
-        _normalized_project_name: &str,
+        tenant_id: TenantId,
+        normalized_project_name: &str,
     ) -> Result<Vec<TrustedPublisher>, ApplicationError> {
-        Ok(Vec::new())
+        Ok(self
+            .state
+            .lock()
+            .expect("store state")
+            .trusted_publishers
+            .values()
+            .filter(|publisher| publisher.tenant_id == tenant_id)
+            .filter(|publisher| {
+                normalized_project_name.is_empty()
+                    || publisher.project_name.normalized() == normalized_project_name
+            })
+            .cloned()
+            .collect())
     }
 
     async fn delete_project(&self, project_id: ProjectId) -> Result<(), ApplicationError> {
@@ -667,16 +1151,36 @@ impl RegistryStore for FakeRegistryStore {
         Ok(())
     }
 
-    async fn save_audit_event(&self, _event: AuditEvent) -> Result<(), ApplicationError> {
+    async fn save_audit_event(&self, event: AuditEvent) -> Result<(), ApplicationError> {
+        self.state
+            .lock()
+            .expect("store state")
+            .audit_events
+            .push(event);
         Ok(())
     }
 
     async fn list_audit_events(
         &self,
-        _tenant_slug: Option<&str>,
-        _limit: usize,
+        tenant_slug: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<AuditEvent>, ApplicationError> {
-        Ok(Vec::new())
+        let mut events = self
+            .state
+            .lock()
+            .expect("store state")
+            .audit_events
+            .iter()
+            .filter(|event| {
+                tenant_slug
+                    .map(|tenant_slug| event.tenant_slug.as_deref() == Some(tenant_slug))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| right.occurred_at.cmp(&left.occurred_at));
+        events.truncate(limit);
+        Ok(events)
     }
 }
 
@@ -851,9 +1355,18 @@ impl OidcVerifier for UnusedOidcVerifier {
     async fn verify(
         &self,
         _token: &str,
-        _audience: &str,
+        audience: &str,
     ) -> Result<PublishIdentity, ApplicationError> {
-        Err(ApplicationError::External("unused OIDC verifier".into()))
+        Ok(PublishIdentity {
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            subject: "repo:acme/demo-pkg:ref:refs/heads/main".into(),
+            audience: audience.to_string(),
+            provider: TrustedPublisherProvider::GitHubActions,
+            claims: BTreeMap::from([
+                ("repository".into(), "acme/demo-pkg".into()),
+                ("ref".into(), "refs/heads/main".into()),
+            ]),
+        })
     }
 }
 
@@ -875,12 +1388,12 @@ impl AttestationSigner for UnusedAttestationSigner {
 struct UnusedPasswordHasher;
 
 impl PasswordHasher for UnusedPasswordHasher {
-    fn hash(&self, _password: &str) -> Result<String, ApplicationError> {
-        Ok("hash".into())
+    fn hash(&self, password: &str) -> Result<String, ApplicationError> {
+        Ok(format!("hashed:{password}"))
     }
 
-    fn verify(&self, _password: &str, _hash: &str) -> Result<bool, ApplicationError> {
-        Ok(false)
+    fn verify(&self, password: &str, hash: &str) -> Result<bool, ApplicationError> {
+        Ok(hash == format!("hashed:{password}"))
     }
 }
 
