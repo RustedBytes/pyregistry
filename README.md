@@ -349,6 +349,15 @@ Those supplied files are embedded into the binary at compile time. If
 `security.yara_rules_path` points to a readable directory, Pyregistry uses that
 external rule set; otherwise it falls back to the bundled supplied rules.
 
+To refresh the bundled signatures locally, run:
+
+```bash
+scripts/update-yara-signatures.sh
+```
+
+GitHub Actions also runs `.github/workflows/update-yara-signatures.yml` weekly
+and opens a maintenance pull request when upstream YARA files change.
+
 ## Mirroring
 
 Tenant admins can enable mirroring and request a mirror cache refresh from the
