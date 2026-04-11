@@ -5,7 +5,8 @@ use crate::{
     ObjectStorage, OidcVerifier, PackageVulnerabilityQuery, PackageVulnerabilityReport,
     PasswordHasher, RegistryDistributionValidationStatus, RegistryOverview, RegistryStore,
     SearchHit, TokenHasher, ValidateRegistryDistributionsCommand, VulnerabilityScanner,
-    WheelArchiveReader, WheelArchiveSnapshot, WheelVirusScanResult, WheelVirusScanner,
+    WheelArchiveReader, WheelArchiveSnapshot, WheelSourceSecurityScanResult,
+    WheelSourceSecurityScanner, WheelVirusScanResult, WheelVirusScanner,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -325,6 +326,7 @@ fn test_app(
         Arc::new(UnusedVulnerabilityScanner),
         Arc::new(UnusedWheelArchiveReader),
         Arc::new(UnusedWheelVirusScanner),
+        Arc::new(UnusedWheelSourceSecurityScanner),
         Arc::new(FixedClock),
         Arc::new(SequentialIds::default()),
         mirror_download_concurrency,
@@ -943,6 +945,20 @@ impl WheelVirusScanner for UnusedWheelVirusScanner {
             scanned_file_count: 0,
             signature_rule_count: 0,
             skipped_rule_count: 0,
+            findings: Vec::new(),
+        })
+    }
+}
+
+struct UnusedWheelSourceSecurityScanner;
+
+impl WheelSourceSecurityScanner for UnusedWheelSourceSecurityScanner {
+    fn scan_archive(
+        &self,
+        _archive: &WheelArchiveSnapshot,
+    ) -> Result<WheelSourceSecurityScanResult, ApplicationError> {
+        Ok(WheelSourceSecurityScanResult {
+            scanned_file_count: 0,
             findings: Vec::new(),
         })
     }

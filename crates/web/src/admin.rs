@@ -1093,13 +1093,14 @@ fn format_wheel_audit_report_text(report: &WheelAuditReport) -> String {
     let _ = writeln!(out, "Wheel audit: {}", report.wheel_filename);
     let _ = writeln!(out, "Project: {}", report.project_name);
     let _ = writeln!(out, "Scanned files: {}", report.scanned_file_count);
+    format_source_security_scan_summary(&mut out, report);
     format_virus_scan_summary(&mut out, report);
 
     if report.findings.is_empty() {
         let _ = writeln!(out);
         let _ = write!(
             out,
-            "No suspicious heuristic signals or YARA virus signatures were detected."
+            "No suspicious heuristic signals, FoxGuard findings, or YARA virus signatures were detected."
         );
         return out;
     }
@@ -1110,6 +1111,7 @@ fn format_wheel_audit_report_text(report: &WheelAuditReport) -> String {
         WheelAuditFindingKind::PostInstallClue,
         WheelAuditFindingKind::PythonAstSuspiciousBehavior,
         WheelAuditFindingKind::SuspiciousDependency,
+        WheelAuditFindingKind::SourceSecurityFinding,
         WheelAuditFindingKind::VirusSignatureMatch,
     ] {
         let findings: Vec<_> = report
@@ -1129,6 +1131,26 @@ fn format_wheel_audit_report_text(report: &WheelAuditReport) -> String {
     }
 
     out
+}
+
+fn format_source_security_scan_summary(out: &mut String, report: &WheelAuditReport) {
+    let _ = writeln!(
+        out,
+        "FoxGuard source scan: {}",
+        if report.source_security_scan.enabled {
+            "enabled"
+        } else {
+            "unavailable"
+        }
+    );
+    let _ = writeln!(
+        out,
+        "FoxGuard files inspected: {}, findings: {}",
+        report.source_security_scan.scanned_file_count, report.source_security_scan.finding_count
+    );
+    if let Some(error) = &report.source_security_scan.scan_error {
+        let _ = writeln!(out, "FoxGuard scan warning: {error}");
+    }
 }
 
 fn format_virus_scan_summary(out: &mut String, report: &WheelAuditReport) {
@@ -1178,6 +1200,7 @@ fn audit_heading(kind: WheelAuditFindingKind) -> &'static str {
         WheelAuditFindingKind::PostInstallClue => "Post-install behavior clues",
         WheelAuditFindingKind::PythonAstSuspiciousBehavior => "Python AST suspicious behavior",
         WheelAuditFindingKind::SuspiciousDependency => "Suspicious dependencies in METADATA",
+        WheelAuditFindingKind::SourceSecurityFinding => "FoxGuard source security findings",
         WheelAuditFindingKind::VirusSignatureMatch => "YARA virus signature matches",
     }
 }

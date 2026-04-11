@@ -1,9 +1,9 @@
 use crate::{
     ArgonPasswordHasher, ArtifactDownloadRetryPolicy, ArtifactStorageBackend, DatabaseStoreKind,
-    FileSystemObjectStorage, InMemoryRegistryStore, JsonAttestationSigner, OpenDalObjectStorage,
-    PostgresRegistryStore, PySentryVulnerabilityScanner, PypiMirrorClient, Settings,
-    Sha256TokenHasher, SimpleJwksOidcVerifier, SqliteRegistryStore, YaraWheelVirusScanner,
-    ZipWheelArchiveReader,
+    FileSystemObjectStorage, FoxGuardWheelSourceSecurityScanner, InMemoryRegistryStore,
+    JsonAttestationSigner, OpenDalObjectStorage, PostgresRegistryStore,
+    PySentryVulnerabilityScanner, PypiMirrorClient, Settings, Sha256TokenHasher,
+    SimpleJwksOidcVerifier, SqliteRegistryStore, YaraWheelVirusScanner, ZipWheelArchiveReader,
 };
 use log::{info, warn};
 use pyregistry_application::{
@@ -61,6 +61,7 @@ pub async fn build_application(
         Arc::new(YaraWheelVirusScanner::from_rules_dir(
             settings.security.yara_rules_path.clone(),
         )),
+        Arc::new(FoxGuardWheelSourceSecurityScanner::default()),
         Arc::new(SystemClock),
         Arc::new(UuidGenerator),
         settings.pypi.mirror_download_concurrency,

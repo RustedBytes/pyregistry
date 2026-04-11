@@ -12,9 +12,9 @@ use pyregistry_application::{
     WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport, WheelAuditUseCase,
 };
 use pyregistry_infrastructure::{
-    ArtifactDownloadRetryPolicy, FilesystemDistributionInspector, LoggingConfig, LoggingTimestamp,
-    PypiMirrorClient, Settings, YaraWheelVirusScanner, ZipWheelArchiveReader, build_application,
-    seed_application,
+    ArtifactDownloadRetryPolicy, FilesystemDistributionInspector,
+    FoxGuardWheelSourceSecurityScanner, LoggingConfig, LoggingTimestamp, PypiMirrorClient,
+    Settings, YaraWheelVirusScanner, ZipWheelArchiveReader, build_application, seed_application,
 };
 use pyregistry_web::{
     AppState, MirrorJobs, RateLimitConfig as WebRateLimitConfig, RateLimiter, router,
@@ -585,6 +585,7 @@ async fn audit_wheel(project: String, wheel: PathBuf, settings: &Settings) -> an
         Arc::new(YaraWheelVirusScanner::from_rules_dir(
             settings.security.yara_rules_path.clone(),
         )),
+        Arc::new(FoxGuardWheelSourceSecurityScanner::default()),
     );
     let report = use_case
         .audit(AuditWheelCommand {
@@ -835,11 +836,14 @@ fn print_wheel_audit_report(report: &WheelAuditReport) {
     println!("Wheel audit: {}", report.wheel_filename);
     println!("Project: {}", report.project_name);
     println!("Scanned files: {}", report.scanned_file_count);
+    print_source_security_scan_summary(report);
     print_virus_scan_summary(report);
 
     if report.findings.is_empty() {
         println!();
-        println!("No suspicious heuristic signals or YARA virus signatures were detected.");
+        println!(
+            "No suspicious heuristic signals, FoxGuard findings, or YARA virus signatures were detected."
+        );
         return;
     }
 
@@ -849,6 +853,7 @@ fn print_wheel_audit_report(report: &WheelAuditReport) {
         WheelAuditFindingKind::PostInstallClue,
         WheelAuditFindingKind::PythonAstSuspiciousBehavior,
         WheelAuditFindingKind::SuspiciousDependency,
+        WheelAuditFindingKind::SourceSecurityFinding,
         WheelAuditFindingKind::VirusSignatureMatch,
     ] {
         let findings: Vec<_> = report
@@ -875,6 +880,24 @@ fn print_wheel_finding(finding: &WheelAuditFinding) {
     }
     for evidence in &finding.evidence {
         println!("  evidence: {}", evidence);
+    }
+}
+
+fn print_source_security_scan_summary(report: &WheelAuditReport) {
+    println!(
+        "FoxGuard source scan: {}",
+        if report.source_security_scan.enabled {
+            "enabled"
+        } else {
+            "unavailable"
+        }
+    );
+    println!(
+        "FoxGuard files inspected: {}, findings: {}",
+        report.source_security_scan.scanned_file_count, report.source_security_scan.finding_count
+    );
+    if let Some(error) = &report.source_security_scan.scan_error {
+        println!("FoxGuard scan warning: {error}");
     }
 }
 
@@ -907,6 +930,7 @@ fn audit_heading(kind: WheelAuditFindingKind) -> &'static str {
         WheelAuditFindingKind::PostInstallClue => "Post-install behavior clues",
         WheelAuditFindingKind::PythonAstSuspiciousBehavior => "Python AST suspicious behavior",
         WheelAuditFindingKind::SuspiciousDependency => "Suspicious dependencies in METADATA",
+        WheelAuditFindingKind::SourceSecurityFinding => "FoxGuard source security findings",
         WheelAuditFindingKind::VirusSignatureMatch => "YARA virus signature matches",
     }
 }

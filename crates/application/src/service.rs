@@ -1,7 +1,7 @@
 use crate::{
     ApplicationError, AttestationSigner, Clock, IdGenerator, MirrorClient, ObjectStorage,
     OidcVerifier, PasswordHasher, RegistryStore, TokenHasher, VulnerabilityScanner,
-    WheelArchiveReader, WheelVirusScanner,
+    WheelArchiveReader, WheelSourceSecurityScanner, WheelVirusScanner,
 };
 use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
@@ -20,6 +20,7 @@ pub struct PyregistryApp {
     pub(crate) vulnerability_scanner: Arc<dyn VulnerabilityScanner>,
     pub(crate) wheel_archive_reader: Arc<dyn WheelArchiveReader>,
     pub(crate) wheel_virus_scanner: Arc<dyn WheelVirusScanner>,
+    pub(crate) wheel_source_security_scanner: Arc<dyn WheelSourceSecurityScanner>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) ids: Arc<dyn IdGenerator>,
     pub(crate) mirror_download_concurrency: usize,
@@ -39,6 +40,7 @@ impl PyregistryApp {
         vulnerability_scanner: Arc<dyn VulnerabilityScanner>,
         wheel_archive_reader: Arc<dyn WheelArchiveReader>,
         wheel_virus_scanner: Arc<dyn WheelVirusScanner>,
+        wheel_source_security_scanner: Arc<dyn WheelSourceSecurityScanner>,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdGenerator>,
         mirror_download_concurrency: usize,
@@ -54,6 +56,7 @@ impl PyregistryApp {
             vulnerability_scanner,
             wheel_archive_reader,
             wheel_virus_scanner,
+            wheel_source_security_scanner,
             clock,
             ids,
             mirror_download_concurrency: mirror_download_concurrency.max(1),

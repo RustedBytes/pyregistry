@@ -1,7 +1,8 @@
 use crate::{
     ApplicationError, AuditStoredWheelCommand, AuditWheelCommand, WheelArchiveEntry,
     WheelArchiveReader, WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport,
-    WheelVirusScanSummary, WheelVirusScanner,
+    WheelSourceSecurityScanSummary, WheelSourceSecurityScanner, WheelVirusScanSummary,
+    WheelVirusScanner,
 };
 use log::{debug, info, warn};
 use pyregistry_domain::ProjectName;
@@ -17,6 +18,7 @@ const MAX_PYTHON_SOURCE_BYTES: usize = 1024 * 1024;
 pub struct WheelAuditUseCase {
     archive_reader: Arc<dyn WheelArchiveReader>,
     virus_scanner: Arc<dyn WheelVirusScanner>,
+    source_security_scanner: Arc<dyn WheelSourceSecurityScanner>,
 }
 
 impl WheelAuditUseCase {
@@ -24,10 +26,12 @@ impl WheelAuditUseCase {
     pub fn new(
         archive_reader: Arc<dyn WheelArchiveReader>,
         virus_scanner: Arc<dyn WheelVirusScanner>,
+        source_security_scanner: Arc<dyn WheelSourceSecurityScanner>,
     ) -> Self {
         Self {
             archive_reader,
             virus_scanner,
+            source_security_scanner,
         }
     }
 
@@ -62,6 +66,32 @@ impl WheelAuditUseCase {
             &archive.entries,
             expected_project.normalized(),
         ));
+        let source_security_scan = match self.source_security_scanner.scan_archive(&archive) {
+            Ok(result) => {
+                if result.findings.is_empty() {
+                    info!(
+                        "source security scan completed for `{}` with no findings (files={})",
+                        archive.wheel_filename, result.scanned_file_count
+                    );
+                } else {
+                    warn!(
+                        "source security scan found {} issue(s) in `{}`",
+                        result.findings.len(),
+                        archive.wheel_filename
+                    );
+                }
+                let summary = WheelSourceSecurityScanSummary::from_result(&result);
+                findings.extend(result.findings);
+                summary
+            }
+            Err(error) => {
+                warn!(
+                    "source security scan did not complete for `{}`: {}",
+                    archive.wheel_filename, error
+                );
+                WheelSourceSecurityScanSummary::failed(error.to_string())
+            }
+        };
         let virus_scan = match self.virus_scanner.scan_archive(&archive) {
             Ok(result) => {
                 if result.findings.is_empty() {
@@ -108,6 +138,7 @@ impl WheelAuditUseCase {
             project_name,
             wheel_filename: archive.wheel_filename,
             scanned_file_count: archive.entries.len(),
+            source_security_scan,
             virus_scan,
             findings,
         })
@@ -153,6 +184,7 @@ impl crate::PyregistryApp {
         WheelAuditUseCase::new(
             self.wheel_archive_reader.clone(),
             self.wheel_virus_scanner.clone(),
+            self.wheel_source_security_scanner.clone(),
         )
         .audit_archive(command.project_name, archive)
     }
@@ -1070,7 +1102,10 @@ fn dependency_name(requirement: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{WheelArchiveSnapshot, WheelAuditFindingKind, WheelVirusScanResult};
+    use crate::{
+        WheelArchiveSnapshot, WheelAuditFindingKind, WheelSourceSecurityScanResult,
+        WheelVirusScanResult,
+    };
     use std::path::Path;
 
     struct FakeReader {
@@ -1119,6 +1154,32 @@ mod tests {
         }
     }
 
+    struct FakeSourceSecurityScanner;
+
+    impl crate::WheelSourceSecurityScanner for FakeSourceSecurityScanner {
+        fn scan_archive(
+            &self,
+            archive: &WheelArchiveSnapshot,
+        ) -> Result<WheelSourceSecurityScanResult, ApplicationError> {
+            let findings = archive
+                .entries
+                .iter()
+                .filter(|entry| entry.contents.windows(7).any(|window| window == b"AKIAIOS"))
+                .map(|entry| WheelAuditFinding {
+                    kind: WheelAuditFindingKind::SourceSecurityFinding,
+                    path: Some(entry.path.clone()),
+                    summary: "FoxGuard critical finding: possible hardcoded secret".into(),
+                    evidence: vec!["rule=secret/aws-access-key-id".into()],
+                })
+                .collect();
+
+            Ok(WheelSourceSecurityScanResult {
+                scanned_file_count: archive.entries.len(),
+                findings,
+            })
+        }
+    }
+
     #[test]
     fn reports_requested_audit_signals() {
         let reader = Arc::new(FakeReader {
@@ -1162,10 +1223,18 @@ Requires-Dist: helper @ https://example.com/helper.whl
                         path: "demo_pkg/payload.dat".into(),
                         contents: b"EICAR test payload".to_vec(),
                     },
+                    WheelArchiveEntry {
+                        path: "demo_pkg/secrets.py".into(),
+                        contents: b"AWS_KEY = 'AKIAIOSFODNN7EXAMPLE'".to_vec(),
+                    },
                 ],
             },
         });
-        let use_case = WheelAuditUseCase::new(reader, Arc::new(FakeVirusScanner));
+        let use_case = WheelAuditUseCase::new(
+            reader,
+            Arc::new(FakeVirusScanner),
+            Arc::new(FakeSourceSecurityScanner),
+        );
 
         let report = use_case
             .audit(AuditWheelCommand {
@@ -1174,7 +1243,8 @@ Requires-Dist: helper @ https://example.com/helper.whl
             })
             .expect("audit report");
 
-        assert_eq!(report.scanned_file_count, 6);
+        assert_eq!(report.scanned_file_count, 7);
+        assert_eq!(report.source_security_scan.finding_count, 1);
         assert_eq!(report.virus_scan.signature_rule_count, 1);
         assert_eq!(report.virus_scan.match_count, 1);
         assert!(
@@ -1212,6 +1282,12 @@ Requires-Dist: helper @ https://example.com/helper.whl
                 .findings
                 .iter()
                 .any(|finding| finding.kind == WheelAuditFindingKind::VirusSignatureMatch)
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.kind == WheelAuditFindingKind::SourceSecurityFinding)
         );
     }
 

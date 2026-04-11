@@ -1,0 +1,240 @@
+use foxguard::{Finding, engine, rules::RuleRegistry, secrets};
+use log::{debug, info, warn};
+use pyregistry_application::{
+    ApplicationError, WheelArchiveSnapshot, WheelAuditFinding, WheelAuditFindingKind,
+    WheelSourceSecurityScanResult, WheelSourceSecurityScanner,
+};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+use uuid::Uuid;
+
+const MAX_SNIPPET_LEN: usize = 240;
+
+pub struct FoxGuardWheelSourceSecurityScanner {
+    registry: RuleRegistry,
+}
+
+impl Default for FoxGuardWheelSourceSecurityScanner {
+    fn default() -> Self {
+        Self {
+            registry: RuleRegistry::new(),
+        }
+    }
+}
+
+impl WheelSourceSecurityScanner for FoxGuardWheelSourceSecurityScanner {
+    fn scan_archive(
+        &self,
+        archive: &WheelArchiveSnapshot,
+    ) -> Result<WheelSourceSecurityScanResult, ApplicationError> {
+        let root = std::env::temp_dir().join(format!("pyregistry-foxguard-{}", Uuid::new_v4()));
+        let scan_result = self.scan_archive_in_temp_dir(archive, &root);
+
+        if let Err(error) = fs::remove_dir_all(&root) {
+            if root.exists() {
+                warn!(
+                    "failed to clean FoxGuard temporary directory {}: {}",
+                    root.display(),
+                    error
+                );
+            }
+        }
+
+        scan_result
+    }
+}
+
+impl FoxGuardWheelSourceSecurityScanner {
+    fn scan_archive_in_temp_dir(
+        &self,
+        archive: &WheelArchiveSnapshot,
+        root: &Path,
+    ) -> Result<WheelSourceSecurityScanResult, ApplicationError> {
+        fs::create_dir_all(root).map_err(|error| {
+            ApplicationError::External(format!(
+                "FoxGuard temp directory creation failed at {}: {error}",
+                root.display()
+            ))
+        })?;
+
+        let paths = materialize_archive_entries(archive, root)?;
+        info!(
+            "running FoxGuard source security scan for `{}` across {} archive file(s)",
+            archive.wheel_filename,
+            paths.len()
+        );
+
+        let source_scan = engine::scan_paths_with_root(root, &paths, &self.registry);
+        debug!(
+            "FoxGuard source rules scanned {} language file(s) in {:?}",
+            source_scan.files_scanned, source_scan.duration
+        );
+
+        let mut findings = Vec::new();
+        findings.extend(
+            source_scan
+                .findings
+                .into_iter()
+                .map(|finding| map_foxguard_finding("source-rule", root, finding)),
+        );
+        findings.extend(
+            secrets::scan_paths_with_config(root, &paths, &secrets::SecretScanConfig::default())
+                .into_iter()
+                .map(|finding| map_foxguard_finding("secret", root, finding)),
+        );
+
+        Ok(WheelSourceSecurityScanResult {
+            scanned_file_count: paths.len(),
+            findings,
+        })
+    }
+}
+
+fn materialize_archive_entries(
+    archive: &WheelArchiveSnapshot,
+    root: &Path,
+) -> Result<Vec<PathBuf>, ApplicationError> {
+    let mut paths = Vec::with_capacity(archive.entries.len());
+
+    for entry in &archive.entries {
+        let Some(path) = safe_archive_path(root, &entry.path) else {
+            warn!(
+                "skipping unsafe wheel entry `{}` during FoxGuard scan of `{}`",
+                entry.path, archive.wheel_filename
+            );
+            continue;
+        };
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                ApplicationError::External(format!(
+                    "FoxGuard temp directory creation failed at {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        fs::write(&path, &entry.contents).map_err(|error| {
+            ApplicationError::External(format!(
+                "FoxGuard temp file write failed at {}: {error}",
+                path.display()
+            ))
+        })?;
+        paths.push(path);
+    }
+
+    Ok(paths)
+}
+
+fn safe_archive_path(root: &Path, archive_path: &str) -> Option<PathBuf> {
+    let mut safe_path = root.to_path_buf();
+    let mut has_normal_component = false;
+
+    for component in Path::new(archive_path).components() {
+        match component {
+            Component::Normal(part) => {
+                safe_path.push(part);
+                has_normal_component = true;
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    has_normal_component.then_some(safe_path)
+}
+
+fn map_foxguard_finding(source: &str, root: &Path, finding: Finding) -> WheelAuditFinding {
+    let severity = finding.severity.to_string().to_ascii_uppercase();
+    let mut evidence = vec![
+        format!("scanner=FoxGuard {source}"),
+        format!("rule={}", finding.rule_id),
+        format!("severity={severity}"),
+        format!("location=line {}, column {}", finding.line, finding.column),
+    ];
+
+    if let Some(cwe) = &finding.cwe {
+        evidence.push(format!("cwe={cwe}"));
+    }
+
+    let snippet = finding.snippet.trim();
+    if !snippet.is_empty() {
+        evidence.push(format!("snippet={}", truncate(snippet, MAX_SNIPPET_LEN)));
+    }
+
+    WheelAuditFinding {
+        kind: WheelAuditFindingKind::SourceSecurityFinding,
+        path: relative_finding_path(root, &finding.file),
+        summary: format!("FoxGuard {severity} finding: {}", finding.description),
+        evidence,
+    }
+}
+
+fn relative_finding_path(root: &Path, finding_file: &str) -> Option<String> {
+    let path = Path::new(finding_file);
+    path.strip_prefix(root)
+        .ok()
+        .or_else(|| path.strip_prefix(".").ok())
+        .unwrap_or(path)
+        .to_str()
+        .map(|value| value.replace('\\', "/"))
+        .filter(|value| !value.is_empty())
+}
+
+fn truncate(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        return value.to_string();
+    }
+
+    let mut truncated = value
+        .chars()
+        .scan(0usize, |used, ch| {
+            let next = *used + ch.len_utf8();
+            if next > max_len {
+                None
+            } else {
+                *used = next;
+                Some(ch)
+            }
+        })
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyregistry_application::WheelArchiveEntry;
+
+    #[test]
+    fn rejects_archive_paths_that_escape_temp_root() {
+        let root = Path::new("/tmp/pyregistry-foxguard-test");
+
+        assert!(safe_archive_path(root, "../escape.py").is_none());
+        assert!(safe_archive_path(root, "/absolute.py").is_none());
+        assert!(safe_archive_path(root, "pkg/module.py").is_some());
+    }
+
+    #[test]
+    fn reports_foxguard_secret_findings_from_archive_contents() {
+        let scanner = FoxGuardWheelSourceSecurityScanner::default();
+        let archive = WheelArchiveSnapshot {
+            wheel_filename: "demo-0.1.0-py3-none-any.whl".into(),
+            entries: vec![WheelArchiveEntry {
+                path: "demo/secrets.py".into(),
+                contents: b"AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE'".to_vec(),
+            }],
+        };
+
+        let result = scanner.scan_archive(&archive).expect("FoxGuard scan");
+
+        assert_eq!(result.scanned_file_count, 1);
+        assert!(result.findings.iter().any(|finding| {
+            finding.kind == WheelAuditFindingKind::SourceSecurityFinding
+                && finding
+                    .evidence
+                    .iter()
+                    .any(|value| value.contains("secret/aws-access-key-id"))
+        }));
+    }
+}
