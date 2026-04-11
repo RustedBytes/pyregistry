@@ -1,4 +1,5 @@
 mod crypto;
+mod distribution_validation;
 mod mirror;
 mod oidc;
 mod security;
@@ -12,6 +13,7 @@ mod wheel_archive;
 mod wiring;
 
 pub use crypto::*;
+pub use distribution_validation::*;
 pub use mirror::*;
 pub use oidc::*;
 pub use security::*;

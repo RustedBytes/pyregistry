@@ -258,6 +258,9 @@ Commands:
 scripts/pyregistry-release.sh serve
 cargo run -p pyregistry -- init-config --path pyregistry.toml --force
 scripts/pyregistry-release.sh audit-wheel --project rsloop --wheel rsloop-0.1.14-cp314-cp314t-win_arm64.whl
+scripts/pyregistry-release.sh validate-dist --file dist/demo-0.1.0-py3-none-any.whl --sha256 <expected-sha256>
+scripts/pyregistry-release.sh validate-dist --file dist/demo-0.1.0.tar.gz
+scripts/pyregistry-release.sh validate-dist-all --tenant acme
 scripts/pyregistry-release.sh check-registry --tenant acme
 ```
 
@@ -275,6 +278,16 @@ file is not present locally. The audit checks:
 - Suspicious Python imports and runtime calls using RustPython AST analysis.
 - Suspicious dependencies in `METADATA`.
 - YARA virus signature matches using the configured rule directory.
+
+`validate-dist` checks downloaded `.whl`, `.tar.gz`, and `.tgz` files before you
+trust or import them. It computes SHA-256, optionally compares it with
+`--sha256`, and fully reads the zip or tar.gz archive so corrupt payloads fail
+fast.
+
+`validate-dist-all` performs the same checksum and archive checks for stored
+registry artifact blobs. Use `--tenant` and `--project` to narrow the scope; it
+reports missing object-storage blobs, checksum mismatches, corrupt archives, and
+source formats this validator does not yet support.
 
 `check-registry` checks package versions stored in the current metadata store
 for known vulnerabilities through the PySentry adapter.

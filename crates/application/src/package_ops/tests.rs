@@ -1,17 +1,18 @@
 use super::*;
 use crate::{
-    AttestationSigner, CancellationSignal, Clock, IdGenerator, MirrorClient,
-    MirroredArtifactSnapshot, ObjectStorage, OidcVerifier, PackageVulnerabilityQuery,
-    PackageVulnerabilityReport, PasswordHasher, RegistryOverview, RegistryStore, SearchHit,
-    TokenHasher, VulnerabilityScanner, WheelArchiveReader, WheelArchiveSnapshot,
-    WheelVirusScanResult, WheelVirusScanner,
+    AttestationSigner, CancellationSignal, Clock, DistributionFileInspector,
+    DistributionInspection, DistributionKind, IdGenerator, MirrorClient, MirroredArtifactSnapshot,
+    ObjectStorage, OidcVerifier, PackageVulnerabilityQuery, PackageVulnerabilityReport,
+    PasswordHasher, RegistryDistributionValidationStatus, RegistryOverview, RegistryStore,
+    SearchHit, TokenHasher, ValidateRegistryDistributionsCommand, VulnerabilityScanner,
+    WheelArchiveReader, WheelArchiveSnapshot, WheelVirusScanResult, WheelVirusScanner,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use pyregistry_domain::{
-    AdminUser, ApiToken, Artifact, ArtifactId, AttestationBundle, AuditEvent, MirrorRule, Project,
-    ProjectId, ProjectName, ProjectSource, PublishIdentity, Release, ReleaseId, ReleaseVersion,
-    Tenant, TenantId, TenantSlug, TokenId, TrustedPublisher,
+    AdminUser, ApiToken, Artifact, ArtifactId, AttestationBundle, AuditEvent, DigestSet,
+    MirrorRule, Project, ProjectId, ProjectName, ProjectSource, PublishIdentity, Release,
+    ReleaseId, ReleaseVersion, Tenant, TenantId, TenantSlug, TokenId, TrustedPublisher,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -104,6 +105,109 @@ async fn refresh_mirrored_projects_stops_before_work_when_cancelled() {
     assert!(matches!(error, ApplicationError::Cancelled(_)));
     assert_eq!(mirror.project_fetch_count(), 0);
     assert_eq!(mirror.fetch_count(), 0);
+}
+
+#[tokio::test]
+async fn validate_registry_distributions_reports_checksum_and_missing_blob_failures() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true));
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(0));
+    let app = test_app(store.clone(), storage.clone(), mirror, 2);
+    let release = Release {
+        id: ReleaseId::new(Uuid::from_u128(200)),
+        project_id: ProjectId::new(Uuid::from_u128(101)),
+        version: ReleaseVersion::new("1.0.0").expect("version"),
+        yanked: None,
+        created_at: fixed_now(),
+    };
+    store.save_release(release).await.expect("save release");
+
+    let valid_bytes = b"valid wheel bytes".to_vec();
+    let mismatch_bytes = b"changed wheel bytes".to_vec();
+    let valid_sha256 = hex::encode(Sha256::digest(&valid_bytes));
+    store
+        .save_artifact(
+            Artifact::new(
+                ArtifactId::new(Uuid::from_u128(300)),
+                ReleaseId::new(Uuid::from_u128(200)),
+                "internal-1.0.0-py3-none-any.whl",
+                valid_bytes.len() as u64,
+                DigestSet::new(valid_sha256, None).expect("digest"),
+                "objects/valid.whl",
+                fixed_now(),
+            )
+            .expect("valid artifact"),
+        )
+        .await
+        .expect("save valid artifact");
+    store
+        .save_artifact(
+            Artifact::new(
+                ArtifactId::new(Uuid::from_u128(301)),
+                ReleaseId::new(Uuid::from_u128(200)),
+                "internal-1.0.0-cp314-cp314-linux_x86_64.whl",
+                mismatch_bytes.len() as u64,
+                DigestSet::new("a".repeat(64), None).expect("digest"),
+                "objects/mismatch.whl",
+                fixed_now(),
+            )
+            .expect("mismatch artifact"),
+        )
+        .await
+        .expect("save mismatch artifact");
+    store
+        .save_artifact(
+            Artifact::new(
+                ArtifactId::new(Uuid::from_u128(302)),
+                ReleaseId::new(Uuid::from_u128(200)),
+                "internal-1.0.0.tar.gz",
+                42,
+                DigestSet::new("b".repeat(64), None).expect("digest"),
+                "objects/missing.tar.gz",
+                fixed_now(),
+            )
+            .expect("missing artifact"),
+        )
+        .await
+        .expect("save missing artifact");
+    storage
+        .put("objects/valid.whl", valid_bytes)
+        .await
+        .expect("put valid bytes");
+    storage
+        .put("objects/mismatch.whl", mismatch_bytes)
+        .await
+        .expect("put mismatch bytes");
+
+    let report = app
+        .validate_registry_distributions(
+            &FakeDistributionInspector,
+            ValidateRegistryDistributionsCommand {
+                tenant_slug: Some("acme".into()),
+                project_name: Some("internal".into()),
+            },
+        )
+        .await
+        .expect("registry distribution validation");
+
+    assert!(!report.is_valid());
+    assert_eq!(report.tenant_count, 1);
+    assert_eq!(report.project_count, 1);
+    assert_eq!(report.release_count, 1);
+    assert_eq!(report.artifact_count, 3);
+    assert_eq!(report.valid_count, 1);
+    assert_eq!(report.invalid_count, 2);
+    assert_eq!(report.checksum_mismatch_count, 1);
+    assert_eq!(report.missing_blob_count, 1);
+    assert!(report.items.iter().any(|item| {
+        item.filename == "internal-1.0.0-cp314-cp314-linux_x86_64.whl"
+            && item.status == RegistryDistributionValidationStatus::ChecksumMismatch
+            && item.actual_sha256 == Some(hex::encode(Sha256::digest(b"changed wheel bytes")))
+    }));
+    assert!(report.items.iter().any(|item| {
+        item.filename == "internal-1.0.0.tar.gz"
+            && item.status == RegistryDistributionValidationStatus::MissingBlob
+    }));
 }
 
 fn test_app(
@@ -742,6 +846,36 @@ impl WheelVirusScanner for UnusedWheelVirusScanner {
             signature_rule_count: 0,
             skipped_rule_count: 0,
             findings: Vec::new(),
+        })
+    }
+}
+
+struct FakeDistributionInspector;
+
+impl DistributionFileInspector for FakeDistributionInspector {
+    fn inspect_distribution(
+        &self,
+        _path: &Path,
+    ) -> Result<DistributionInspection, ApplicationError> {
+        Err(ApplicationError::External(
+            "path distribution inspection is unused".into(),
+        ))
+    }
+
+    fn inspect_distribution_bytes(
+        &self,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<DistributionInspection, ApplicationError> {
+        Ok(DistributionInspection {
+            kind: if filename.ends_with(".whl") {
+                DistributionKind::Wheel
+            } else {
+                DistributionKind::SourceTarGz
+            },
+            size_bytes: bytes.len() as u64,
+            sha256: hex::encode(Sha256::digest(bytes)),
+            archive_entry_count: 1,
         })
     }
 }

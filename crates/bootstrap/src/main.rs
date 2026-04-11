@@ -4,13 +4,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 use env_logger::Env;
 use log::{debug, error, info, warn};
 use pyregistry_application::{
-    ApplicationError, AuditWheelCommand, CancellationSignal, MirrorRefreshReport, PyregistryApp,
-    RegistrySecurityReport, WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport,
-    WheelAuditUseCase,
+    ApplicationError, AuditWheelCommand, CancellationSignal, DistributionChecksumStatus,
+    DistributionValidationReport, DistributionValidationUseCase, MirrorRefreshReport,
+    PyregistryApp, RegistryDistributionValidationItem, RegistryDistributionValidationReport,
+    RegistryDistributionValidationStatus, RegistrySecurityReport, ValidateDistributionCommand,
+    ValidateRegistryDistributionsCommand, WheelAuditFinding, WheelAuditFindingKind,
+    WheelAuditReport, WheelAuditUseCase,
 };
 use pyregistry_infrastructure::{
-    LoggingConfig, LoggingTimestamp, PypiMirrorClient, Settings, YaraWheelVirusScanner,
-    ZipWheelArchiveReader, build_application, seed_application,
+    FilesystemDistributionInspector, LoggingConfig, LoggingTimestamp, PypiMirrorClient, Settings,
+    YaraWheelVirusScanner, ZipWheelArchiveReader, build_application, seed_application,
 };
 use pyregistry_web::{
     AppState, MirrorJobs, RateLimitConfig as WebRateLimitConfig, RateLimiter, router,
@@ -78,6 +81,40 @@ enum Command {
         #[arg(long, value_name = "PATH", help = "Path to the wheel file")]
         wheel: PathBuf,
     },
+    #[command(
+        name = "validate-dist",
+        visible_alias = "validate-artifact",
+        about = "Validate a downloaded wheel or source tar.gz distribution"
+    )]
+    ValidateDist {
+        #[arg(
+            long,
+            alias = "path",
+            value_name = "PATH",
+            help = "Path to a .whl, .tar.gz, or .tgz distribution file"
+        )]
+        file: PathBuf,
+        #[arg(
+            long,
+            value_name = "HEX",
+            help = "Expected SHA-256 checksum to compare against"
+        )]
+        sha256: Option<String>,
+    },
+    #[command(
+        name = "validate-dist-all",
+        about = "Validate every stored wheel and source tar.gz file in the registry"
+    )]
+    ValidateDistAll {
+        #[arg(long, value_name = "TENANT", help = "Limit validation to one tenant")]
+        tenant: Option<String>,
+        #[arg(
+            long,
+            value_name = "PROJECT",
+            help = "Limit validation to one project; requires --tenant"
+        )]
+        project: Option<String>,
+    },
     #[command(about = "Check package versions stored in the registry for known vulnerabilities")]
     CheckRegistry {
         #[arg(long, value_name = "TENANT", help = "Limit checks to one tenant")]
@@ -135,6 +172,23 @@ async fn main() -> anyhow::Result<()> {
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             audit_wheel(project, wheel, &settings).await
+        }
+        Command::ValidateDist { file, sha256 } => {
+            let settings =
+                Settings::load_for_cli(config_path).context("failed to load settings")?;
+            init_logging(&settings.logging);
+            log_build_mode();
+            debug!("parsed CLI arguments: {cli_debug}");
+            validate_distribution(file, sha256)
+        }
+        Command::ValidateDistAll { tenant, project } => {
+            let config_source = describe_settings_source(config_path.as_deref());
+            let settings =
+                Settings::load_for_cli(config_path).context("failed to load settings")?;
+            init_logging(&settings.logging);
+            log_build_mode();
+            debug!("parsed CLI arguments: {cli_debug}");
+            validate_registry_distributions(settings, config_source, tenant, project).await
         }
         Command::CheckRegistry { tenant, project } => {
             let config_source = describe_settings_source(config_path.as_deref());
@@ -551,6 +605,62 @@ async fn check_registry(
     Ok(())
 }
 
+fn validate_distribution(file: PathBuf, sha256: Option<String>) -> anyhow::Result<()> {
+    info!("validating distribution file {}", file.display());
+    let use_case = DistributionValidationUseCase::new(Arc::new(FilesystemDistributionInspector));
+    let report = use_case
+        .validate(ValidateDistributionCommand {
+            file_path: file,
+            expected_sha256: sha256,
+        })
+        .context("distribution validation failed")?;
+
+    print_distribution_validation_report(&report);
+    if !report.is_valid() {
+        anyhow::bail!("distribution checksum validation failed");
+    }
+
+    Ok(())
+}
+
+async fn validate_registry_distributions(
+    settings: Settings,
+    config_source: String,
+    tenant: Option<String>,
+    project: Option<String>,
+) -> anyhow::Result<()> {
+    if project.is_some() && tenant.is_none() {
+        anyhow::bail!("--project requires --tenant so the package scope is unambiguous");
+    }
+
+    info!("validating stored registry distributions using settings from {config_source}");
+    let app = build_application(&settings).context("failed to build application services")?;
+    seed_application(&app, &settings)
+        .await
+        .context("failed to seed application")?;
+    let inspector = FilesystemDistributionInspector;
+    let report = app
+        .validate_registry_distributions(
+            &inspector,
+            ValidateRegistryDistributionsCommand {
+                tenant_slug: tenant,
+                project_name: project,
+            },
+        )
+        .await
+        .context("registry distribution validation failed")?;
+
+    print_registry_distribution_validation_report(&report);
+    if !report.is_valid() {
+        anyhow::bail!(
+            "registry distribution validation failed: {} invalid file(s)",
+            report.invalid_count
+        );
+    }
+
+    Ok(())
+}
+
 async fn ensure_wheel_is_available(project: &str, wheel: &Path) -> anyhow::Result<()> {
     if wheel.exists() {
         info!("using local wheel file at {}", wheel.display());
@@ -590,6 +700,99 @@ async fn ensure_wheel_is_available(project: &str, wheel: &Path) -> anyhow::Resul
         }
     }
     Ok(())
+}
+
+fn print_distribution_validation_report(report: &DistributionValidationReport) {
+    println!("Distribution validation: {}", report.file_path.display());
+    println!("Kind: {}", report.inspection.kind.label());
+    println!("Size: {} bytes", report.inspection.size_bytes);
+    println!("SHA256: {}", report.inspection.sha256);
+    println!(
+        "Archive: valid ({} file entries read)",
+        report.inspection.archive_entry_count
+    );
+
+    match &report.checksum {
+        DistributionChecksumStatus::NotProvided => {
+            println!("Checksum: not provided");
+        }
+        DistributionChecksumStatus::Matched { expected } => {
+            println!("Checksum: matched ({expected})");
+        }
+        DistributionChecksumStatus::Mismatched { expected, actual } => {
+            println!("Checksum: mismatch");
+            println!("Expected: {expected}");
+            println!("Actual:   {actual}");
+        }
+    }
+}
+
+fn print_registry_distribution_validation_report(report: &RegistryDistributionValidationReport) {
+    println!("Registry distribution validation");
+    println!("Tenants checked: {}", report.tenant_count);
+    println!("Projects checked: {}", report.project_count);
+    println!("Releases checked: {}", report.release_count);
+    println!("Files checked: {}", report.artifact_count);
+    println!("Valid files: {}", report.valid_count);
+    println!("Invalid files: {}", report.invalid_count);
+    println!("Missing blobs: {}", report.missing_blob_count);
+    println!("Checksum mismatches: {}", report.checksum_mismatch_count);
+    println!("Invalid archives: {}", report.invalid_archive_count);
+    println!(
+        "Unsupported distributions: {}",
+        report.unsupported_distribution_count
+    );
+    println!("Storage errors: {}", report.storage_error_count);
+
+    if report.items.is_empty() {
+        println!();
+        println!("No distribution files were found for the selected scope.");
+        return;
+    }
+
+    let invalid_items = report
+        .items
+        .iter()
+        .filter(|item| item.status != RegistryDistributionValidationStatus::Valid)
+        .collect::<Vec<_>>();
+    if invalid_items.is_empty() {
+        println!();
+        println!("All stored distribution files are valid.");
+        return;
+    }
+
+    println!();
+    println!("Invalid files");
+    for item in invalid_items {
+        print_registry_distribution_validation_item(item);
+    }
+}
+
+fn print_registry_distribution_validation_item(item: &RegistryDistributionValidationItem) {
+    println!(
+        "- {}/{}/{} {}: {}",
+        item.tenant_slug,
+        item.project_name,
+        item.version,
+        item.filename,
+        item.status.label()
+    );
+    if let Some(actual_sha256) = &item.actual_sha256 {
+        println!("  expected sha256: {}", item.expected_sha256);
+        println!("  actual sha256:   {actual_sha256}");
+    }
+    if let Some(actual_size_bytes) = item.actual_size_bytes {
+        println!(
+            "  size: recorded={} bytes actual={} bytes",
+            item.recorded_size_bytes, actual_size_bytes
+        );
+    }
+    if let Some(entry_count) = item.archive_entry_count {
+        println!("  archive entries read: {entry_count}");
+    }
+    if let Some(error) = &item.error {
+        println!("  error: {error}");
+    }
 }
 
 fn print_wheel_audit_report(report: &WheelAuditReport) {
