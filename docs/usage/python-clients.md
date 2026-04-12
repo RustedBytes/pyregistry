@@ -100,8 +100,10 @@ Trusted publishing is intended for CI systems:
 4. CI receives a short-lived publish token.
 5. CI uploads to `/t/{tenant}/legacy/` with `twine`.
 
-The local template includes a development JWKS issuer. Company environments
-should configure real issuer, JWKS, and audience values and register trusted
+The local template includes development issuer values that point at
+`http://127.0.0.1:8081/jwks.json`, but this checkout does not include a signing
+fixture. Provide local JWKS material for experiments or configure real issuer,
+JWKS, and audience values before using trusted publishing. Register trusted
 publishers per tenant and project.
 
 ## Recommended Company Defaults

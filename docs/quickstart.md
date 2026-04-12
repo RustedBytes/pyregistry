@@ -10,7 +10,7 @@ Install:
 - Rust stable with Edition 2024 support.
 - `cargo-nextest` for the workspace test runner.
 - `cargo-llvm-cov` for coverage gates.
-- Docker Compose if you want local Postgres, MinIO, and the test JWKS server.
+- Docker Compose if you want local Postgres, MinIO, and helper services.
 - Python tooling such as `pip`, `uv`, and `twine` for client smoke tests.
 
 ```bash
@@ -45,7 +45,7 @@ The generated local template uses:
 - SQLite metadata at `.pyregistry/pyregistry.sqlite3`.
 - OpenDAL filesystem artifact storage at `.pyregistry/blobs`.
 - A local superadmin account.
-- A development OIDC issuer entry for the local JWKS test server.
+- A development OIDC issuer entry that points at a local JWKS URL.
 
 Default local admin credentials are:
 
@@ -77,10 +77,10 @@ metadata store is empty.
 
 ## Optional Local Services
 
-Start Postgres, MinIO, and the local JWKS test server:
+Start the optional local dependencies without starting the registry container:
 
 ```bash
-docker compose up -d
+docker compose up -d postgres minio minio-init
 ```
 
 This starts:
@@ -90,7 +90,11 @@ This starts:
 | Postgres | `127.0.0.1:5432` | Persistent metadata store option. |
 | MinIO S3 API | `127.0.0.1:9000` | S3-compatible artifact storage option. |
 | MinIO console | `127.0.0.1:9001` | Local object storage console. |
-| JWKS server | `127.0.0.1:8081` | Local OIDC issuer keys for trusted publishing tests. |
+
+The Compose file also defines a `jwks` nginx service for local OIDC
+experiments, but this repository does not ship a signing-key fixture. Provide a
+`docker/jwks/jwks.json` file or replace the generated issuer settings before
+testing trusted publishing end to end.
 
 Generate a MinIO-oriented config:
 

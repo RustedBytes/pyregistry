@@ -21,14 +21,18 @@ cargo nextest run --workspace --profile ci
 ./scripts/coverage.sh --profile ci
 ```
 
-The coverage gate defaults to 95 percent line coverage over the stable core
-surface. The script omits the binary bootstrap entrypoint and live PostgreSQL
-adapter by default; set `COVERAGE_IGNORE_FILENAME_REGEX` to replace that ignore
-list. To experiment locally:
+The coverage gate defaults to 95 percent total line coverage and 95 percent
+line coverage for every reported Rust source file over the stable core surface.
+The script omits the binary bootstrap entrypoint and live PostgreSQL adapter by
+default; set `COVERAGE_IGNORE_FILENAME_REGEX` to replace that ignore list. To
+experiment locally:
 
 ```bash
 COVERAGE_MIN_LINES=90 ./scripts/coverage.sh
 ```
+
+Use `COVERAGE_MIN_FILE_LINES` when you need to adjust the per-file threshold
+for a local experiment.
 
 ## Feature Workflow
 

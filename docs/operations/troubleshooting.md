@@ -96,6 +96,8 @@ Check:
 
 - The issuer is configured in `[[oidc_issuers]]`.
 - The JWKS URL is reachable from the service.
+- For local experiments, a real `jwks.json` fixture exists at the configured
+  URL; the generated config points at a placeholder local endpoint.
 - The audience in the incoming token matches the configured audience.
 - The provider matches the trusted publisher.
 - Registered claim rules match the token claims exactly.

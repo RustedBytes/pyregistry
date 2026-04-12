@@ -68,7 +68,8 @@ Important use case areas:
 - Trusted publisher registration and OIDC token minting.
 - Yank, unyank, purge, and audit trail workflows.
 - Distribution validation.
-- Vulnerability and wheel security scanning.
+- Vulnerability checks and wheel audit orchestration.
+- Deterministic wheel audit heuristics, including RustPython AST checks.
 
 Application commands are plain Rust models such as:
 
@@ -98,7 +99,7 @@ Ports are traits in the application layer. Infrastructure implements them.
 | `VulnerabilityScanner` | Known vulnerability reports. |
 | `WheelArchiveReader` | Wheel archive reading. |
 | `WheelVirusScanner` | YARA virus scanning. |
-| `WheelSourceSecurityScanner` | Source-level wheel checks. |
+| `WheelSourceSecurityScanner` | External source-level wheel checks. |
 | `DistributionFileInspector` | Local and stored distribution validation. |
 | `Clock` | Current time. |
 | `IdGenerator` | UUID generation. |
@@ -137,7 +138,8 @@ It owns:
 - OIDC JWKS verification.
 - Password and token hashing.
 - PySentry vulnerability scanning.
-- RustPython and YARA-based wheel checks.
+- YARA virus scanning.
+- FoxGuard source security scanning.
 - Supplied asset embedding.
 
 Infrastructure errors should be mapped before they cross inward. Do not leak raw

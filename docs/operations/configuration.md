@@ -4,13 +4,16 @@ Pyregistry loads runtime settings from TOML or environment variables. Keep
 configuration in the infrastructure layer; domain and application code should
 receive already-built ports and values.
 
-## Loading Order
+## Settings Source
 
-Settings are loaded in this order:
+The CLI chooses one settings source:
 
 1. Explicit `--config <PATH>` passed to the CLI.
-2. `pyregistry.toml` in the current directory.
-3. Environment variables.
+2. Otherwise, `pyregistry.toml` in the current directory when it exists.
+3. Otherwise, environment variables.
+
+Environment variables are a fallback source. They do not override values from a
+TOML file that was selected by `--config` or by the default path lookup.
 
 Only TOML config files are supported for file-based configuration. Config paths
 must use a `.toml` suffix.
@@ -206,6 +209,11 @@ jwks_url = "http://127.0.0.1:8081/jwks.json"
 audience = "pyregistry"
 ```
 
+The generated local template points at `http://127.0.0.1:8081/jwks.json` as a
+development placeholder. This repository does not ship a signing-key fixture, so
+provide a JWKS file for local experiments or replace the issuer, JWKS, and
+audience values before testing trusted publishing.
+
 Company environments should configure real issuer URLs, JWKS URLs, and audience
 values. Register trusted publishers in the admin UI so issuer identities map to
 specific tenant projects.
@@ -218,16 +226,48 @@ Common environment variables:
 | --- | --- |
 | `BIND_ADDRESS` | HTTP bind address. |
 | `BLOB_ROOT` | Local blob root. |
+| `SUPERADMIN_EMAIL` | Bootstrap superadmin login. |
+| `SUPERADMIN_PASSWORD` | Bootstrap superadmin password. |
+| `COOKIE_SECRET` | Secret used for signed web cookies. |
 | `DATABASE_STORE` | Metadata backend. |
 | `SQLITE_PATH` or `SQLITE_DATABASE_PATH` | SQLite database path. |
 | `DATABASE_URL` or `POSTGRES_URL` | Postgres connection URL. |
+| `POSTGRES_MAX_CONNECTIONS` | Maximum Postgres pool connections. |
+| `POSTGRES_MIN_CONNECTIONS` | Minimum Postgres pool connections. |
+| `POSTGRES_ACQUIRE_TIMEOUT_SECONDS` | Postgres connection acquire timeout. |
+| `ARTIFACT_STORAGE_BACKEND` | Artifact backend: `opendal` or `filesystem`. |
+| `OPENDAL_SCHEME` | OpenDAL scheme such as `fs` or `s3`. |
+| `OPENDAL_OPTIONS` | Comma-separated OpenDAL `key=value` options. |
+| `OPENDAL_ROOT` | OpenDAL root option. |
+| `OPENDAL_BUCKET` | OpenDAL bucket option for S3-compatible storage. |
+| `OPENDAL_ENDPOINT` | OpenDAL endpoint option for S3-compatible storage. |
+| `OPENDAL_REGION` | OpenDAL region option. |
+| `OPENDAL_ACCESS_KEY_ID` | OpenDAL access key ID option. |
+| `OPENDAL_SECRET_ACCESS_KEY` | OpenDAL secret access key option. |
+| `OPENDAL_SESSION_TOKEN` | OpenDAL session token option. |
+| `OPENDAL_DISABLE_CONFIG_LOAD` | OpenDAL option to skip ambient config loading. |
+| `OPENDAL_DISABLE_EC2_METADATA` | OpenDAL option to skip EC2 metadata lookup. |
+| `OPENDAL_ENABLE_VIRTUAL_HOST_STYLE` | OpenDAL S3 virtual-host-style option. |
+| `OPENDAL_ALLOW_ANONYMOUS` | OpenDAL anonymous access option. |
 | `PYPI_BASE_URL` or `PYPI_URL` | Upstream PyPI-compatible base URL. |
+| `PYPI_MIRROR_DOWNLOAD_CONCURRENCY` | Parallel artifact downloads during mirroring. |
+| `PYPI_ARTIFACT_DOWNLOAD_MAX_ATTEMPTS` | Mirror artifact download retry attempts. |
+| `PYPI_ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MILLIS` | Initial mirror retry backoff. |
+| `PYPI_MIRROR_UPDATE_ENABLED` | Enable or disable the background mirror updater. |
+| `PYPI_MIRROR_UPDATE_INTERVAL_SECONDS` | Background mirror refresh interval. |
+| `PYPI_MIRROR_UPDATE_ON_STARTUP` | Refresh mirrored projects when the service starts. |
 | `YARA_RULES_PATH` | External YARA rules directory. |
 | `VULNERABILITY_WEBHOOK_URL` | Discord-compatible webhook URL for vulnerable package notifications. |
 | `VULNERABILITY_WEBHOOK_USERNAME` | Optional webhook display name. |
 | `VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS` | Webhook POST timeout. |
 | `RATE_LIMIT_ENABLED` | Enable or disable API rate limiting. |
+| `RATE_LIMIT_REQUESTS_PER_MINUTE` | Sustained per-client request rate. |
+| `RATE_LIMIT_BURST` | Per-client burst capacity. |
+| `RATE_LIMIT_MAX_TRACKED_CLIENTS` | Maximum number of rate-limit client buckets. |
 | `RATE_LIMIT_TRUST_PROXY_HEADERS` | Use trusted proxy headers for client IPs. |
 | `VALIDATION_DISTRIBUTION_PARALLELISM` | Default artifact validation workers. |
 | `LOG_FILTER` | Log filter string. |
+| `LOG_MODULE_PATH` | Include module paths in logs. |
+| `LOG_TARGET` | Include log targets. |
+| `LOG_TIMESTAMP` | Log timestamp style: `off`, `seconds`, `millis`, `micros`, or `nanos`. |
 | `OIDC_ISSUERS` | Comma-separated issuer entries in `provider|issuer|jwks_url|audience` form. |
