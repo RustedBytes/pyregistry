@@ -15,7 +15,6 @@ use axum::{
     routing::{get, post},
 };
 
-#[must_use]
 pub fn router(state: AppState) -> Router {
     let rate_limit_layer =
         middleware::from_fn_with_state(state.clone(), rate_limit::enforce_api_rate_limit);
