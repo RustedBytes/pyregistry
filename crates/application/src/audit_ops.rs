@@ -932,17 +932,15 @@ fn suspicious_dependency_findings(
         let metadata = String::from_utf8_lossy(&entry.contents);
         let mut evidence = Vec::new();
 
-        if let Some(name) = metadata_field(&metadata, "Name") {
-            if let Ok(metadata_project) = ProjectName::new(name.to_string()) {
-                if metadata_project.normalized() != expected_project_normalized {
+        if let Some(name) = metadata_field(&metadata, "Name")
+            && let Ok(metadata_project) = ProjectName::new(name.to_string())
+                && metadata_project.normalized() != expected_project_normalized {
                     evidence.push(format!(
                         "metadata project name `{}` does not match requested project `{}`",
                         metadata_project.original(),
                         expected_project_normalized
                     ));
                 }
-            }
-        }
 
         for dependency in metadata
             .lines()

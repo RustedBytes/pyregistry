@@ -174,14 +174,13 @@ impl DigestSet {
             });
         }
 
-        if let Some(ref digest) = blake2b_256 {
-            if !valid.is_match(digest) {
+        if let Some(ref digest) = blake2b_256
+            && !valid.is_match(digest) {
                 return Err(DomainError::InvalidValue {
                     field: "blake2b_256",
                     message: "blake2b digest must be 64 hexadecimal characters".into(),
                 });
             }
-        }
 
         Ok(Self {
             sha256: sha256.to_ascii_lowercase(),

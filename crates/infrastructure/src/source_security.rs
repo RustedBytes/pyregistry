@@ -30,15 +30,14 @@ impl WheelSourceSecurityScanner for FoxGuardWheelSourceSecurityScanner {
         let root = std::env::temp_dir().join(format!("pyregistry-foxguard-{}", Uuid::new_v4()));
         let scan_result = self.scan_archive_in_temp_dir(archive, &root);
 
-        if let Err(error) = fs::remove_dir_all(&root) {
-            if root.exists() {
+        if let Err(error) = fs::remove_dir_all(&root)
+            && root.exists() {
                 warn!(
                     "failed to clean FoxGuard temporary directory {}: {}",
                     root.display(),
                     error
                 );
             }
-        }
 
         scan_result
     }

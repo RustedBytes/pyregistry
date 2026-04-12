@@ -176,7 +176,7 @@ fn inspect_zip_archive<R: Read + Seek>(
     mut archive: ZipArchive<R>,
     label: &str,
 ) -> Result<usize, ApplicationError> {
-    if archive.len() == 0 {
+    if archive.is_empty() {
         return Err(ApplicationError::Conflict(format!(
             "wheel archive `{label}` is empty"
         )));
@@ -260,7 +260,7 @@ fn inspect_source_zip_archive<R: Read + Seek>(
     mut archive: ZipArchive<R>,
     label: &str,
 ) -> Result<usize, ApplicationError> {
-    if archive.len() == 0 {
+    if archive.is_empty() {
         return Err(ApplicationError::Conflict(format!(
             "source zip archive `{label}` is empty"
         )));

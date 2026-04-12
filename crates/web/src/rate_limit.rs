@@ -228,11 +228,10 @@ fn should_rate_limit_path(path: &str) -> bool {
 }
 
 fn client_key(request: &Request, trust_proxy_headers: bool) -> String {
-    if trust_proxy_headers {
-        if let Some(forwarded) = forwarded_client(request.headers()) {
+    if trust_proxy_headers
+        && let Some(forwarded) = forwarded_client(request.headers()) {
             return forwarded;
         }
-    }
 
     request
         .extensions()

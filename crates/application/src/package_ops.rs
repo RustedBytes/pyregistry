@@ -43,15 +43,13 @@ impl PyregistryApp {
             .store
             .get_project_by_normalized_name(tenant.id, project_name.normalized())
             .await?
-        {
-            if matches!(project.source, ProjectSource::Local) {
+            && matches!(project.source, ProjectSource::Local) {
                 debug!(
                     "using local project `{}` for tenant `{tenant_slug}` without consulting the mirror",
                     project.name.original()
                 );
                 return Ok(Some(project));
             }
-        }
 
         if !tenant.mirror_rule.enabled {
             info!(
