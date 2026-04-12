@@ -4,7 +4,7 @@ coverage = "llvm-cov nextest --workspace --summary-only --fail-under-lines 40"
 coverage-ci = "llvm-cov nextest --workspace --profile ci --summary-only --fail-under-lines 40"
 
 [build]
-rustflags = ["-Ctarget-cpu=x86-64"]
+rustflags = ["-Ctarget-cpu=native"]
 
 [registries.crates-io]
 protocol = "sparse"
