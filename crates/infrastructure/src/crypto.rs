@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use pyregistry_application::{ApplicationError, AttestationSigner, PasswordHasher, TokenHasher};
 use pyregistry_domain::{Artifact, PublishIdentity};
-use rand_core::OsRng;
+use argon2::password_hash::rand_core::OsRng;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
