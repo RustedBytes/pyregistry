@@ -29,7 +29,8 @@ Implemented today:
 - SQLite metadata store by default, with in-memory available for throwaway runs.
 - OpenDAL artifact storage with filesystem and S3/MinIO configuration.
 - Per-client rate limiting for package and OIDC API endpoints.
-- Wheel audit CLI and UI modal with RustPython AST checks, heuristics, and YARA virus signatures.
+- Wheel audit CLI and UI modal with RustPython AST checks, FoxGuard source
+  checks, heuristics, and YARA virus signatures.
 - PySentry-backed known vulnerability checks for package versions.
 - Bundled HTML templates and vendored YARA signature material, so the binary can
   run without a repository checkout.
@@ -117,14 +118,15 @@ Build and start the registry with the local Compose stack:
 docker compose up --build
 ```
 
-This starts:
+This starts the following published services, reachable from the host through
+Docker Compose port mappings:
 
-- Pyregistry on `127.0.0.1:3000`, backed by SQLite and filesystem artifact
-  storage in the `pyregistry-data` volume.
-- Postgres on `127.0.0.1:5432`.
-- MinIO S3 API on `127.0.0.1:9000`.
-- MinIO console on `127.0.0.1:9001`.
-- JWKS test server on `127.0.0.1:8081`.
+- Pyregistry at `http://127.0.0.1:3000`, backed by SQLite and filesystem
+  artifact storage in the `pyregistry-data` volume.
+- Postgres at `127.0.0.1:5432`.
+- MinIO S3 API at `127.0.0.1:9000`.
+- MinIO console at `127.0.0.1:9001`.
+- JWKS test server at `127.0.0.1:8081`.
 
 To start only the registry and the JWKS test server:
 
@@ -226,6 +228,11 @@ target = false
 timestamp = "seconds"
 ```
 
+The current PostgreSQL adapter uses a single `tokio-postgres` connection with
+connection pipelining. `max_connections` and `min_connections` are accepted
+configuration fields for compatibility with future pooling, but they do not
+create a connection pool today.
+
 S3/MinIO storage example:
 
 ```toml
@@ -251,12 +258,29 @@ Useful environment variables:
 
 - `BIND_ADDRESS`
 - `BLOB_ROOT`
+- `SUPERADMIN_EMAIL`
+- `SUPERADMIN_PASSWORD`
+- `COOKIE_SECRET`
 - `DATABASE_STORE`
 - `SQLITE_PATH` or `SQLITE_DATABASE_PATH`
 - `DATABASE_URL` or `POSTGRES_URL`
 - `POSTGRES_MAX_CONNECTIONS`
 - `POSTGRES_MIN_CONNECTIONS`
 - `POSTGRES_ACQUIRE_TIMEOUT_SECONDS`
+- `ARTIFACT_STORAGE_BACKEND`
+- `OPENDAL_SCHEME`
+- `OPENDAL_OPTIONS`
+- `OPENDAL_ROOT`
+- `OPENDAL_BUCKET`
+- `OPENDAL_ENDPOINT`
+- `OPENDAL_REGION`
+- `OPENDAL_ACCESS_KEY_ID`
+- `OPENDAL_SECRET_ACCESS_KEY`
+- `OPENDAL_SESSION_TOKEN`
+- `OPENDAL_DISABLE_CONFIG_LOAD`
+- `OPENDAL_DISABLE_EC2_METADATA`
+- `OPENDAL_ENABLE_VIRTUAL_HOST_STYLE`
+- `OPENDAL_ALLOW_ANONYMOUS`
 - `PYPI_BASE_URL` or `PYPI_URL`
 - `PYPI_MIRROR_DOWNLOAD_CONCURRENCY`
 - `PYPI_ARTIFACT_DOWNLOAD_MAX_ATTEMPTS`
@@ -265,6 +289,9 @@ Useful environment variables:
 - `PYPI_MIRROR_UPDATE_INTERVAL_SECONDS`
 - `PYPI_MIRROR_UPDATE_ON_STARTUP`
 - `YARA_RULES_PATH`
+- `VULNERABILITY_WEBHOOK_URL`
+- `VULNERABILITY_WEBHOOK_USERNAME`
+- `VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS`
 - `RATE_LIMIT_ENABLED`
 - `RATE_LIMIT_REQUESTS_PER_MINUTE`
 - `RATE_LIMIT_BURST`
@@ -397,10 +424,11 @@ Pyregistry has two separate security scan paths:
 
 - Known vulnerability checks use `pysentry` and the PyPA advisory source. Package
   pages show a release-file summary, and `check-registry` exposes a CLI view.
-- Wheel content checks use RustPython AST analysis for Python files, built-in
-  heuristics for package layout/binaries, and VirusTotal `yara-x` over the
-  configured YARA rule directory. The same audit output is available from the
-  `audit-wheel` CLI and the package page "Wheel scan" modal.
+- Wheel content checks use RustPython AST analysis for Python files, FoxGuard
+  source and secret checks, built-in heuristics for package layout/binaries,
+  and VirusTotal `yara-x` over the configured YARA rule directory. The same
+  audit output is available from the `audit-wheel` CLI and the package page
+  "Wheel scan" modal.
 
 The repository vendors Neo23x0 `signature-base` YARA rules under
 `supplied/signature-base`. The supplied rules are licensed separately under the
