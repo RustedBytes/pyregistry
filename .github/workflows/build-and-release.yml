@@ -57,51 +57,10 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: dist/${{ matrix.artifact_name }}
 
-  build-macos-universal:
-    name: Build macOS universal
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: stable-macos-universal
-
-      - name: Build x86_64 release binary
-        run: cargo build --release -p pyregistry --target x86_64-apple-darwin
-
-      - name: Build aarch64 release binary
-        run: cargo build --release -p pyregistry --target aarch64-apple-darwin
-
-      - name: Create universal binary
-        run: |
-          mkdir -p dist
-          lipo -create \
-            target/x86_64-apple-darwin/release/pyregistry \
-            target/aarch64-apple-darwin/release/pyregistry \
-            -output dist/pyregistry-macos-universal
-          chmod +x dist/pyregistry-macos-universal
-
-      - name: Upload release binary as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pyregistry-macos-universal
-          path: dist/pyregistry-macos-universal
-
   release:
     name: Create GitHub release
     runs-on: ubuntu-latest
-    needs:
-      - build
-      - build-macos-universal
+    needs: build
     steps:
       - name: Download release binaries
         uses: actions/download-artifact@v4
