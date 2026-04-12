@@ -19,7 +19,6 @@ log.workspace = true
 opendal.workspace = true
 pyregistry-application = { path = "../application" }
 pyregistry-domain = { path = "../domain" }
-pysentry.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 reqwest.workspace = true
@@ -39,3 +38,7 @@ zip.workspace = true
 
 [dev-dependencies]
 bstr.workspace = true
+
+# pysentry declares an unconditional cdylib target; MinGW cannot link it on Windows.
+[target.'cfg(not(all(windows, target_env = "gnu")))'.dependencies]
+pysentry.workspace = true

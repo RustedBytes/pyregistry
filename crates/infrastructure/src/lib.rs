@@ -3,7 +3,10 @@ mod distribution_validation;
 mod mirror;
 mod oidc;
 mod postgres_store;
+#[cfg(not(all(windows, target_env = "gnu")))]
 mod security;
+#[cfg(all(windows, target_env = "gnu"))]
+mod security_unavailable;
 mod settings;
 mod source_security;
 mod sqlite_store;
@@ -20,7 +23,10 @@ pub use distribution_validation::*;
 pub use mirror::*;
 pub use oidc::*;
 pub use postgres_store::*;
+#[cfg(not(all(windows, target_env = "gnu")))]
 pub use security::*;
+#[cfg(all(windows, target_env = "gnu"))]
+pub use security_unavailable::*;
 pub use settings::*;
 pub use source_security::*;
 pub use sqlite_store::*;
