@@ -20,9 +20,6 @@ jobs:
           - name: windows
             os: windows-latest
             rustflags: ""
-          - name: macos-x86_64
-            os: macos-15-intel
-            rustflags: ""
           - name: macos-aarch64
             os: macos-15
             rustflags: -Ctarget-feature=-sha3
