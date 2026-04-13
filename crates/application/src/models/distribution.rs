@@ -25,6 +25,45 @@ pub struct DistributionInspection {
     pub size_bytes: u64,
     pub sha256: String,
     pub archive_entry_count: usize,
+    pub file_type: FileTypeInspection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileTypeInspection {
+    pub detector: String,
+    pub label: String,
+    pub mime_type: String,
+    pub group: String,
+    pub description: String,
+    pub score: f32,
+    pub actual_extension: Option<String>,
+    pub expected_extensions: Vec<String>,
+    pub matches_extension: bool,
+}
+
+impl FileTypeInspection {
+    #[must_use]
+    pub fn unknown_for_extension(
+        actual_extension: Option<String>,
+        expected_extensions: Vec<String>,
+    ) -> Self {
+        Self {
+            detector: "unknown".into(),
+            label: "unknown".into(),
+            mime_type: "application/octet-stream".into(),
+            group: "unknown".into(),
+            description: "file type was not inspected".into(),
+            score: 0.0,
+            actual_extension,
+            expected_extensions,
+            matches_extension: true,
+        }
+    }
+
+    #[must_use]
+    pub fn extension_mismatch(&self) -> bool {
+        !self.matches_extension
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +84,7 @@ impl DistributionValidationReport {
     #[must_use]
     pub fn is_valid(&self) -> bool {
         !matches!(self.checksum, DistributionChecksumStatus::Mismatched { .. })
+            && !self.inspection.file_type.extension_mismatch()
     }
 }
 
@@ -53,6 +93,7 @@ pub enum RegistryDistributionValidationStatus {
     Valid,
     MissingBlob,
     ChecksumMismatch,
+    ExtensionMismatch,
     InvalidArchive,
     UnsupportedDistribution,
     StorageError,
@@ -65,6 +106,7 @@ impl RegistryDistributionValidationStatus {
             Self::Valid => "valid",
             Self::MissingBlob => "missing blob",
             Self::ChecksumMismatch => "checksum mismatch",
+            Self::ExtensionMismatch => "extension mismatch",
             Self::InvalidArchive => "invalid archive",
             Self::UnsupportedDistribution => "unsupported distribution",
             Self::StorageError => "storage error",
@@ -84,6 +126,9 @@ pub struct RegistryDistributionValidationItem {
     pub recorded_size_bytes: u64,
     pub actual_size_bytes: Option<u64>,
     pub kind: Option<DistributionKind>,
+    pub detected_file_type: Option<String>,
+    pub detected_mime_type: Option<String>,
+    pub extension_matches: Option<bool>,
     pub archive_entry_count: Option<usize>,
     pub status: RegistryDistributionValidationStatus,
     pub error: Option<String>,
@@ -99,6 +144,7 @@ pub struct RegistryDistributionValidationReport {
     pub invalid_count: usize,
     pub missing_blob_count: usize,
     pub checksum_mismatch_count: usize,
+    pub extension_mismatch_count: usize,
     pub invalid_archive_count: usize,
     pub unsupported_distribution_count: usize,
     pub storage_error_count: usize,
@@ -119,6 +165,10 @@ impl RegistryDistributionValidationReport {
             RegistryDistributionValidationStatus::ChecksumMismatch => {
                 self.invalid_count += 1;
                 self.checksum_mismatch_count += 1;
+            }
+            RegistryDistributionValidationStatus::ExtensionMismatch => {
+                self.invalid_count += 1;
+                self.extension_mismatch_count += 1;
             }
             RegistryDistributionValidationStatus::InvalidArchive => {
                 self.invalid_count += 1;

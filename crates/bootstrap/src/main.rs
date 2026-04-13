@@ -788,7 +788,7 @@ fn validate_distribution(file: PathBuf, sha256: Option<String>) -> anyhow::Resul
 
     print_distribution_validation_report(&report);
     if !report.is_valid() {
-        anyhow::bail!("distribution checksum validation failed");
+        anyhow::bail!("distribution validation failed");
     }
 
     Ok(())
@@ -898,10 +898,34 @@ fn print_distribution_validation_report(report: &DistributionValidationReport) {
     println!("Kind: {}", report.inspection.kind.label());
     println!("Size: {} bytes", report.inspection.size_bytes);
     println!("SHA256: {}", report.inspection.sha256);
+    if report.inspection.file_type.matches_extension {
+        println!(
+            "Archive: valid ({} file entries read)",
+            report.inspection.archive_entry_count
+        );
+    } else {
+        println!("Archive: not inspected because the extension does not match the content");
+    }
     println!(
-        "Archive: valid ({} file entries read)",
-        report.inspection.archive_entry_count
+        "Detected type: {} ({}, score {:.3})",
+        report.inspection.file_type.label,
+        report.inspection.file_type.mime_type,
+        report.inspection.file_type.score
     );
+    if report.inspection.file_type.matches_extension {
+        println!("Extension: matches detected content");
+    } else {
+        let actual = report
+            .inspection
+            .file_type
+            .actual_extension
+            .as_deref()
+            .unwrap_or("<none>");
+        println!(
+            "Extension: mismatch (actual {actual}, expected one of {})",
+            report.inspection.file_type.expected_extensions.join(", ")
+        );
+    }
 
     match &report.checksum {
         DistributionChecksumStatus::NotProvided => {
@@ -928,6 +952,7 @@ fn print_registry_distribution_validation_report(report: &RegistryDistributionVa
     println!("Invalid files: {}", report.invalid_count);
     println!("Missing blobs: {}", report.missing_blob_count);
     println!("Checksum mismatches: {}", report.checksum_mismatch_count);
+    println!("Extension mismatches: {}", report.extension_mismatch_count);
     println!("Invalid archives: {}", report.invalid_archive_count);
     println!(
         "Unsupported distributions: {}",
@@ -980,6 +1005,13 @@ fn print_registry_distribution_validation_item(item: &RegistryDistributionValida
     }
     if let Some(entry_count) = item.archive_entry_count {
         println!("  archive entries read: {entry_count}");
+    }
+    if let Some(detected_file_type) = &item.detected_file_type {
+        let mime_type = item.detected_mime_type.as_deref().unwrap_or("unknown");
+        println!("  detected type: {detected_file_type} ({mime_type})");
+    }
+    if item.extension_matches == Some(false) {
+        println!("  extension does not match detected file type");
     }
     if let Some(error) = &item.error {
         println!("  error: {error}");
@@ -1452,11 +1484,7 @@ mod tests {
         validate_distribution(path.clone(), None).expect("valid distribution");
         let error = validate_distribution(path.clone(), Some("a".repeat(64)))
             .expect_err("checksum mismatch should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("distribution checksum validation failed")
-        );
+        assert!(error.to_string().contains("distribution validation failed"));
 
         let _ = std::fs::remove_file(path);
     }
@@ -1513,6 +1541,17 @@ mod tests {
                     size_bytes: 123,
                     sha256: "b".repeat(64),
                     archive_entry_count: 2,
+                    file_type: pyregistry_application::FileTypeInspection {
+                        detector: "fake".into(),
+                        label: "zip".into(),
+                        mime_type: "application/zip".into(),
+                        group: "archive".into(),
+                        description: "Zip archive data".into(),
+                        score: 1.0,
+                        actual_extension: Some("zip".into()),
+                        expected_extensions: vec!["zip".into()],
+                        matches_extension: true,
+                    },
                 },
                 checksum,
             });
@@ -1571,6 +1610,9 @@ mod tests {
             recorded_size_bytes: 123,
             actual_size_bytes,
             kind: Some(DistributionKind::SourceZip),
+            detected_file_type: Some("zip".into()),
+            detected_mime_type: Some("application/zip".into()),
+            extension_matches: Some(true),
             archive_entry_count,
             status,
             error,

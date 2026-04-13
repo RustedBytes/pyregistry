@@ -141,12 +141,13 @@ impl PyregistryApp {
         }
 
         info!(
-            "registry distribution validation finished: files={}, valid={}, invalid={}, missing_blobs={}, checksum_mismatches={}, invalid_archives={}, unsupported={}, storage_errors={}, parallelism={}",
+            "registry distribution validation finished: files={}, valid={}, invalid={}, missing_blobs={}, checksum_mismatches={}, extension_mismatches={}, invalid_archives={}, unsupported={}, storage_errors={}, parallelism={}",
             report.artifact_count,
             report.valid_count,
             report.invalid_count,
             report.missing_blob_count,
             report.checksum_mismatch_count,
+            report.extension_mismatch_count,
             report.invalid_archive_count,
             report.unsupported_distribution_count,
             report.storage_error_count,
@@ -269,21 +270,34 @@ async fn validate_registry_target(
         }
     };
 
-    let status = if inspection.sha256 == target.artifact.digests.sha256 {
+    let extension_mismatch_error = if inspection.file_type.extension_mismatch() {
+        Some(format!(
+            "extension `{}` does not match detected file type `{}` ({})",
+            inspection
+                .file_type
+                .actual_extension
+                .as_deref()
+                .unwrap_or("<none>"),
+            inspection.file_type.label,
+            inspection.file_type.mime_type
+        ))
+    } else {
+        None
+    };
+    let status = if inspection.file_type.extension_mismatch() {
+        RegistryDistributionValidationStatus::ExtensionMismatch
+    } else if inspection.sha256 == target.artifact.digests.sha256 {
         RegistryDistributionValidationStatus::Valid
     } else {
         RegistryDistributionValidationStatus::ChecksumMismatch
     };
-    let error = if matches!(
-        status,
-        RegistryDistributionValidationStatus::ChecksumMismatch
-    ) {
-        Some(format!(
+    let error = match status {
+        RegistryDistributionValidationStatus::ChecksumMismatch => Some(format!(
             "expected sha256 {}, got {}",
             target.artifact.digests.sha256, inspection.sha256
-        ))
-    } else {
-        None
+        )),
+        RegistryDistributionValidationStatus::ExtensionMismatch => extension_mismatch_error,
+        _ => None,
     };
 
     registry_distribution_item(
@@ -343,6 +357,15 @@ fn registry_distribution_item(
         recorded_size_bytes: artifact.size_bytes,
         actual_size_bytes: inspection.as_ref().map(|value| value.size_bytes),
         kind: inspection.as_ref().map(|value| value.kind),
+        detected_file_type: inspection
+            .as_ref()
+            .map(|value| value.file_type.label.clone()),
+        detected_mime_type: inspection
+            .as_ref()
+            .map(|value| value.file_type.mime_type.clone()),
+        extension_matches: inspection
+            .as_ref()
+            .map(|value| value.file_type.matches_extension),
         archive_entry_count: inspection.map(|value| value.archive_entry_count),
         status,
         error,
@@ -701,6 +724,8 @@ mod tests {
         assert_eq!(valid.status, RegistryDistributionValidationStatus::Valid);
         assert_eq!(valid.actual_size_bytes, Some(42));
         assert_eq!(valid.kind, Some(DistributionKind::Wheel));
+        assert_eq!(valid.detected_file_type.as_deref(), Some("zip"));
+        assert_eq!(valid.extension_matches, Some(true));
         assert_eq!(valid.archive_entry_count, Some(2));
         assert_eq!(valid.error, None);
     }
@@ -735,6 +760,17 @@ mod tests {
             size_bytes: 42,
             sha256,
             archive_entry_count: 2,
+            file_type: crate::FileTypeInspection {
+                detector: "fake".into(),
+                label: "zip".into(),
+                mime_type: "application/zip".into(),
+                group: "archive".into(),
+                description: "Zip archive data".into(),
+                score: 1.0,
+                actual_extension: Some("whl".into()),
+                expected_extensions: vec!["whl".into()],
+                matches_extension: true,
+            },
         }
     }
 

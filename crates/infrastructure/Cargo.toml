@@ -25,7 +25,9 @@ hex.workspace = true
 include_dir.workspace = true
 jsonwebtoken.workspace = true
 log.workspace = true
+magika.workspace = true
 opendal.workspace = true
+ort.workspace = true
 pyregistry-application = { path = "../application", version = "0.1.1" }
 pyregistry-domain = { path = "../domain", version = "0.1.1" }
 rand.workspace = true

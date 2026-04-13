@@ -57,6 +57,10 @@ fn distribution_labels_and_validation_statuses_are_human_readable() {
         "checksum mismatch"
     );
     assert_eq!(
+        RegistryDistributionValidationStatus::ExtensionMismatch.label(),
+        "extension mismatch"
+    );
+    assert_eq!(
         RegistryDistributionValidationStatus::InvalidArchive.label(),
         "invalid archive"
     );
@@ -77,6 +81,10 @@ fn distribution_validation_report_validity_tracks_checksum_status() {
         size_bytes: 1,
         sha256: "a".repeat(64),
         archive_entry_count: 1,
+        file_type: FileTypeInspection::unknown_for_extension(
+            Some("whl".into()),
+            vec!["whl".into()],
+        ),
     };
 
     assert!(
@@ -117,6 +125,7 @@ fn registry_distribution_report_counts_each_invalid_status() {
         RegistryDistributionValidationStatus::Valid,
         RegistryDistributionValidationStatus::MissingBlob,
         RegistryDistributionValidationStatus::ChecksumMismatch,
+        RegistryDistributionValidationStatus::ExtensionMismatch,
         RegistryDistributionValidationStatus::InvalidArchive,
         RegistryDistributionValidationStatus::UnsupportedDistribution,
         RegistryDistributionValidationStatus::StorageError,
@@ -132,17 +141,21 @@ fn registry_distribution_report_counts_each_invalid_status() {
             recorded_size_bytes: 1,
             actual_size_bytes: None,
             kind: Some(DistributionKind::Wheel),
+            detected_file_type: Some("zip".into()),
+            detected_mime_type: Some("application/zip".into()),
+            extension_matches: Some(true),
             archive_entry_count: None,
             status,
             error: None,
         });
     }
 
-    assert_eq!(report.artifact_count, 6);
+    assert_eq!(report.artifact_count, 7);
     assert_eq!(report.valid_count, 1);
-    assert_eq!(report.invalid_count, 5);
+    assert_eq!(report.invalid_count, 6);
     assert_eq!(report.missing_blob_count, 1);
     assert_eq!(report.checksum_mismatch_count, 1);
+    assert_eq!(report.extension_mismatch_count, 1);
     assert_eq!(report.invalid_archive_count, 1);
     assert_eq!(report.unsupported_distribution_count, 1);
     assert_eq!(report.storage_error_count, 1);

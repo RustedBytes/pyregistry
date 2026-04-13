@@ -2,15 +2,20 @@ use flate2::read::GzDecoder;
 use log::debug;
 use pyregistry_application::{
     ApplicationError, DistributionFileInspector, DistributionInspection, DistributionKind,
+    FileTypeInspection,
 };
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, Cursor, Read, Seek};
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
 use tar::Archive;
 use zip::ZipArchive;
 
 pub struct FilesystemDistributionInspector;
+
+static MAGIKA_SESSION: LazyLock<Mutex<Option<magika::Session>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 impl DistributionFileInspector for FilesystemDistributionInspector {
     fn inspect_distribution(
@@ -20,10 +25,15 @@ impl DistributionFileInspector for FilesystemDistributionInspector {
         let kind = distribution_kind_from_path(path)?;
         let size_bytes = file_size(path)?;
         let sha256 = sha256_file(path)?;
-        let archive_entry_count = match kind {
-            DistributionKind::Wheel => inspect_wheel_archive_path(path)?,
-            DistributionKind::SourceTarGz => inspect_source_tar_gz_archive_path(path)?,
-            DistributionKind::SourceZip => inspect_source_zip_archive_path(path)?,
+        let file_type = inspect_file_type_from_path(kind, path)?;
+        let archive_entry_count = if file_type.extension_mismatch() {
+            0
+        } else {
+            match kind {
+                DistributionKind::Wheel => inspect_wheel_archive_path(path)?,
+                DistributionKind::SourceTarGz => inspect_source_tar_gz_archive_path(path)?,
+                DistributionKind::SourceZip => inspect_source_zip_archive_path(path)?,
+            }
         };
 
         debug!(
@@ -40,6 +50,7 @@ impl DistributionFileInspector for FilesystemDistributionInspector {
             size_bytes,
             sha256,
             archive_entry_count,
+            file_type,
         })
     }
 
@@ -51,19 +62,24 @@ impl DistributionFileInspector for FilesystemDistributionInspector {
         let kind = distribution_kind_from_filename(filename, filename)?;
         let size_bytes = bytes.len() as u64;
         let sha256 = sha256_bytes(bytes);
-        let archive_entry_count = match kind {
-            DistributionKind::Wheel => {
-                let archive = ZipArchive::new(Cursor::new(bytes))
-                    .map_err(|error| ApplicationError::External(error.to_string()))?;
-                inspect_zip_archive(archive, filename)?
-            }
-            DistributionKind::SourceTarGz => {
-                inspect_source_tar_gz_reader(Cursor::new(bytes), filename)?
-            }
-            DistributionKind::SourceZip => {
-                let archive = ZipArchive::new(Cursor::new(bytes))
-                    .map_err(|error| ApplicationError::External(error.to_string()))?;
-                inspect_source_zip_archive(archive, filename)?
+        let file_type = inspect_file_type_from_bytes(kind, filename, bytes)?;
+        let archive_entry_count = if file_type.extension_mismatch() {
+            0
+        } else {
+            match kind {
+                DistributionKind::Wheel => {
+                    let archive = ZipArchive::new(Cursor::new(bytes))
+                        .map_err(|error| ApplicationError::External(error.to_string()))?;
+                    inspect_zip_archive(archive, filename)?
+                }
+                DistributionKind::SourceTarGz => {
+                    inspect_source_tar_gz_reader(Cursor::new(bytes), filename)?
+                }
+                DistributionKind::SourceZip => {
+                    let archive = ZipArchive::new(Cursor::new(bytes))
+                        .map_err(|error| ApplicationError::External(error.to_string()))?;
+                    inspect_source_zip_archive(archive, filename)?
+                }
             }
         };
 
@@ -81,6 +97,7 @@ impl DistributionFileInspector for FilesystemDistributionInspector {
             size_bytes,
             sha256,
             archive_entry_count,
+            file_type,
         })
     }
 }
@@ -120,6 +137,107 @@ fn distribution_kind_from_filename(
     Err(ApplicationError::Conflict(format!(
         "unsupported distribution file `{subject}`; expected .whl, .tar.gz, .tgz, or .zip"
     )))
+}
+
+fn inspect_file_type_from_path(
+    kind: DistributionKind,
+    path: &Path,
+) -> Result<FileTypeInspection, ApplicationError> {
+    let file_type = with_magika_session(|session| session.identify_file_sync(path))?;
+    Ok(file_type_inspection(
+        kind,
+        path.extension_label(),
+        file_type,
+    ))
+}
+
+fn inspect_file_type_from_bytes(
+    kind: DistributionKind,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<FileTypeInspection, ApplicationError> {
+    let file_type = with_magika_session(|session| session.identify_content_sync(bytes))?;
+    Ok(file_type_inspection(
+        kind,
+        extension_label_from_filename(filename),
+        file_type,
+    ))
+}
+
+fn with_magika_session<T>(
+    inspect: impl FnOnce(&mut magika::Session) -> magika::Result<T>,
+) -> Result<T, ApplicationError> {
+    let mut session = MAGIKA_SESSION
+        .lock()
+        .map_err(|_| ApplicationError::External("Magika session lock was poisoned".into()))?;
+    if session.is_none() {
+        *session = Some(magika::Session::new().map_err(|error| {
+            ApplicationError::External(format!("could not initialize Magika: {error}"))
+        })?);
+    }
+    let session = session
+        .as_mut()
+        .expect("Magika session was initialized above");
+    inspect(session).map_err(|error| ApplicationError::External(error.to_string()))
+}
+
+fn file_type_inspection(
+    kind: DistributionKind,
+    actual_extension: Option<String>,
+    file_type: magika::FileType,
+) -> FileTypeInspection {
+    let info = file_type.info();
+    FileTypeInspection {
+        detector: "magika".into(),
+        label: info.label.into(),
+        mime_type: info.mime_type.into(),
+        group: info.group.into(),
+        description: info.description.into(),
+        score: file_type.score(),
+        actual_extension,
+        expected_extensions: expected_distribution_extensions(kind)
+            .iter()
+            .map(|extension| (*extension).to_string())
+            .collect(),
+        matches_extension: expected_magika_labels(kind).contains(&info.label),
+    }
+}
+
+fn expected_distribution_extensions(kind: DistributionKind) -> &'static [&'static str] {
+    match kind {
+        DistributionKind::Wheel => &["whl"],
+        DistributionKind::SourceTarGz => &["tar.gz", "tgz"],
+        DistributionKind::SourceZip => &["zip"],
+    }
+}
+
+fn expected_magika_labels(kind: DistributionKind) -> &'static [&'static str] {
+    match kind {
+        DistributionKind::Wheel | DistributionKind::SourceZip => &["zip", "npz"],
+        DistributionKind::SourceTarGz => &["gzip"],
+    }
+}
+
+trait DistributionPathExt {
+    fn extension_label(&self) -> Option<String>;
+}
+
+impl DistributionPathExt for Path {
+    fn extension_label(&self) -> Option<String> {
+        let filename = self.file_name()?.to_str()?;
+        extension_label_from_filename(filename)
+    }
+}
+
+fn extension_label_from_filename(filename: &str) -> Option<String> {
+    let filename = filename.to_ascii_lowercase();
+    if filename.ends_with(".tar.gz") {
+        return Some("tar.gz".into());
+    }
+    filename
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_string())
+        .filter(|extension| !extension.is_empty())
 }
 
 fn file_size(path: &Path) -> Result<u64, ApplicationError> {
@@ -325,15 +443,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_wheel_archive() {
+    fn reports_extension_mismatch_before_archive_validation() {
         let path = write_temp_file("broken-0.1.0-py3-none-any.whl", b"not a zip archive");
 
-        let error = FilesystemDistributionInspector
+        let inspection = FilesystemDistributionInspector
             .inspect_distribution(&path)
-            .expect_err("invalid zip should fail");
+            .expect("mismatched content should be inspected");
 
         fs::remove_file(&path).expect("remove temp wheel");
-        assert!(matches!(error, ApplicationError::External(_)));
+        assert!(inspection.file_type.extension_mismatch());
+        assert_ne!(inspection.file_type.label, "zip");
+        assert_eq!(inspection.archive_entry_count, 0);
     }
 
     #[test]

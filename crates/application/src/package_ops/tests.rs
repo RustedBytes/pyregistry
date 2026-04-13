@@ -2500,6 +2500,17 @@ impl DistributionFileInspector for FakeDistributionInspector {
             size_bytes: bytes.len() as u64,
             sha256: hex::encode(Sha256::digest(bytes)),
             archive_entry_count: 1,
+            file_type: crate::FileTypeInspection {
+                detector: "fake".into(),
+                label: "zip".into(),
+                mime_type: "application/zip".into(),
+                group: "archive".into(),
+                description: "Zip archive data".into(),
+                score: 1.0,
+                actual_extension: Some("zip".into()),
+                expected_extensions: vec!["zip".into()],
+                matches_extension: true,
+            },
         })
     }
 }
@@ -2562,6 +2573,17 @@ impl DistributionFileInspector for ConcurrentDistributionInspector {
             size_bytes: bytes.len() as u64,
             sha256: hex::encode(Sha256::digest(bytes)),
             archive_entry_count: 1,
+            file_type: crate::FileTypeInspection {
+                detector: "fake".into(),
+                label: "zip".into(),
+                mime_type: "application/zip".into(),
+                group: "archive".into(),
+                description: "Zip archive data".into(),
+                score: 1.0,
+                actual_extension: Some("zip".into()),
+                expected_extensions: vec!["zip".into()],
+                matches_extension: true,
+            },
         })
     }
 }
