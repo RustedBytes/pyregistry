@@ -1,3 +1,5 @@
+<img src="./.github/index.jpg" alt="Pyregistry index page screenshot" width="600">
+
 # Pyregistry
 
 [![Tests](https://github.com/RustedBytes/pyregistry/actions/workflows/test.yml/badge.svg)](https://github.com/RustedBytes/pyregistry/actions/workflows/test.yml)
