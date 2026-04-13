@@ -6,15 +6,36 @@
     <title>Pyregistry Admin Login</title>
     <style>
       :root {
+        color-scheme: light;
         --bg: #f6f7f9;
         --surface: #ffffff;
+        --field: #ffffff;
         --ink: #171c24;
         --muted: #667085;
+        --text-soft: #3f4753;
         --line: #d8dee8;
+        --field-line: #c6ced9;
         --accent: #0f766e;
         --accent-strong: #0b5f59;
         --danger: #b42318;
+        --danger-bg: #fff4f3;
         --focus: #2563eb;
+      }
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --bg: #101417;
+        --surface: #171d22;
+        --field: #11171c;
+        --ink: #f4f7f8;
+        --muted: #a7b2bd;
+        --text-soft: #cad2d8;
+        --line: #2b353d;
+        --field-line: #3b4650;
+        --accent: #14b8a6;
+        --accent-strong: #5eead4;
+        --danger: #f87171;
+        --danger-bg: #3a1818;
+        --focus: #60a5fa;
       }
       * {
         box-sizing: border-box;
@@ -67,7 +88,7 @@
       .intro p {
         max-width: 520px;
         margin: 16px 0 0;
-        color: #3f4753;
+        color: var(--text-soft);
         font-size: 1.05rem;
         line-height: 1.65;
       }
@@ -95,14 +116,15 @@
       }
       label {
         margin-bottom: 7px;
-        color: #3f4753;
+        color: var(--text-soft);
         font-weight: 700;
       }
       input {
         margin: 0 0 16px;
         padding: 12px 13px;
-        border: 1px solid #c6ced9;
+        border: 1px solid var(--field-line);
         border-radius: 8px;
+        background: var(--field);
         color: var(--ink);
         font: inherit;
       }
@@ -131,10 +153,26 @@
       }
       .error {
         border-left: 4px solid var(--danger);
-        background: #fff4f3;
+        background: var(--danger-bg);
         color: var(--danger);
         padding: 10px 12px;
         border-radius: 8px;
+      }
+      .theme-toggle {
+        position: fixed;
+        top: 18px;
+        right: 18px;
+        width: auto;
+        min-height: 40px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 9px 13px;
+        background: var(--surface);
+        color: var(--ink);
+        box-shadow: 0 12px 26px rgba(23, 28, 36, 0.1);
+      }
+      .theme-toggle:hover {
+        background: var(--bg);
       }
       @media (max-width: 760px) {
         body {
@@ -154,10 +192,24 @@
         form {
           padding: 22px;
         }
+        .theme-toggle {
+          position: static;
+          margin-bottom: 18px;
+          width: 100%;
+        }
       }
     </style>
+    <script>
+      (() => {
+        const storedTheme = localStorage.getItem("pyregistry-theme");
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const theme = storedTheme || (prefersDark ? "dark" : "light");
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
   </head>
   <body>
+    <button class="theme-toggle" type="button" aria-pressed="false">Dark mode</button>
     <main class="login-shell">
       <section class="intro">
         <div class="brand">
@@ -186,5 +238,26 @@
         <button type="submit">Sign in</button>
       </form>
     </main>
+    <script>
+      (() => {
+        const button = document.querySelector(".theme-toggle");
+        if (!(button instanceof HTMLButtonElement)) {
+          return;
+        }
+
+        function applyTheme(theme) {
+          document.documentElement.dataset.theme = theme;
+          localStorage.setItem("pyregistry-theme", theme);
+          const isDark = theme === "dark";
+          button.setAttribute("aria-pressed", String(isDark));
+          button.textContent = isDark ? "Light mode" : "Dark mode";
+        }
+
+        applyTheme(document.documentElement.dataset.theme || "light");
+        button.addEventListener("click", () => {
+          applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+        });
+      })();
+    </script>
   </body>
 </html>

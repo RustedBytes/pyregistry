@@ -6,15 +6,30 @@
     <title>Pyregistry</title>
     <style>
       :root {
+        color-scheme: light;
         --bg: #f6f7f9;
         --surface: #ffffff;
         --surface-soft: #eef7f5;
         --ink: #171c24;
         --muted: #667085;
+        --text-soft: #3f4753;
         --line: #d8dee8;
         --accent: #0f766e;
         --accent-strong: #0b5f59;
         --focus: #2563eb;
+      }
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --bg: #101417;
+        --surface: #171d22;
+        --surface-soft: #14342f;
+        --ink: #f4f7f8;
+        --muted: #a7b2bd;
+        --text-soft: #cad2d8;
+        --line: #2b353d;
+        --accent: #14b8a6;
+        --accent-strong: #5eead4;
+        --focus: #60a5fa;
       }
       * {
         box-sizing: border-box;
@@ -81,6 +96,29 @@
         text-decoration: none;
         box-shadow: 0 12px 26px rgba(15, 118, 110, 0.18);
       }
+      .topbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .theme-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 14px;
+        background: var(--surface);
+        color: var(--ink);
+        cursor: pointer;
+        font: inherit;
+        font-weight: 800;
+      }
+      .theme-toggle:hover {
+        background: var(--surface-soft);
+      }
       .intro {
         display: grid;
         grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
@@ -106,7 +144,7 @@
       .lede {
         max-width: 680px;
         margin: 18px 0 0;
-        color: #3f4753;
+        color: var(--text-soft);
         font-size: 1.12rem;
         line-height: 1.65;
       }
@@ -176,6 +214,11 @@
           flex-direction: column;
           padding-bottom: 20px;
         }
+        .topbar-actions,
+        .button,
+        .theme-toggle {
+          width: 100%;
+        }
         h1 {
           font-size: 2.35rem;
         }
@@ -184,6 +227,14 @@
         }
       }
     </style>
+    <script>
+      (() => {
+        const storedTheme = localStorage.getItem("pyregistry-theme");
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const theme = storedTheme || (prefersDark ? "dark" : "light");
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
   </head>
   <body>
     <main class="shell">
@@ -195,7 +246,10 @@
             <span>Package control plane</span>
           </span>
         </a>
-        <a class="button" href="/admin/login">Admin sign in</a>
+        <div class="topbar-actions">
+          <button class="theme-toggle" type="button" aria-pressed="false">Dark mode</button>
+          <a class="button" href="/admin/login">Admin sign in</a>
+        </div>
       </nav>
 
       <section class="intro">
@@ -239,5 +293,26 @@
 
       <p class="footer-note">Use the admin console for tenant controls, package governance, trusted publishers, mirroring, and audit history.</p>
     </main>
+    <script>
+      (() => {
+        const button = document.querySelector(".theme-toggle");
+        if (!(button instanceof HTMLButtonElement)) {
+          return;
+        }
+
+        function applyTheme(theme) {
+          document.documentElement.dataset.theme = theme;
+          localStorage.setItem("pyregistry-theme", theme);
+          const isDark = theme === "dark";
+          button.setAttribute("aria-pressed", String(isDark));
+          button.textContent = isDark ? "Light mode" : "Dark mode";
+        }
+
+        applyTheme(document.documentElement.dataset.theme || "light");
+        button.addEventListener("click", () => {
+          applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+        });
+      })();
+    </script>
   </body>
 </html>

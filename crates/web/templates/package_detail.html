@@ -6,12 +6,16 @@
     <title>{{ details.project_name }} - Pyregistry</title>
     <style>
       :root {
+        color-scheme: light;
         --bg: #f6f7f9;
         --surface: #ffffff;
         --surface-soft: #eef7f5;
+        --field: #ffffff;
         --ink: #171c24;
         --muted: #667085;
+        --text-soft: #3f4753;
         --line: #d8dee8;
+        --field-line: #c6ced9;
         --accent: #0f766e;
         --accent-strong: #0b5f59;
         --focus: #2563eb;
@@ -20,6 +24,26 @@
         --warn: #b45309;
         --warn-bg: #fff7ed;
         --code-bg: #111827;
+      }
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --bg: #101417;
+        --surface: #171d22;
+        --surface-soft: #14342f;
+        --field: #11171c;
+        --ink: #f4f7f8;
+        --muted: #a7b2bd;
+        --text-soft: #cad2d8;
+        --line: #2b353d;
+        --field-line: #3b4650;
+        --accent: #14b8a6;
+        --accent-strong: #5eead4;
+        --focus: #60a5fa;
+        --danger: #f87171;
+        --danger-bg: #3a1818;
+        --warn: #fbbf24;
+        --warn-bg: #33260f;
+        --code-bg: #05080c;
       }
       * {
         box-sizing: border-box;
@@ -74,6 +98,12 @@
         color: var(--muted);
         font-size: 0.9rem;
       }
+      .topbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
       .package-header {
         display: grid;
         grid-template-columns: minmax(0, 1fr) minmax(260px, 0.35fr);
@@ -112,7 +142,7 @@
       .lede {
         max-width: 760px;
         margin-bottom: 12px;
-        color: #3f4753;
+        color: var(--text-soft);
         font-size: 1.05rem;
         line-height: 1.6;
       }
@@ -193,7 +223,7 @@
       .back-link,
       .modal-close {
         border: 1px solid var(--line);
-        background: #ffffff;
+        background: var(--surface);
         color: var(--ink);
       }
       .secondary:hover,
@@ -208,16 +238,16 @@
         width: 100%;
         min-height: 42px;
         border-radius: 8px;
-        border: 1px solid #c6ced9;
+        border: 1px solid var(--field-line);
         padding: 10px 12px;
-        background: #ffffff;
+        background: var(--field);
         color: var(--ink);
         font: inherit;
       }
       label {
         display: grid;
         gap: 6px;
-        color: #3f4753;
+        color: var(--text-soft);
         font-size: 0.92rem;
         font-weight: 700;
       }
@@ -226,7 +256,7 @@
         align-items: center;
         border: 1px solid var(--line);
         border-radius: 8px;
-        background: #ffffff;
+        background: var(--surface);
         color: var(--ink);
         padding: 5px 9px;
         font-size: 0.9rem;
@@ -451,6 +481,11 @@
           align-items: flex-start;
           flex-direction: column;
         }
+        .topbar-actions,
+        .topbar-actions a,
+        .topbar-actions button {
+          width: 100%;
+        }
         h1 {
           font-size: 2.1rem;
         }
@@ -463,6 +498,14 @@
         }
       }
     </style>
+    <script>
+      (() => {
+        const storedTheme = localStorage.getItem("pyregistry-theme");
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const theme = storedTheme || (prefersDark ? "dark" : "light");
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
   </head>
   <body>
     <main class="shell">
@@ -474,7 +517,10 @@
             <span>Package detail</span>
           </span>
         </a>
-        <a class="button-link back-link" href="/admin/t/{{ details.tenant_slug }}/packages">Back to packages</a>
+        <div class="topbar-actions">
+          <button class="secondary theme-toggle" type="button" aria-pressed="false">Dark mode</button>
+          <a class="button-link back-link" href="/admin/t/{{ details.tenant_slug }}/packages">Back to packages</a>
+        </div>
       </nav>
 
       <header class="package-header">
@@ -970,6 +1016,22 @@
             }
           });
         });
+
+        const themeButton = document.querySelector(".theme-toggle");
+        if (themeButton instanceof HTMLButtonElement) {
+          function applyTheme(theme) {
+            document.documentElement.dataset.theme = theme;
+            localStorage.setItem("pyregistry-theme", theme);
+            const isDark = theme === "dark";
+            themeButton.setAttribute("aria-pressed", String(isDark));
+            themeButton.textContent = isDark ? "Light mode" : "Dark mode";
+          }
+
+          applyTheme(document.documentElement.dataset.theme || "light");
+          themeButton.addEventListener("click", () => {
+            applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+          });
+        }
       })();
     </script>
   </body>
