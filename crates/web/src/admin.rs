@@ -1519,6 +1519,51 @@ mod tests {
     }
 
     #[test]
+    fn package_detail_template_hides_active_release_controls_in_modal() {
+        let details = PackageDetails {
+            tenant_slug: "acme".into(),
+            project_name: "rsloop".into(),
+            normalized_name: "rsloop".into(),
+            summary: String::new(),
+            description: String::new(),
+            source: "Local".into(),
+            security: PackageSecuritySummary::default(),
+            releases: vec![PackageReleaseDetails {
+                version: "0.1.14".into(),
+                yanked_reason: None,
+                artifacts: vec![PackageArtifactDetails {
+                    filename: "rsloop-0.1.14-py3-none-any.whl".into(),
+                    version: "0.1.14".into(),
+                    size_bytes: 42,
+                    sha256: "abc123".into(),
+                    object_key: "objects/rsloop.whl".into(),
+                    yanked_reason: None,
+                    security: ArtifactSecurityDetails::pending(),
+                }],
+            }],
+            trusted_publishers: Vec::new(),
+        };
+
+        let rendered = PackageDetailTemplate {
+            details: package_detail_view(details, "http://127.0.0.1:3000"),
+        }
+        .render()
+        .expect("render package detail");
+
+        let manage_position = rendered.find("Manage release").expect("manage release");
+        let modal_position = rendered
+            .find("release-governance-modal")
+            .expect("release modal");
+        let active_position = rendered
+            .find("Release is active")
+            .expect("active release controls");
+
+        assert!(manage_position < modal_position);
+        assert!(modal_position < active_position);
+        assert!(rendered.contains("document.querySelectorAll(\".manage-release-button\")"));
+    }
+
+    #[test]
     fn package_detail_template_shows_stateful_yank_controls() {
         let details = PackageDetails {
             tenant_slug: "acme".into(),

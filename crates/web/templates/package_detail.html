@@ -313,7 +313,9 @@
         margin-top: 10px;
       }
       .release-actions {
-        display: grid;
+        display: flex;
+        justify-content: flex-end;
+        align-items: flex-start;
         gap: 10px;
       }
       .yank-card {
@@ -337,6 +339,13 @@
       }
       .danger-form {
         display: inline-block;
+      }
+      .modal-actions {
+        display: grid;
+        gap: 12px;
+      }
+      .modal-actions .danger-form {
+        margin-top: 2px;
       }
       .files {
         padding: 0 16px 16px;
@@ -590,31 +599,47 @@
               </div>
             </div>
             <div class="release-actions">
-              {% match release.yanked_reason %}
-              {% when Some with (reason) %}
-              <div class="yank-card yanked">
-                <strong>Release is yanked</strong>
-                <p class="muted">Installers will avoid this release when possible.</p>
-                <p>Reason: {{ reason }}</p>
-                <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/unyank" onsubmit="return confirm('Unyank release {{ release.version }} and make it installable again?');">
-                  <button class="secondary" type="submit">Unyank release</button>
-                </form>
-              </div>
-              {% when None %}
-              <div class="yank-card">
-                <strong>Release is active</strong>
-                <p class="muted">Yank this release to discourage new installs without deleting files.</p>
-                <form class="yank-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/yank" onsubmit="return confirm('Yank release {{ release.version }}? This is reversible.');">
-                  <label>Reason
-                    <input type="text" name="reason" placeholder="for example: broken metadata">
-                  </label>
-                  <button class="warning" type="submit">Yank release</button>
-                </form>
-              </div>
-              {% endmatch %}
-              <form class="danger-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/purge" onsubmit="return confirm('Permanently purge release {{ release.version }} and its local files? This cannot be undone.');">
-                <button class="danger" type="submit">Purge release</button>
-              </form>
+              <button class="secondary manage-release-button" type="button">Manage release</button>
+              <dialog class="release-governance-modal">
+                <div class="modal-shell">
+                  <div class="modal-head">
+                    <div>
+                      <h2>Manage release {{ release.version }}</h2>
+                      <p class="muted">Yanking is reversible. Purge permanently removes this release and its local files.</p>
+                    </div>
+                    <form method="dialog">
+                      <button class="modal-close" type="submit">Close</button>
+                    </form>
+                  </div>
+                  <div class="modal-actions">
+                    {% match release.yanked_reason %}
+                    {% when Some with (reason) %}
+                    <div class="yank-card yanked">
+                      <strong>Release is yanked</strong>
+                      <p class="muted">Installers will avoid this release when possible.</p>
+                      <p>Reason: {{ reason }}</p>
+                      <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/unyank" onsubmit="return confirm('Unyank release {{ release.version }} and make it installable again?');">
+                        <button class="secondary" type="submit">Unyank release</button>
+                      </form>
+                    </div>
+                    {% when None %}
+                    <div class="yank-card">
+                      <strong>Release is active</strong>
+                      <p class="muted">Yank this release to discourage new installs without deleting files.</p>
+                      <form class="yank-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/yank" onsubmit="return confirm('Yank release {{ release.version }}? This is reversible.');">
+                        <label>Reason
+                          <input type="text" name="reason" placeholder="for example: broken metadata">
+                        </label>
+                        <button class="warning" type="submit">Yank release</button>
+                      </form>
+                    </div>
+                    {% endmatch %}
+                    <form class="danger-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/purge" onsubmit="return confirm('Permanently purge release {{ release.version }} and its local files? This cannot be undone.');">
+                      <button class="danger" type="submit">Purge release</button>
+                    </form>
+                  </div>
+                </div>
+              </dialog>
             </div>
           </div>
 
@@ -841,6 +866,17 @@
         document.querySelectorAll(".scan-wheel-button").forEach((button) => {
           button.addEventListener("click", () => {
             runWheelScan(button);
+          });
+        });
+
+        document.querySelectorAll(".manage-release-button").forEach((button) => {
+          button.addEventListener("click", () => {
+            const modal = button
+              .closest(".release-actions")
+              ?.querySelector(".release-governance-modal");
+            if (modal instanceof HTMLDialogElement) {
+              modal.showModal();
+            }
           });
         });
       })();
