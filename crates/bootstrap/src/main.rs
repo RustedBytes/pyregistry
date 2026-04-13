@@ -19,11 +19,14 @@ use pyregistry_infrastructure::{
 use pyregistry_web::{
     AppState, MirrorJobs, RateLimitConfig as WebRateLimitConfig, RateLimiter, router,
 };
+use regex::Regex;
 use std::collections::HashMap;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, watch};
@@ -48,6 +51,13 @@ struct Cli {
         help = "Load runtime settings from a TOML config file"
     )]
     config: Option<PathBuf>,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Redact secrets and personally identifying values from log messages"
+    )]
+    redact_logs: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -147,6 +157,7 @@ enum InitStorageTemplate {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config_path = cli.config.clone();
+    let redact_logs = cli.redact_logs;
     let cli_debug = format!("{cli:?}");
 
     match cli.command.unwrap_or(Command::Serve) {
@@ -154,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
             let config_source = describe_settings_source(config_path.as_deref());
             let settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
-            init_logging(&settings.logging);
+            init_logging(&settings.logging, redact_logs);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             serve(settings, config_source).await
@@ -168,14 +179,14 @@ async fn main() -> anyhow::Result<()> {
                 InitStorageTemplate::Local => Settings::new_local_template(),
                 InitStorageTemplate::Minio => Settings::new_minio_template(),
             };
-            init_logging(&settings.logging);
+            init_logging(&settings.logging, redact_logs);
             debug!("parsed CLI arguments: {cli_debug}");
             init_config(path, force, storage, settings)
         }
         Command::AuditWheel { project, wheel } => {
             let settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
-            init_logging(&settings.logging);
+            init_logging(&settings.logging, redact_logs);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             audit_wheel(project, wheel, &settings).await
@@ -183,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
         Command::ValidateDist { file, sha256 } => {
             let settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
-            init_logging(&settings.logging);
+            init_logging(&settings.logging, redact_logs);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             validate_distribution(file, sha256)
@@ -196,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
             let config_source = describe_settings_source(config_path.as_deref());
             let settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
-            init_logging(&settings.logging);
+            init_logging(&settings.logging, redact_logs);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             validate_registry_distributions(settings, config_source, tenant, project, parallelism)
@@ -206,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
             let config_source = describe_settings_source(config_path.as_deref());
             let settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
-            init_logging(&settings.logging);
+            init_logging(&settings.logging, redact_logs);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             check_registry(settings, config_source, tenant, project).await
@@ -533,7 +544,7 @@ async fn force_http_shutdown_after_signal(
     tokio::time::sleep(grace_period).await;
 }
 
-fn init_logging(logging: &LoggingConfig) {
+fn init_logging(logging: &LoggingConfig, redact_logs: bool) {
     let mut builder =
         env_logger::Builder::from_env(Env::default().default_filter_or(logging.filter.as_str()));
     match logging.timestamp {
@@ -555,8 +566,112 @@ fn init_logging(logging: &LoggingConfig) {
     }
     builder
         .format_module_path(logging.module_path)
-        .format_target(logging.target)
-        .init();
+        .format_target(logging.target);
+    if redact_logs {
+        let logging = logging.clone();
+        builder.format(move |formatter, record| format_redacted_log(formatter, record, &logging));
+    }
+    builder.init();
+}
+
+fn format_redacted_log(
+    formatter: &mut env_logger::fmt::Formatter,
+    record: &log::Record<'_>,
+    logging: &LoggingConfig,
+) -> std::io::Result<()> {
+    write_log_header(formatter, record, logging)?;
+    writeln!(
+        formatter,
+        "{}",
+        redact_log_message(&record.args().to_string())
+    )
+}
+
+fn write_log_header(
+    formatter: &mut env_logger::fmt::Formatter,
+    record: &log::Record<'_>,
+    logging: &LoggingConfig,
+) -> std::io::Result<()> {
+    let mut values = Vec::new();
+    match logging.timestamp {
+        LoggingTimestamp::Off => {}
+        LoggingTimestamp::Seconds => values.push(format!("{}", formatter.timestamp_seconds())),
+        LoggingTimestamp::Millis => values.push(format!("{}", formatter.timestamp_millis())),
+        LoggingTimestamp::Micros => values.push(format!("{}", formatter.timestamp_micros())),
+        LoggingTimestamp::Nanos => values.push(format!("{}", formatter.timestamp_nanos())),
+    }
+    values.push(format!("{:<5}", record.level()));
+    if logging.module_path
+        && let Some(module_path) = record.module_path()
+    {
+        values.push(module_path.to_string());
+    }
+    if logging.target && !record.target().is_empty() {
+        values.push(record.target().to_string());
+    }
+    if values.is_empty() {
+        Ok(())
+    } else {
+        write!(formatter, "[{}] ", values.join(" "))
+    }
+}
+
+fn redact_log_message(message: &str) -> String {
+    static URL_CREDENTIALS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@")
+            .expect("URL credential redaction regex")
+    });
+    static AUTHORIZATION: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b((?:proxy-)?authorization)(\s*[:=]\s*)([^,\s]+)(?:\s+([^,\s]+))?")
+            .expect("authorization redaction regex")
+    });
+    static SENSITIVE_KEY_VALUE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"(?ix)
+            \b(
+                admin_password|api[_-]?key|cookie|credential|oidc[_-]?token|
+                pass(?:word|wd)?|secret|secret[_-]?access[_-]?key|session|
+                session[_-]?token|token
+            )\b
+            (\s*[:=]\s*)
+            (?:"[^"]*"|'[^']*'|`[^`]*`|[^"',`\s)\]}]+)
+        "#,
+        )
+        .expect("sensitive key-value redaction regex")
+    });
+    static PYREGISTRY_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b(?:oidc|pyr)_[A-Za-z0-9._~+/=-]{8,}\b")
+            .expect("pyregistry token redaction regex")
+    });
+    static JWT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+            .expect("JWT redaction regex")
+    });
+    static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+            .expect("email redaction regex")
+    });
+
+    let redacted = URL_CREDENTIALS.replace_all(message, "${1}<redacted>@");
+    let redacted = AUTHORIZATION.replace_all(&redacted, |captures: &regex::Captures<'_>| {
+        let key = &captures[1];
+        let separator = &captures[2];
+        let scheme_or_value = &captures[3];
+        if matches!(
+            scheme_or_value.to_ascii_lowercase().as_str(),
+            "bearer" | "basic"
+        ) {
+            format!("{key}{separator}{scheme_or_value} <redacted>")
+        } else {
+            format!("{key}{separator}<redacted>")
+        }
+    });
+    let redacted = SENSITIVE_KEY_VALUE.replace_all(&redacted, "$1$2<redacted>");
+    let redacted = PYREGISTRY_TOKEN.replace_all(&redacted, "<redacted-token>");
+    let redacted = JWT.replace_all(&redacted, "<redacted-jwt>");
+    EMAIL
+        .replace_all(&redacted, "<redacted-email>")
+        .into_owned()
 }
 
 fn describe_settings_source(config_path: Option<&Path>) -> String {
@@ -1013,6 +1128,7 @@ mod tests {
 
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("Internal Python package registry service"));
+        assert!(help.contains("--redact-logs"));
         assert!(help.contains("validate-dist-all"));
 
         let version = Cli::try_parse_from(["pyregistry", "--version"]).expect_err("version exits");
@@ -1034,6 +1150,7 @@ mod tests {
         ])
         .expect("init-config");
         assert_eq!(cli.config.as_deref(), Some(Path::new("custom.toml")));
+        assert!(!cli.redact_logs);
         assert!(matches!(
             cli.command,
             Some(Command::InitConfig {
@@ -1045,6 +1162,7 @@ mod tests {
 
         let cli = Cli::try_parse_from([
             "pyregistry",
+            "--redact-logs",
             "audit-wheel",
             "--project",
             "rsloop",
@@ -1052,6 +1170,7 @@ mod tests {
             "rsloop.whl",
         ])
         .expect("audit-wheel");
+        assert!(cli.redact_logs);
         assert!(matches!(cli.command, Some(Command::AuditWheel { .. })));
 
         let cli = Cli::try_parse_from([
@@ -1072,6 +1191,31 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn log_redaction_removes_sensitive_values() {
+        let message = concat!(
+            "admin_email=admin@example.test admin_password=\"tenant secret\" ",
+            "Authorization: Bearer pyr_abcdefghijklmnopqrstuvwxyz ",
+            "oidc_token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.signature ",
+            "url=https://__token__:pyr_secretsecret@registry.example/simple/ ",
+            "cookie=admin_session=abc123"
+        );
+
+        let redacted = redact_log_message(message);
+
+        assert!(redacted.contains("admin_email=<redacted-email>"));
+        assert!(redacted.contains("admin_password=<redacted>"));
+        assert!(redacted.contains("Authorization: Bearer <redacted>"));
+        assert!(redacted.contains("oidc_token=<redacted>"));
+        assert!(redacted.contains("https://__token__:<redacted>@registry.example/simple/"));
+        assert!(redacted.contains("cookie=<redacted>"));
+        assert!(!redacted.contains("admin@example.test"));
+        assert!(!redacted.contains("tenant secret"));
+        assert!(!redacted.contains("pyr_abcdefghijklmnopqrstuvwxyz"));
+        assert!(!redacted.contains("signature"));
+        assert!(!redacted.contains("abc123"));
     }
 
     #[test]

@@ -15,6 +15,7 @@ log.workspace = true
 pyregistry-application = { path = "../application" }
 pyregistry-infrastructure = { path = "../infrastructure" }
 pyregistry-web = { path = "../web" }
+regex.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 
