@@ -29,8 +29,6 @@ pipeline.
 
 ## Current Status
 
-This is base code for a registry service, not a production release yet.
-
 Implemented today:
 
 - Multi-crate Rust workspace with Clean Architecture boundaries.
