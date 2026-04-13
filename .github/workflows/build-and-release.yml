@@ -19,21 +19,25 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            rustflags: -Ctarget-cpu=native
             artifact_name: pyregistry-linux-x86_64
             binary_name: pyregistry
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            rustflags: -Ctarget-cpu=native
             artifact_name: pyregistry-windows-x86_64.exe
             binary_name: pyregistry.exe
           - name: macos-x86_64
             os: macos-15-intel
             target: x86_64-apple-darwin
+            rustflags: -Ctarget-cpu=native
             artifact_name: pyregistry-macos-x86_64
             binary_name: pyregistry
           - name: macos-aarch64
             os: macos-15
             target: aarch64-apple-darwin
+            rustflags: ""
             artifact_name: pyregistry-macos-aarch64
             binary_name: pyregistry
 
@@ -53,6 +57,8 @@ jobs:
           key: stable-${{ matrix.target }}
 
       - name: Build release binary
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release -p pyregistry --target ${{ matrix.target }}
 
       - name: Stage release binary
