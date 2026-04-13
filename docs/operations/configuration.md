@@ -147,6 +147,7 @@ Use `in-memory` only for throwaway development runs.
 [pypi]
 base_url = "https://pypi.org"
 mirror_download_concurrency = 4
+mirror_eager_download_percent = 10
 artifact_download_max_attempts = 3
 artifact_download_initial_backoff_millis = 250
 mirror_update_enabled = true
@@ -157,6 +158,10 @@ mirror_update_on_startup = true
 For a company upstream mirror, point `base_url` to that PyPI-compatible service.
 Increase `mirror_download_concurrency` for faster caching, or lower it to reduce
 pressure on upstream services and object storage.
+By default, only the newest 10% of release versions are eagerly cached while
+older release metadata remains available for on-demand downloads. Set
+`mirror_eager_download_percent = 5` for a smaller eager cache.
+Set it to `0` to disable eager artifact caching entirely.
 
 ## Rate Limiting
 

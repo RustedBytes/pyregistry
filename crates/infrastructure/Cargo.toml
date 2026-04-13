@@ -29,8 +29,8 @@ magika = { workspace = true, optional = true }
 opendal = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
 password-hash.workspace = true
-pyregistry-application = { path = "../application", version = "0.1.1", default-features = false }
-pyregistry-domain = { path = "../domain", version = "0.1.1" }
+pyregistry-application = { path = "../application", version = "*", default-features = false }
+pyregistry-domain = { path = "../domain", version = "*" }
 rand.workspace = true
 reqwest.workspace = true
 turso = { workspace = true, optional = true }

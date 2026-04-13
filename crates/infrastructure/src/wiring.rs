@@ -27,9 +27,10 @@ pub async fn build_application(
 ) -> Result<Arc<PyregistryApp>, InfrastructureError> {
     let registry_store = build_registry_store(settings).await?;
     info!(
-        "using PyPI-compatible upstream base URL {} with mirror download concurrency {}, artifact download attempts {}, initial backoff {} ms",
+        "using PyPI-compatible upstream base URL {} with mirror download concurrency {}, eager download percent {}, artifact download attempts {}, initial backoff {} ms",
         settings.pypi.base_url,
         settings.pypi.mirror_download_concurrency,
+        settings.pypi.mirror_eager_download_percent,
         settings.pypi.artifact_download_max_attempts,
         settings.pypi.artifact_download_initial_backoff_millis
     );
@@ -58,39 +59,42 @@ pub async fn build_application(
     let package_publish_notifier = build_package_publish_notifier(settings)?;
     let wheel_audit_notifier = build_wheel_audit_notifier(settings)?;
 
-    Ok(Arc::new(PyregistryApp::new(
-        registry_store,
-        object_storage,
-        mirror_client,
-        Arc::new(SimpleJwksOidcVerifier::new(settings.oidc_issuers.clone())),
-        Arc::new(JsonAttestationSigner),
-        Arc::new(ArgonPasswordHasher),
-        Arc::new(Sha256TokenHasher),
-        Arc::new(
-            PySentryVulnerabilityScanner::with_ignored_vulnerability_ids(
-                pysentry_cache_dir(settings),
-                settings
-                    .security
-                    .scanner_ignores
-                    .pysentry_vulnerability_ids
-                    .clone(),
+    Ok(Arc::new(
+        PyregistryApp::new(
+            registry_store,
+            object_storage,
+            mirror_client,
+            Arc::new(SimpleJwksOidcVerifier::new(settings.oidc_issuers.clone())),
+            Arc::new(JsonAttestationSigner),
+            Arc::new(ArgonPasswordHasher),
+            Arc::new(Sha256TokenHasher),
+            Arc::new(
+                PySentryVulnerabilityScanner::with_ignored_vulnerability_ids(
+                    pysentry_cache_dir(settings),
+                    settings
+                        .security
+                        .scanner_ignores
+                        .pysentry_vulnerability_ids
+                        .clone(),
+                ),
             ),
-        ),
-        vulnerability_notifier,
-        package_publish_notifier,
-        wheel_audit_notifier,
-        Arc::new(ZipWheelArchiveReader),
-        Arc::new(YaraWheelVirusScanner::from_rules_dir_with_ignored_rules(
-            settings.security.yara_rules_path.clone(),
-            settings.security.scanner_ignores.yara_rule_ids.clone(),
-        )),
-        Arc::new(FoxGuardWheelSourceSecurityScanner::with_ignored_rules(
-            settings.security.scanner_ignores.foxguard_rule_ids.clone(),
-        )),
-        Arc::new(SystemClock),
-        Arc::new(UuidGenerator),
-        settings.pypi.mirror_download_concurrency,
-    )))
+            vulnerability_notifier,
+            package_publish_notifier,
+            wheel_audit_notifier,
+            Arc::new(ZipWheelArchiveReader),
+            Arc::new(YaraWheelVirusScanner::from_rules_dir_with_ignored_rules(
+                settings.security.yara_rules_path.clone(),
+                settings.security.scanner_ignores.yara_rule_ids.clone(),
+            )),
+            Arc::new(FoxGuardWheelSourceSecurityScanner::with_ignored_rules(
+                settings.security.scanner_ignores.foxguard_rule_ids.clone(),
+            )),
+            Arc::new(SystemClock),
+            Arc::new(UuidGenerator),
+            settings.pypi.mirror_download_concurrency,
+        )
+        .with_mirror_eager_download_percent(settings.pypi.mirror_eager_download_percent),
+    ))
 }
 
 async fn build_registry_store(

@@ -116,6 +116,10 @@ impl Settings {
                     "PYPI_MIRROR_DOWNLOAD_CONCURRENCY",
                     default_mirror_download_concurrency(),
                 ),
+                mirror_eager_download_percent: read_env_u8(
+                    "PYPI_MIRROR_EAGER_DOWNLOAD_PERCENT",
+                    default_mirror_eager_download_percent(),
+                ),
                 artifact_download_max_attempts: read_env_usize(
                     "PYPI_ARTIFACT_DOWNLOAD_MAX_ATTEMPTS",
                     default_artifact_download_max_attempts(),
@@ -335,6 +339,11 @@ impl Settings {
                 "mirror_download_concurrency must be greater than zero".into(),
             ));
         }
+        if self.pypi.mirror_eager_download_percent > 100 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "mirror_eager_download_percent must be between 0 and 100".into(),
+            ));
+        }
         if self.pypi.artifact_download_max_attempts == 0 {
             return Err(SettingsError::InvalidPypiConfig(
                 "artifact_download_max_attempts must be greater than zero".into(),
@@ -487,6 +496,7 @@ impl DatabaseStoreKind {
 pub struct PypiConfig {
     pub base_url: String,
     pub mirror_download_concurrency: usize,
+    pub mirror_eager_download_percent: u8,
     pub artifact_download_max_attempts: usize,
     pub artifact_download_initial_backoff_millis: u64,
     pub mirror_update_enabled: bool,
@@ -498,9 +508,10 @@ impl PypiConfig {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "base_url={}, mirror_download_concurrency={}, artifact_download_max_attempts={}, artifact_download_initial_backoff_millis={}, mirror_update_enabled={}, mirror_update_interval_seconds={}, mirror_update_on_startup={}",
+            "base_url={}, mirror_download_concurrency={}, mirror_eager_download_percent={}, artifact_download_max_attempts={}, artifact_download_initial_backoff_millis={}, mirror_update_enabled={}, mirror_update_interval_seconds={}, mirror_update_on_startup={}",
             self.base_url,
             self.mirror_download_concurrency,
+            self.mirror_eager_download_percent,
             self.artifact_download_max_attempts,
             self.artifact_download_initial_backoff_millis,
             self.mirror_update_enabled,
@@ -1006,6 +1017,7 @@ struct OpenDalStorageConfigFile {
 struct PypiConfigFile {
     base_url: String,
     mirror_download_concurrency: Option<usize>,
+    mirror_eager_download_percent: Option<u8>,
     artifact_download_max_attempts: Option<usize>,
     artifact_download_initial_backoff_millis: Option<u64>,
     mirror_update_enabled: Option<bool>,
@@ -1293,6 +1305,14 @@ impl TryFrom<PypiConfigFile> for PypiConfig {
                 "mirror_download_concurrency must be greater than zero".into(),
             ));
         }
+        let mirror_eager_download_percent = value
+            .mirror_eager_download_percent
+            .unwrap_or_else(default_mirror_eager_download_percent);
+        if mirror_eager_download_percent > 100 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "mirror_eager_download_percent must be between 0 and 100".into(),
+            ));
+        }
         let artifact_download_max_attempts = value
             .artifact_download_max_attempts
             .unwrap_or_else(default_artifact_download_max_attempts);
@@ -1321,6 +1341,7 @@ impl TryFrom<PypiConfigFile> for PypiConfig {
         Ok(Self {
             base_url,
             mirror_download_concurrency,
+            mirror_eager_download_percent,
             artifact_download_max_attempts,
             artifact_download_initial_backoff_millis,
             mirror_update_enabled: value.mirror_update_enabled.unwrap_or(true),
@@ -1335,6 +1356,7 @@ impl From<PypiConfig> for PypiConfigFile {
         Self {
             base_url: value.base_url,
             mirror_download_concurrency: Some(value.mirror_download_concurrency),
+            mirror_eager_download_percent: Some(value.mirror_eager_download_percent),
             artifact_download_max_attempts: Some(value.artifact_download_max_attempts),
             artifact_download_initial_backoff_millis: Some(
                 value.artifact_download_initial_backoff_millis,
@@ -1737,6 +1759,7 @@ fn default_pypi_config() -> PypiConfig {
     PypiConfig {
         base_url: "https://pypi.org".into(),
         mirror_download_concurrency: default_mirror_download_concurrency(),
+        mirror_eager_download_percent: default_mirror_eager_download_percent(),
         artifact_download_max_attempts: default_artifact_download_max_attempts(),
         artifact_download_initial_backoff_millis: default_artifact_download_initial_backoff_millis(
         ),
@@ -1748,6 +1771,10 @@ fn default_pypi_config() -> PypiConfig {
 
 fn default_mirror_download_concurrency() -> usize {
     4
+}
+
+fn default_mirror_eager_download_percent() -> u8 {
+    10
 }
 
 fn default_artifact_download_max_attempts() -> usize {
@@ -1919,6 +1946,13 @@ fn read_env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn read_env_u8(name: &str, default: u8) -> u8 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u8>().ok())
         .unwrap_or(default)
 }
 

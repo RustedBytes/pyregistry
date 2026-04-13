@@ -113,6 +113,7 @@ fn rejects_zero_mirror_download_concurrency() {
     let error = PypiConfig::try_from(PypiConfigFile {
         base_url: "https://pypi.org".into(),
         mirror_download_concurrency: Some(0),
+        mirror_eager_download_percent: Some(default_mirror_eager_download_percent()),
         artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
         artifact_download_initial_backoff_millis: Some(
             default_artifact_download_initial_backoff_millis(),
@@ -127,10 +128,30 @@ fn rejects_zero_mirror_download_concurrency() {
 }
 
 #[test]
+fn rejects_mirror_eager_download_percent_above_one_hundred() {
+    let error = PypiConfig::try_from(PypiConfigFile {
+        base_url: "https://pypi.org".into(),
+        mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+        mirror_eager_download_percent: Some(101),
+        artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
+        artifact_download_initial_backoff_millis: Some(
+            default_artifact_download_initial_backoff_millis(),
+        ),
+        mirror_update_enabled: Some(true),
+        mirror_update_interval_seconds: Some(default_mirror_update_interval_seconds()),
+        mirror_update_on_startup: Some(true),
+    })
+    .expect_err("mirror eager download percent above 100 should fail");
+
+    assert!(matches!(error, SettingsError::InvalidPypiConfig(_)));
+}
+
+#[test]
 fn rejects_zero_mirror_update_interval() {
     let error = PypiConfig::try_from(PypiConfigFile {
         base_url: "https://pypi.org".into(),
         mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+        mirror_eager_download_percent: Some(default_mirror_eager_download_percent()),
         artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
         artifact_download_initial_backoff_millis: Some(
             default_artifact_download_initial_backoff_millis(),
@@ -149,6 +170,7 @@ fn rejects_zero_artifact_download_retry_values() {
     let attempts_error = PypiConfig::try_from(PypiConfigFile {
         base_url: "https://pypi.org".into(),
         mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+        mirror_eager_download_percent: Some(default_mirror_eager_download_percent()),
         artifact_download_max_attempts: Some(0),
         artifact_download_initial_backoff_millis: Some(
             default_artifact_download_initial_backoff_millis(),
@@ -166,6 +188,7 @@ fn rejects_zero_artifact_download_retry_values() {
     let backoff_error = PypiConfig::try_from(PypiConfigFile {
         base_url: "https://pypi.org".into(),
         mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+        mirror_eager_download_percent: Some(default_mirror_eager_download_percent()),
         artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
         artifact_download_initial_backoff_millis: Some(0),
         mirror_update_enabled: Some(true),
@@ -246,6 +269,7 @@ fn rejects_s3_storage_without_bucket() {
         pypi: Some(PypiConfigFile {
             base_url: "https://pypi.org".into(),
             mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+            mirror_eager_download_percent: Some(default_mirror_eager_download_percent()),
             artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
             artifact_download_initial_backoff_millis: Some(
                 default_artifact_download_initial_backoff_millis(),
@@ -358,6 +382,7 @@ fn rejects_pgsql_store_without_postgres_config() {
         pypi: Some(PypiConfigFile {
             base_url: "https://pypi.org".into(),
             mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+            mirror_eager_download_percent: Some(default_mirror_eager_download_percent()),
             artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
             artifact_download_initial_backoff_millis: Some(
                 default_artifact_download_initial_backoff_millis(),
@@ -406,6 +431,7 @@ fn rejects_sqlserver_store_without_sql_server_config() {
         pypi: Some(PypiConfigFile {
             base_url: "https://pypi.org".into(),
             mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+            mirror_eager_download_percent: Some(default_mirror_eager_download_percent()),
             artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
             artifact_download_initial_backoff_millis: Some(
                 default_artifact_download_initial_backoff_millis(),
@@ -556,6 +582,7 @@ fn component_log_summaries_include_operational_knobs() {
     let pypi = PypiConfig {
         base_url: "https://mirror.example".into(),
         mirror_download_concurrency: 8,
+        mirror_eager_download_percent: 5,
         artifact_download_max_attempts: 4,
         artifact_download_initial_backoff_millis: 125,
         mirror_update_enabled: false,
@@ -564,7 +591,7 @@ fn component_log_summaries_include_operational_knobs() {
     };
     assert_eq!(
         pypi.log_safe_summary(),
-        "base_url=https://mirror.example, mirror_download_concurrency=8, artifact_download_max_attempts=4, artifact_download_initial_backoff_millis=125, mirror_update_enabled=false, mirror_update_interval_seconds=30, mirror_update_on_startup=false"
+        "base_url=https://mirror.example, mirror_download_concurrency=8, mirror_eager_download_percent=5, artifact_download_max_attempts=4, artifact_download_initial_backoff_millis=125, mirror_update_enabled=false, mirror_update_interval_seconds=30, mirror_update_on_startup=false"
     );
     assert_eq!(
         SqliteConfig {
@@ -651,6 +678,7 @@ fn rejects_invalid_component_config_files() {
         PypiConfig::try_from(PypiConfigFile {
             base_url: " ".into(),
             mirror_download_concurrency: None,
+            mirror_eager_download_percent: None,
             artifact_download_max_attempts: None,
             artifact_download_initial_backoff_millis: None,
             mirror_update_enabled: None,
@@ -663,6 +691,7 @@ fn rejects_invalid_component_config_files() {
         PypiConfig::try_from(PypiConfigFile {
             base_url: "not-a-url".into(),
             mirror_download_concurrency: None,
+            mirror_eager_download_percent: None,
             artifact_download_max_attempts: None,
             artifact_download_initial_backoff_millis: None,
             mirror_update_enabled: None,
@@ -950,6 +979,7 @@ fn loads_runtime_settings_from_environment() {
         "COOKIE_SECRET",
         "PYPI_URL",
         "PYPI_MIRROR_DOWNLOAD_CONCURRENCY",
+        "PYPI_MIRROR_EAGER_DOWNLOAD_PERCENT",
         "PYPI_ARTIFACT_DOWNLOAD_MAX_ATTEMPTS",
         "PYPI_ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MILLIS",
         "PYPI_MIRROR_UPDATE_ENABLED",
@@ -1007,6 +1037,7 @@ fn loads_runtime_settings_from_environment() {
     env.set("COOKIE_SECRET", "cookie-secret");
     env.set("PYPI_URL", "https://mirror.example/simple-root");
     env.set("PYPI_MIRROR_DOWNLOAD_CONCURRENCY", "6");
+    env.set("PYPI_MIRROR_EAGER_DOWNLOAD_PERCENT", "5");
     env.set("PYPI_ARTIFACT_DOWNLOAD_MAX_ATTEMPTS", "5");
     env.set("PYPI_ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MILLIS", "100");
     env.set("PYPI_MIRROR_UPDATE_ENABLED", "off");
@@ -1060,6 +1091,7 @@ fn loads_runtime_settings_from_environment() {
     );
     assert_eq!(settings.pypi.base_url, "https://mirror.example/simple-root");
     assert_eq!(settings.pypi.mirror_download_concurrency, 6);
+    assert_eq!(settings.pypi.mirror_eager_download_percent, 5);
     assert_eq!(settings.pypi.artifact_download_max_attempts, 5);
     assert_eq!(settings.pypi.artifact_download_initial_backoff_millis, 100);
     assert!(!settings.pypi.mirror_update_enabled);

@@ -15,6 +15,7 @@ use pyregistry_domain::{
     ProjectName, ProjectSource, Release, ReleaseId, ReleaseVersion,
 };
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 impl PyregistryApp {
     pub async fn resolve_project_from_mirror(
@@ -448,6 +449,8 @@ impl PyregistryApp {
             cache_candidates.push(MirroredArtifactCacheCandidate { version, artifact });
         }
 
+        let cache_candidates =
+            select_eager_cache_candidates(cache_candidates, self.mirror_eager_download_percent);
         let cached_artifact_count = self
             .cache_mirrored_artifacts_parallel(
                 tenant_slug,
@@ -669,6 +672,38 @@ impl PyregistryApp {
 struct MirroredArtifactCacheCandidate {
     version: ReleaseVersion,
     artifact: Artifact,
+}
+
+fn select_eager_cache_candidates(
+    candidates: Vec<MirroredArtifactCacheCandidate>,
+    percent: u8,
+) -> Vec<MirroredArtifactCacheCandidate> {
+    if percent >= 100 || candidates.is_empty() {
+        return candidates;
+    }
+    if percent == 0 {
+        return Vec::new();
+    }
+
+    let mut versions = candidates
+        .iter()
+        .map(|candidate| candidate.version.clone())
+        .collect::<Vec<_>>();
+    versions.sort();
+    versions.dedup();
+
+    let release_count = versions.len();
+    let selected_release_count = (release_count * usize::from(percent)).div_ceil(100).max(1);
+    let selected_versions = versions
+        .into_iter()
+        .rev()
+        .take(selected_release_count)
+        .collect::<BTreeSet<_>>();
+
+    candidates
+        .into_iter()
+        .filter(|candidate| selected_versions.contains(&candidate.version))
+        .collect()
 }
 
 fn validate_mirrored_artifact_payload(

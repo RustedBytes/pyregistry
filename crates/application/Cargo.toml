@@ -20,7 +20,7 @@ futures-channel.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 log.workspace = true
-pyregistry-domain = { path = "../domain", version = "0.1.1" }
+pyregistry-domain = { path = "../domain", version = "*" }
 rand.workspace = true
 rayon.workspace = true
 rustpython-parser = { workspace = true, optional = true }

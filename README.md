@@ -207,6 +207,7 @@ root = ".pyregistry/blobs"
 [pypi]
 base_url = "https://pypi.org"
 mirror_download_concurrency = 4
+mirror_eager_download_percent = 10
 artifact_download_max_attempts = 3
 artifact_download_initial_backoff_millis = 250
 mirror_update_enabled = true
@@ -527,6 +528,7 @@ The upstream base URL is configurable:
 [pypi]
 base_url = "https://pypi.org"
 mirror_download_concurrency = 4
+mirror_eager_download_percent = 10
 artifact_download_max_attempts = 3
 artifact_download_initial_backoff_millis = 250
 mirror_update_enabled = true
@@ -537,6 +539,10 @@ mirror_update_on_startup = true
 For an internal PyPI-compatible mirror, set `base_url` to that service instead.
 Increase `mirror_download_concurrency` to cache large projects faster, or lower
 it if your upstream mirror or object storage needs gentler traffic.
+By default, only the newest 10% of release versions are eagerly cached while
+older release metadata remains available for on-demand downloads. Set
+`mirror_eager_download_percent = 5` for a smaller eager cache.
+Set it to `0` to disable eager artifact caching entirely.
 Artifact downloads retry transient network failures plus HTTP 408, 429, and
 5xx responses using exponential backoff from
 `artifact_download_initial_backoff_millis` up to

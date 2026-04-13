@@ -28,6 +28,7 @@ pub struct PyregistryApp {
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) ids: Arc<dyn IdGenerator>,
     pub(crate) mirror_download_concurrency: usize,
+    pub(crate) mirror_eager_download_percent: u8,
 }
 
 impl PyregistryApp {
@@ -70,7 +71,14 @@ impl PyregistryApp {
             clock,
             ids,
             mirror_download_concurrency: mirror_download_concurrency.max(1),
+            mirror_eager_download_percent: 10,
         }
+    }
+
+    #[must_use]
+    pub fn with_mirror_eager_download_percent(mut self, percent: u8) -> Self {
+        self.mirror_eager_download_percent = percent.min(100);
+        self
     }
 
     pub(crate) async fn purge_project_internal(

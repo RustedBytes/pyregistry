@@ -20,9 +20,9 @@ chrono.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true
-pyregistry-application = { path = "../application", version = "0.1.1", default-features = false }
-pyregistry-infrastructure = { path = "../infrastructure", version = "0.1.1", default-features = false }
-pyregistry-web = { path = "../web", version = "0.1.1" }
+pyregistry-application = { path = "../application", version = "*", default-features = false }
+pyregistry-infrastructure = { path = "../infrastructure", version = "*", default-features = false }
+pyregistry-web = { path = "../web", version = "*" }
 regex.workspace = true
 tokio.workspace = true
 tower-http.workspace = true

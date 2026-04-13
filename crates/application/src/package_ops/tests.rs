@@ -59,6 +59,28 @@ async fn mirrored_project_caches_artifacts_with_bounded_parallelism() {
 }
 
 #[tokio::test]
+async fn mirrored_project_eagerly_caches_only_newest_release_percent() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(20));
+    let app = test_app(store.clone(), storage.clone(), mirror.clone(), 4)
+        .with_mirror_eager_download_percent(5);
+
+    app.resolve_project_from_mirror("acme", "demo")
+        .await
+        .expect("mirror result")
+        .expect("mirrored project");
+
+    assert_eq!(
+        store.artifact_count(),
+        20,
+        "mirror metadata should retain every upstream artifact"
+    );
+    assert_eq!(mirror.fetch_count(), 1);
+    assert_eq!(storage.object_count(), 1);
+}
+
+#[tokio::test]
 async fn mirrored_project_scans_cached_wheels_and_notifies_findings() {
     let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
     let storage = Arc::new(FakeObjectStorage::default());
