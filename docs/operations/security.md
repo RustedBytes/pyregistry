@@ -136,6 +136,8 @@ the binary at compile time.
 
 If `security.yara_rules_path` points to a readable directory, Pyregistry uses
 that external rule set. Otherwise it falls back to the bundled supplied rules.
+Use `--yara-rules-path /path/to/yara-rules` to override the directory for a
+single command or service start without editing the TOML config.
 
 Refresh local supplied signatures with:
 

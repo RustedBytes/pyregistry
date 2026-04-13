@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
 use env_logger::Env;
@@ -58,6 +58,15 @@ struct Cli {
         help = "Redact secrets and personally identifying values from log messages"
     )]
     redact_logs: bool,
+
+    #[arg(
+        long,
+        global = true,
+        alias = "yara-rules-dir",
+        value_name = "PATH",
+        help = "Override the YARA rules directory from config or YARA_RULES_PATH"
+    )]
+    yara_rules_path: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -158,13 +167,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config_path = cli.config.clone();
     let redact_logs = cli.redact_logs;
+    let yara_rules_path = cli.yara_rules_path.clone();
     let cli_debug = format!("{cli:?}");
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
             let config_source = describe_settings_source(config_path.as_deref());
-            let settings =
+            let mut settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
+            apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
             init_logging(&settings.logging, redact_logs);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
@@ -175,25 +186,28 @@ async fn main() -> anyhow::Result<()> {
             storage,
             force,
         } => {
-            let settings = match storage {
+            let mut settings = match storage {
                 InitStorageTemplate::Local => Settings::new_local_template(),
                 InitStorageTemplate::Minio => Settings::new_minio_template(),
             };
+            apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
             init_logging(&settings.logging, redact_logs);
             debug!("parsed CLI arguments: {cli_debug}");
             init_config(path, force, storage, settings)
         }
         Command::AuditWheel { project, wheel } => {
-            let settings =
+            let mut settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
+            apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
             init_logging(&settings.logging, redact_logs);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             audit_wheel(project, wheel, &settings).await
         }
         Command::ValidateDist { file, sha256 } => {
-            let settings =
+            let mut settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
+            apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
             init_logging(&settings.logging, redact_logs);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
@@ -205,8 +219,9 @@ async fn main() -> anyhow::Result<()> {
             parallelism,
         } => {
             let config_source = describe_settings_source(config_path.as_deref());
-            let settings =
+            let mut settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
+            apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
             init_logging(&settings.logging, redact_logs);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
@@ -215,14 +230,28 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::CheckRegistry { tenant, project } => {
             let config_source = describe_settings_source(config_path.as_deref());
-            let settings =
+            let mut settings =
                 Settings::load_for_cli(config_path).context("failed to load settings")?;
+            apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
             init_logging(&settings.logging, redact_logs);
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             check_registry(settings, config_source, tenant, project).await
         }
     }
+}
+
+fn apply_cli_overrides(
+    settings: &mut Settings,
+    yara_rules_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    if let Some(path) = yara_rules_path {
+        if path.as_os_str().is_empty() {
+            bail!("--yara-rules-path must not be empty");
+        }
+        settings.security.yara_rules_path = path.to_path_buf();
+    }
+    Ok(())
 }
 
 fn log_build_mode() {
@@ -1129,6 +1158,7 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("Internal Python package registry service"));
         assert!(help.contains("--redact-logs"));
+        assert!(help.contains("--yara-rules-path"));
         assert!(help.contains("validate-dist-all"));
 
         let version = Cli::try_parse_from(["pyregistry", "--version"]).expect_err("version exits");
@@ -1175,6 +1205,19 @@ mod tests {
 
         let cli = Cli::try_parse_from([
             "pyregistry",
+            "check-registry",
+            "--yara-rules-path",
+            "custom-yara",
+        ])
+        .expect("yara rules override");
+        assert_eq!(
+            cli.yara_rules_path.as_deref(),
+            Some(Path::new("custom-yara"))
+        );
+        assert!(matches!(cli.command, Some(Command::CheckRegistry { .. })));
+
+        let cli = Cli::try_parse_from([
+            "pyregistry",
             "validate-dist-all",
             "--tenant",
             "acme",
@@ -1191,6 +1234,18 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn cli_yara_rules_override_updates_settings_boundary_config() {
+        let mut settings = Settings::new_local_template();
+
+        apply_cli_overrides(&mut settings, Some(Path::new("rules/custom"))).expect("override");
+
+        assert_eq!(
+            settings.security.yara_rules_path,
+            PathBuf::from("rules/custom")
+        );
     }
 
     #[test]

@@ -182,6 +182,10 @@ distribution_parallelism = 4
 If the configured YARA directory is readable, Pyregistry uses it. Otherwise it
 falls back to bundled supplied rules embedded at compile time.
 
+For one-off runs or container entrypoints that should not edit the TOML file,
+pass `--yara-rules-path /path/to/yara-rules`. This CLI override wins over both
+`security.yara_rules_path` and `YARA_RULES_PATH`.
+
 Set `security.vulnerability_webhook.url` to enable Discord-compatible webhook
 notifications from `check-registry` when vulnerable packages are found and from
 mirror updates when cached wheel audits report findings. The webhook URL is
@@ -257,7 +261,7 @@ Common environment variables:
 | `PYPI_MIRROR_UPDATE_ENABLED` | Enable or disable the background mirror updater. |
 | `PYPI_MIRROR_UPDATE_INTERVAL_SECONDS` | Background mirror refresh interval. |
 | `PYPI_MIRROR_UPDATE_ON_STARTUP` | Refresh mirrored projects when the service starts. |
-| `YARA_RULES_PATH` | External YARA rules directory. |
+| `YARA_RULES_PATH` | External YARA rules directory when no TOML config overrides it. |
 | `VULNERABILITY_WEBHOOK_URL` | Discord-compatible webhook URL for vulnerable package notifications. |
 | `VULNERABILITY_WEBHOOK_USERNAME` | Optional webhook display name. |
 | `VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS` | Webhook POST timeout. |

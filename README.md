@@ -251,6 +251,11 @@ connection pipelining. `max_connections` and `min_connections` are accepted
 configuration fields for compatibility with future pooling, but they do not
 create a connection pool today.
 
+Set `security.yara_rules_path` to a directory containing your own `.yar` or
+`.yara` files to replace the default on-disk rule directory. For one-off runs,
+pass `--yara-rules-path /path/to/yara-rules`; the CLI override wins over both
+`pyregistry.toml` and `YARA_RULES_PATH`.
+
 S3/MinIO storage example:
 
 ```toml
@@ -454,6 +459,8 @@ Detection Rule License in `supplied/signature-base/LICENSE`.
 Those supplied files are embedded into the binary at compile time. If
 `security.yara_rules_path` points to a readable directory, Pyregistry uses that
 external rule set; otherwise it falls back to the bundled supplied rules.
+Use `--yara-rules-path /path/to/yara-rules` to override the configured directory
+for a command or service start without editing `pyregistry.toml`.
 
 To refresh the bundled signatures locally, run:
 
