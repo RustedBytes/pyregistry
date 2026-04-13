@@ -53,6 +53,17 @@ fn in_memory_settings() -> Settings {
         std::env::temp_dir().join(format!("pyregistry-cli-blobs-{}", unique_suffix()));
     settings.artifact_storage.backend = ArtifactStorageBackend::FileSystem;
     settings.pypi.mirror_update_enabled = false;
+    settings.security.yara_rules_path = settings.blob_root.join("yara-rules");
+    std::fs::create_dir_all(&settings.security.yara_rules_path)
+        .expect("create test YARA rules dir");
+    std::fs::write(
+        settings
+            .security
+            .yara_rules_path
+            .join("pyregistry-test.yar"),
+        "rule PyregistryCliTestRule { condition: false }",
+    )
+    .expect("write test YARA rule");
     settings
 }
 

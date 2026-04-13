@@ -234,6 +234,7 @@ fn compile_rules_dir(path: &Path) -> Result<CompiledYaraRules, String> {
     finish_compiler(compiler, rule_files.len(), skipped_rule_count)
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn compile_bundled_rules() -> Result<CompiledYaraRules, String> {
     let mut rule_files = bundled_yara_rule_files();
     rule_files.sort_by(|left, right| left.relative_path.cmp(right.relative_path));
@@ -274,12 +275,26 @@ fn compile_bundled_rules_for_fallback(rules_path: &Path) -> Result<CompiledYaraR
         return Err("forced bundled rule failure".into());
     }
 
-    compile_bundled_rules()
+    compile_test_bundled_rules()
 }
 
 #[cfg(not(test))]
 fn compile_bundled_rules_for_fallback(_rules_path: &Path) -> Result<CompiledYaraRules, String> {
     compile_bundled_rules()
+}
+
+#[cfg(test)]
+fn compile_test_bundled_rules() -> Result<CompiledYaraRules, String> {
+    let mut compiler = Compiler::new();
+    define_loki_style_globals(&mut compiler)?;
+    compiler.new_namespace("sigtest_bundled_fallback");
+    compiler
+        .add_source(
+            SourceCode::from("rule Pyregistry_Bundled_Fallback_Test { condition: false }")
+                .with_origin("bundled:test-fallback.yar"),
+        )
+        .map_err(|error| format!("could not compile test bundled YARA rule: {error}"))?;
+    finish_compiler(compiler, 1, 0)
 }
 
 fn finish_compiler(

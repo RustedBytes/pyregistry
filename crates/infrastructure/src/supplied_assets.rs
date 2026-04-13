@@ -6,6 +6,7 @@ static SIGNATURE_BASE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../supplie
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BundledFile<'a> {
     pub(crate) relative_path: &'a Path,
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) contents: &'a [u8],
 }
 
