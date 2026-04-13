@@ -1,5 +1,7 @@
 # Pyregistry
 
+[![Tests](https://github.com/RustedBytes/pyregistry/actions/workflows/test.yml/badge.svg)](https://github.com/RustedBytes/pyregistry/actions/workflows/test.yml)
+
 Pyregistry is an internal Python package registry written in Rust. It is aimed
 at companies that need tenant-scoped package publishing, authenticated installs,
 private search, PyPI mirroring, provenance, trusted publishing, and lightweight
