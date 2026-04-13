@@ -941,6 +941,10 @@ fn package_detail_view(
     let index_url = format!("{base_url}/t/{tenant_slug}/simple/");
     let pip_install_command = install_command("pip install", &index_url, &project_name);
     let uv_install_command = install_command("uv pip install", &index_url, &project_name);
+    let scan_unavailable =
+        is_pysentry_package_scan_unavailable(details.security.scan_error.as_deref());
+    let dependency_scan_unavailable =
+        is_pysentry_dependency_scan_unavailable(details.security.dependency_scan_error.as_deref());
 
     PackageDetailView {
         tenant_slug: details.tenant_slug,
@@ -955,17 +959,16 @@ fn package_detail_view(
             vulnerable_file_count: details.security.vulnerable_file_count,
             vulnerability_count: details.security.vulnerability_count,
             highest_severity: details.security.highest_severity,
-            scan_unavailable: is_pysentry_package_scan_unavailable(
-                details.security.scan_error.as_deref(),
-            ),
-            scan_error: details.security.scan_error,
+            scan_unavailable,
+            scan_error: package_scan_error_view(details.security.scan_error, scan_unavailable),
             scanned_dependency_count: details.security.scanned_dependency_count,
             vulnerable_dependency_count: details.security.vulnerable_dependency_count,
             dependency_vulnerability_count: details.security.dependency_vulnerability_count,
-            dependency_scan_unavailable: is_pysentry_dependency_scan_unavailable(
-                details.security.dependency_scan_error.as_deref(),
+            dependency_scan_unavailable,
+            dependency_scan_error: dependency_scan_error_view(
+                details.security.dependency_scan_error,
+                dependency_scan_unavailable,
             ),
-            dependency_scan_error: details.security.dependency_scan_error,
         },
         pip_install_command,
         uv_install_command,
@@ -1015,18 +1018,44 @@ fn package_detail_view(
     }
 }
 
+const PYSENTRY_PACKAGE_LOOKUP_UNAVAILABLE: &str =
+    "PySentry vulnerability lookup is unavailable on Windows GNU targets";
+const PYSENTRY_DEPENDENCY_LOOKUP_UNAVAILABLE: &str =
+    "PySentry dependency vulnerability lookup is unavailable on Windows GNU targets";
+
 fn is_pysentry_package_scan_unavailable(error: Option<&str>) -> bool {
-    error.is_some_and(|error| {
-        error.contains("PySentry vulnerability lookup is unavailable on Windows GNU targets")
-    })
+    all_scan_errors_are(error, PYSENTRY_PACKAGE_LOOKUP_UNAVAILABLE)
 }
 
 fn is_pysentry_dependency_scan_unavailable(error: Option<&str>) -> bool {
-    error.is_some_and(|error| {
-        error.contains(
-            "PySentry dependency vulnerability lookup is unavailable on Windows GNU targets",
-        )
-    })
+    all_scan_errors_are(error, PYSENTRY_DEPENDENCY_LOOKUP_UNAVAILABLE)
+}
+
+fn all_scan_errors_are(error: Option<&str>, expected: &str) -> bool {
+    let Some(error) = error else {
+        return false;
+    };
+    !error.trim().is_empty()
+        && error
+            .split(';')
+            .map(str::trim)
+            .all(|message| message.contains(expected))
+}
+
+fn package_scan_error_view(error: Option<String>, unavailable: bool) -> Option<String> {
+    if unavailable {
+        Some(PYSENTRY_PACKAGE_LOOKUP_UNAVAILABLE.into())
+    } else {
+        error
+    }
+}
+
+fn dependency_scan_error_view(error: Option<String>, unavailable: bool) -> Option<String> {
+    if unavailable {
+        Some(PYSENTRY_DEPENDENCY_LOOKUP_UNAVAILABLE.into())
+    } else {
+        error
+    }
 }
 
 fn artifact_security_view(
@@ -1398,8 +1427,10 @@ mod tests {
 
     #[test]
     fn package_detail_template_labels_windows_gnu_pysentry_as_unavailable() {
-        let unavailable =
-            "1.0.0: PySentry vulnerability lookup is unavailable on Windows GNU targets";
+        let unavailable = concat!(
+            "1.0.0: PySentry vulnerability lookup is unavailable on Windows GNU targets; ",
+            "1.0.1: PySentry vulnerability lookup is unavailable on Windows GNU targets"
+        );
         let details = PackageDetails {
             tenant_slug: "acme".into(),
             project_name: "rsloop".into(),
@@ -1436,7 +1467,13 @@ mod tests {
         .expect("render package detail");
 
         assert!(rendered.contains("PySentry scan unavailable on this server"));
+        assert!(
+            rendered
+                .contains("PySentry vulnerability lookup is unavailable on Windows GNU targets")
+        );
         assert!(rendered.contains("No release files were checked"));
+        assert!(!rendered.contains("1.0.0:"));
+        assert!(!rendered.contains("1.0.1:"));
         assert!(!rendered.contains("external dependency failure"));
         assert!(!rendered.contains("PySentry scan did not complete for every release file"));
         assert!(
