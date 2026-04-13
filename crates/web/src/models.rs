@@ -150,6 +150,7 @@ pub(crate) struct PackageSecuritySummaryView {
     pub(crate) scanned_dependency_count: usize,
     pub(crate) vulnerable_dependency_count: usize,
     pub(crate) dependency_vulnerability_count: usize,
+    pub(crate) dependency_findings: Vec<DependencyVulnerabilityFindingView>,
     pub(crate) dependency_scan_error: Option<String>,
     pub(crate) dependency_scan_unavailable: bool,
 }
@@ -188,6 +189,12 @@ pub(crate) struct DependencyVulnerabilityView {
     pub(crate) vulnerabilities: Vec<PackageVulnerabilityView>,
     pub(crate) hidden_vulnerability_count: usize,
     pub(crate) scan_error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct DependencyVulnerabilityFindingView {
+    pub(crate) artifact_filename: String,
+    pub(crate) dependency: DependencyVulnerabilityView,
 }
 
 #[derive(Clone, Serialize)]

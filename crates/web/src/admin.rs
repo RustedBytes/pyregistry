@@ -4,11 +4,12 @@ use crate::{
     error::{WebError, render_html},
     models::{
         ArtifactSecurityView, AuditTrailEntryView, AuditTrailMetadataView, CreateTenantFormData,
-        DashboardTemplate, DashboardView, DependencyVulnerabilityView, IndexTemplate,
-        IssueTokenFormData, LoginFormData, LoginTemplate, MessageTemplate, MirrorFormData,
-        MirrorJobView, PackageArtifactView, PackageDetailTemplate, PackageDetailView,
-        PackageReleaseView, PackageSecuritySummaryView, PackageVulnerabilityView,
-        PublisherFormData, SearchQuery, TenantView, WheelAuditResponse, YankFormData,
+        DashboardTemplate, DashboardView, DependencyVulnerabilityFindingView,
+        DependencyVulnerabilityView, IndexTemplate, IssueTokenFormData, LoginFormData,
+        LoginTemplate, MessageTemplate, MirrorFormData, MirrorJobView, PackageArtifactView,
+        PackageDetailTemplate, PackageDetailView, PackageReleaseView, PackageSecuritySummaryView,
+        PackageVulnerabilityView, PublisherFormData, SearchQuery, TenantView, WheelAuditResponse,
+        YankFormData,
     },
     state::{AppState, MirrorJobPhase, MirrorJobStatus, mirror_job_key},
 };
@@ -945,6 +946,7 @@ fn package_detail_view(
         is_pysentry_package_scan_unavailable(details.security.scan_error.as_deref());
     let dependency_scan_unavailable =
         is_pysentry_dependency_scan_unavailable(details.security.dependency_scan_error.as_deref());
+    let dependency_findings = dependency_findings_view(&details.releases);
 
     PackageDetailView {
         tenant_slug: details.tenant_slug,
@@ -964,6 +966,7 @@ fn package_detail_view(
             scanned_dependency_count: details.security.scanned_dependency_count,
             vulnerable_dependency_count: details.security.vulnerable_dependency_count,
             dependency_vulnerability_count: details.security.dependency_vulnerability_count,
+            dependency_findings,
             dependency_scan_unavailable,
             dependency_scan_error: dependency_scan_error_view(
                 details.security.dependency_scan_error,
@@ -1066,53 +1069,13 @@ fn artifact_security_view(
         .vulnerabilities
         .into_iter()
         .take(3)
-        .map(|vulnerability| PackageVulnerabilityView {
-            id: vulnerability.id,
-            summary: vulnerability.summary,
-            severity: vulnerability.severity,
-            fixed_versions: if vulnerability.fixed_versions.is_empty() {
-                "no fixed version listed".into()
-            } else {
-                vulnerability.fixed_versions.join(", ")
-            },
-            primary_reference: vulnerability.references.into_iter().next(),
-        })
+        .map(|vulnerability| package_vulnerability_view(vulnerability, "no fixed version listed"))
         .collect::<Vec<_>>();
     let hidden_vulnerability_count = vulnerability_count.saturating_sub(vulnerabilities.len());
     let dependencies = security
         .dependencies
         .into_iter()
-        .map(|dependency| {
-            let vulnerability_count = dependency.vulnerability_count;
-            let vulnerabilities = dependency
-                .vulnerabilities
-                .into_iter()
-                .take(3)
-                .map(|vulnerability| PackageVulnerabilityView {
-                    id: vulnerability.id,
-                    summary: vulnerability.summary,
-                    severity: vulnerability.severity,
-                    fixed_versions: if vulnerability.fixed_versions.is_empty() {
-                        "not listed".into()
-                    } else {
-                        vulnerability.fixed_versions.join(", ")
-                    },
-                    primary_reference: vulnerability.references.into_iter().next(),
-                })
-                .collect::<Vec<_>>();
-            let hidden_vulnerability_count =
-                vulnerability_count.saturating_sub(vulnerabilities.len());
-            DependencyVulnerabilityView {
-                requirement: dependency.requirement,
-                package_name: dependency.package_name,
-                version: dependency.version,
-                vulnerability_count,
-                highest_severity: dependency.highest_severity,
-                vulnerabilities,
-                hidden_vulnerability_count,
-                scan_error: dependency.scan_error,
-            }
-        })
+        .map(dependency_vulnerability_view)
         .collect();
 
     ArtifactSecurityView {
@@ -1127,6 +1090,68 @@ fn artifact_security_view(
         dependency_vulnerability_count: security.dependency_vulnerability_count,
         dependencies,
         dependency_scan_error: security.dependency_scan_error,
+    }
+}
+
+fn dependency_findings_view(
+    releases: &[pyregistry_application::PackageReleaseDetails],
+) -> Vec<DependencyVulnerabilityFindingView> {
+    releases
+        .iter()
+        .flat_map(|release| {
+            release.artifacts.iter().flat_map(|artifact| {
+                artifact
+                    .security
+                    .dependencies
+                    .iter()
+                    .filter(|dependency| dependency.vulnerability_count > 0)
+                    .cloned()
+                    .map(|dependency| DependencyVulnerabilityFindingView {
+                        artifact_filename: artifact.filename.clone(),
+                        dependency: dependency_vulnerability_view(dependency),
+                    })
+            })
+        })
+        .collect()
+}
+
+fn dependency_vulnerability_view(
+    dependency: pyregistry_application::DependencyVulnerabilityDetails,
+) -> DependencyVulnerabilityView {
+    let vulnerability_count = dependency.vulnerability_count;
+    let vulnerabilities = dependency
+        .vulnerabilities
+        .into_iter()
+        .take(3)
+        .map(|vulnerability| package_vulnerability_view(vulnerability, "not listed"))
+        .collect::<Vec<_>>();
+    let hidden_vulnerability_count = vulnerability_count.saturating_sub(vulnerabilities.len());
+    DependencyVulnerabilityView {
+        requirement: dependency.requirement,
+        package_name: dependency.package_name,
+        version: dependency.version,
+        vulnerability_count,
+        highest_severity: dependency.highest_severity,
+        vulnerabilities,
+        hidden_vulnerability_count,
+        scan_error: dependency.scan_error,
+    }
+}
+
+fn package_vulnerability_view(
+    vulnerability: pyregistry_application::PackageVulnerability,
+    empty_fixed_versions_label: &str,
+) -> PackageVulnerabilityView {
+    PackageVulnerabilityView {
+        id: vulnerability.id,
+        summary: vulnerability.summary,
+        severity: vulnerability.severity,
+        fixed_versions: if vulnerability.fixed_versions.is_empty() {
+            empty_fixed_versions_label.into()
+        } else {
+            vulnerability.fixed_versions.join(", ")
+        },
+        primary_reference: vulnerability.references.into_iter().next(),
     }
 }
 
@@ -1480,6 +1505,70 @@ mod tests {
             !rendered
                 .contains("PySentry found no known vulnerabilities in 0 scanned release files")
         );
+    }
+
+    #[test]
+    fn package_detail_template_lists_vulnerable_dependency_findings_in_modal() {
+        let dependency = DependencyVulnerabilityDetails {
+            requirement: "urllib3==1.24.1".into(),
+            package_name: "urllib3".into(),
+            version: "1.24.1".into(),
+            vulnerability_count: 1,
+            highest_severity: Some("HIGH".into()),
+            vulnerabilities: vec![vulnerability(
+                "GHSA-dep",
+                "HIGH",
+                vec!["1.26.5"],
+                vec!["https://example.test/dep"],
+            )],
+            scan_error: None,
+        };
+        let details = PackageDetails {
+            tenant_slug: "acme".into(),
+            project_name: "rsloop".into(),
+            normalized_name: "rsloop".into(),
+            summary: String::new(),
+            description: String::new(),
+            source: "Local".into(),
+            security: PackageSecuritySummary {
+                scanned_dependency_count: 1,
+                vulnerable_dependency_count: 1,
+                dependency_vulnerability_count: 1,
+                ..PackageSecuritySummary::default()
+            },
+            releases: vec![PackageReleaseDetails {
+                version: "1.0.0".into(),
+                yanked_reason: None,
+                artifacts: vec![PackageArtifactDetails {
+                    filename: "rsloop-1.0.0-py3-none-any.whl".into(),
+                    version: "1.0.0".into(),
+                    size_bytes: 42,
+                    sha256: "abc123".into(),
+                    object_key: "objects/rsloop.whl".into(),
+                    yanked_reason: None,
+                    security: ArtifactSecurityDetails::scanned(Vec::new())
+                        .with_dependencies(vec![dependency], None),
+                }],
+            }],
+            trusted_publishers: Vec::new(),
+        };
+
+        let rendered = PackageDetailTemplate {
+            details: package_detail_view(details, "http://127.0.0.1:3000"),
+        }
+        .render()
+        .expect("render package detail");
+
+        assert!(rendered.contains("Vulnerable requirements: <strong>1</strong>"));
+        assert!(rendered.contains("View dependency findings"));
+        assert!(rendered.contains("<dialog id=\"dependency-findings-modal\">"));
+        assert!(rendered.contains("Vulnerable dependency findings"));
+        assert!(rendered.contains("<strong>urllib3==1.24.1</strong>"));
+        assert!(rendered.contains("urllib3==1.24.1"));
+        assert!(rendered.contains("Found in rsloop-1.0.0-py3-none-any.whl"));
+        assert!(rendered.contains("<strong>GHSA-dep</strong> HIGH"));
+        assert!(rendered.contains("Fixed versions: 1.26.5"));
+        assert!(rendered.contains("document.querySelectorAll(\".dependency-findings-button\")"));
     }
 
     #[test]

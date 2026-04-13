@@ -432,6 +432,12 @@
       .scan-status {
         margin-bottom: 12px;
       }
+      .security-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 14px;
+      }
       @media (max-width: 820px) {
         .package-header,
         .release-head {
@@ -533,9 +539,60 @@
             Vulnerable requirements: <strong>{{ details.security.vulnerable_dependency_count }}</strong>
             with <strong>{{ details.security.dependency_vulnerability_count }}</strong> advisory match{% if details.security.dependency_vulnerability_count != 1 %}es{% endif %}.
           </p>
+          {% if details.security.dependency_findings.len() > 0 %}
+          <div class="security-actions">
+            <button class="secondary dependency-findings-button" type="button">View dependency findings</button>
+          </div>
+          {% endif %}
           {% endif %}
         </div>
       </section>
+
+      {% if details.security.dependency_findings.len() > 0 %}
+      <dialog id="dependency-findings-modal">
+        <div class="modal-shell">
+          <div class="modal-head">
+            <div>
+              <h2>Vulnerable dependency findings</h2>
+              <p class="muted">{{ details.security.vulnerable_dependency_count }} vulnerable pinned requirement{% if details.security.vulnerable_dependency_count != 1 %}s{% endif %} with {{ details.security.dependency_vulnerability_count }} advisory match{% if details.security.dependency_vulnerability_count != 1 %}es{% endif %}.</p>
+            </div>
+            <form method="dialog">
+              <button class="modal-close" type="submit">Close</button>
+            </form>
+          </div>
+          <ul class="vuln-list">
+            {% for finding in details.security.dependency_findings %}
+            <li>
+              <strong>{{ finding.dependency.package_name }}=={{ finding.dependency.version }}</strong>
+              {% match finding.dependency.highest_severity %}
+              {% when Some with (severity) %}
+              <span class="pill">{{ severity }}</span>
+              {% when None %}
+              {% endmatch %}
+              <br><span class="muted">{{ finding.dependency.requirement }}</span>
+              <br><span class="muted">Found in {{ finding.artifact_filename }}</span>
+              <ul class="vuln-list">
+                {% for vulnerability in finding.dependency.vulnerabilities %}
+                <li>
+                  <strong>{{ vulnerability.id }}</strong> {{ vulnerability.severity }} - {{ vulnerability.summary }}
+                  <br><span class="muted">Fixed versions: {{ vulnerability.fixed_versions }}</span>
+                  {% match vulnerability.primary_reference %}
+                  {% when Some with (reference) %}
+                  <br><a href="{{ reference }}" rel="noreferrer">Reference</a>
+                  {% when None %}
+                  {% endmatch %}
+                </li>
+                {% endfor %}
+              </ul>
+              {% if finding.dependency.hidden_vulnerability_count > 0 %}
+              <p class="muted">Plus {{ finding.dependency.hidden_vulnerability_count }} more advisory match{% if finding.dependency.hidden_vulnerability_count != 1 %}es{% endif %}.</p>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </dialog>
+      {% endif %}
 
       <section class="section-block">
         <details class="install-panel">
@@ -874,6 +931,15 @@
             const modal = button
               .closest(".release-actions")
               ?.querySelector(".release-governance-modal");
+            if (modal instanceof HTMLDialogElement) {
+              modal.showModal();
+            }
+          });
+        });
+
+        document.querySelectorAll(".dependency-findings-button").forEach((button) => {
+          button.addEventListener("click", () => {
+            const modal = document.getElementById("dependency-findings-modal");
             if (modal instanceof HTMLDialogElement) {
               modal.showModal();
             }
