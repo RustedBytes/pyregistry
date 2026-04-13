@@ -148,11 +148,11 @@ fn inspect_file_type_from_path(
     #[cfg(feature = "file-type-ml")]
     {
         let file_type = with_magika_session(|session| session.identify_file_sync(path))?;
-        return Ok(file_type_inspection(
+        Ok(file_type_inspection(
             kind,
             path.extension_label(),
             file_type,
-        ));
+        ))
     }
 
     #[cfg(not(feature = "file-type-ml"))]

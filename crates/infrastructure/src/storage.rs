@@ -45,10 +45,10 @@ impl OpenDalObjectStorage {
             normalize_opendal_options(&config.scheme, &mut options)?;
             let operator = Operator::via_iter(&config.scheme, options)
                 .map_err(|error| format!("failed to build OpenDAL operator: {error}"))?;
-            return Ok(Self {
+            Ok(Self {
                 operator,
                 scheme: config.scheme.clone(),
-            });
+            })
         }
 
         #[cfg(not(feature = "opendal-fs"))]

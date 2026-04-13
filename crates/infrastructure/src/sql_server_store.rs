@@ -1071,7 +1071,7 @@ fn sql_server_config_from_ado_string(connection_url: &str) -> Result<Config, App
     config.port(url.port().unwrap_or(1433));
     if let Some(database) = url
         .path_segments()
-        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next())
+        .and_then(|mut segments| segments.find(|segment| !segment.is_empty()))
     {
         config.database(database);
     }
@@ -1108,11 +1108,11 @@ where
 }
 
 fn required_string(row: &Row, column: &'static str) -> Result<String, ApplicationError> {
-    required::<&str>(&row, column).map(ToOwned::to_owned)
+    required::<&str>(row, column).map(ToOwned::to_owned)
 }
 
 fn optional_string(row: &Row, column: &'static str) -> Result<Option<String>, ApplicationError> {
-    optional::<&str>(&row, column).map(|value| value.map(ToOwned::to_owned))
+    optional::<&str>(row, column).map(|value| value.map(ToOwned::to_owned))
 }
 
 fn latest_release_version_from_values(
@@ -1144,88 +1144,88 @@ fn escape_like_pattern(value: &str) -> String {
 
 fn map_tenant(row: &Row) -> Result<Tenant, ApplicationError> {
     Tenant::new(
-        TenantId::new(required::<Uuid>(&row, "id")?),
-        TenantSlug::new(required_string(&row, "slug")?)?,
-        required_string(&row, "display_name")?,
+        TenantId::new(required::<Uuid>(row, "id")?),
+        TenantSlug::new(required_string(row, "slug")?)?,
+        required_string(row, "display_name")?,
         MirrorRule {
-            enabled: required::<bool>(&row, "mirroring_enabled")?,
+            enabled: required::<bool>(row, "mirroring_enabled")?,
         },
-        required::<DateTime<Utc>>(&row, "created_at")?,
+        required::<DateTime<Utc>>(row, "created_at")?,
     )
     .map_err(ApplicationError::Domain)
 }
 
 fn map_admin_user(row: &Row) -> Result<AdminUser, ApplicationError> {
     Ok(AdminUser {
-        id: AdminUserId::new(required::<Uuid>(&row, "id")?),
-        tenant_id: optional::<Uuid>(&row, "tenant_id")?.map(TenantId::new),
-        email: required_string(&row, "email")?,
-        password_hash: required_string(&row, "password_hash")?,
-        is_superadmin: required::<bool>(&row, "is_superadmin")?,
-        created_at: required::<DateTime<Utc>>(&row, "created_at")?,
+        id: AdminUserId::new(required::<Uuid>(row, "id")?),
+        tenant_id: optional::<Uuid>(row, "tenant_id")?.map(TenantId::new),
+        email: required_string(row, "email")?,
+        password_hash: required_string(row, "password_hash")?,
+        is_superadmin: required::<bool>(row, "is_superadmin")?,
+        created_at: required::<DateTime<Utc>>(row, "created_at")?,
     })
 }
 
 fn map_api_token(row: &Row) -> Result<ApiToken, ApplicationError> {
     Ok(ApiToken {
-        id: TokenId::new(required::<Uuid>(&row, "id")?),
-        tenant_id: TenantId::new(required::<Uuid>(&row, "tenant_id")?),
-        label: required_string(&row, "label")?,
-        secret_hash: required_string(&row, "secret_hash")?,
-        scopes: parse_scopes_json(required_string(&row, "scopes_json")?)?,
+        id: TokenId::new(required::<Uuid>(row, "id")?),
+        tenant_id: TenantId::new(required::<Uuid>(row, "tenant_id")?),
+        label: required_string(row, "label")?,
+        secret_hash: required_string(row, "secret_hash")?,
+        scopes: parse_scopes_json(required_string(row, "scopes_json")?)?,
         publish_identity: parse_publish_identity(
-            optional_string(&row, "identity_issuer")?,
-            optional_string(&row, "identity_subject")?,
-            optional_string(&row, "identity_audience")?,
-            optional_string(&row, "identity_provider")?,
-            optional_string(&row, "identity_claims_json")?,
+            optional_string(row, "identity_issuer")?,
+            optional_string(row, "identity_subject")?,
+            optional_string(row, "identity_audience")?,
+            optional_string(row, "identity_provider")?,
+            optional_string(row, "identity_claims_json")?,
         )?,
-        created_at: required::<DateTime<Utc>>(&row, "created_at")?,
-        expires_at: optional::<DateTime<Utc>>(&row, "expires_at")?,
+        created_at: required::<DateTime<Utc>>(row, "created_at")?,
+        expires_at: optional::<DateTime<Utc>>(row, "expires_at")?,
     })
 }
 
 fn map_project(row: &Row) -> Result<Project, ApplicationError> {
     Ok(Project {
-        id: ProjectId::new(required::<Uuid>(&row, "id")?),
-        tenant_id: TenantId::new(required::<Uuid>(&row, "tenant_id")?),
-        name: ProjectName::new(required_string(&row, "original_name")?)?,
-        source: parse_project_source(required_string(&row, "source")?)?,
-        summary: required_string(&row, "summary")?,
-        description: required_string(&row, "description")?,
-        created_at: required::<DateTime<Utc>>(&row, "created_at")?,
-        updated_at: required::<DateTime<Utc>>(&row, "updated_at")?,
+        id: ProjectId::new(required::<Uuid>(row, "id")?),
+        tenant_id: TenantId::new(required::<Uuid>(row, "tenant_id")?),
+        name: ProjectName::new(required_string(row, "original_name")?)?,
+        source: parse_project_source(required_string(row, "source")?)?,
+        summary: required_string(row, "summary")?,
+        description: required_string(row, "description")?,
+        created_at: required::<DateTime<Utc>>(row, "created_at")?,
+        updated_at: required::<DateTime<Utc>>(row, "updated_at")?,
     })
 }
 
 fn map_release(row: &Row) -> Result<Release, ApplicationError> {
     Ok(Release {
-        id: ReleaseId::new(required::<Uuid>(&row, "id")?),
-        project_id: ProjectId::new(required::<Uuid>(&row, "project_id")?),
-        version: ReleaseVersion::new(required_string(&row, "version")?)?,
+        id: ReleaseId::new(required::<Uuid>(row, "id")?),
+        project_id: ProjectId::new(required::<Uuid>(row, "project_id")?),
+        version: ReleaseVersion::new(required_string(row, "version")?)?,
         yanked: parse_yank(
-            optional_string(&row, "yanked_reason")?,
-            optional::<DateTime<Utc>>(&row, "yanked_changed_at")?,
+            optional_string(row, "yanked_reason")?,
+            optional::<DateTime<Utc>>(row, "yanked_changed_at")?,
         ),
-        created_at: required::<DateTime<Utc>>(&row, "created_at")?,
+        created_at: required::<DateTime<Utc>>(row, "created_at")?,
     })
 }
 
 fn map_release_alias(row: &Row) -> Result<Release, ApplicationError> {
     Ok(Release {
-        id: ReleaseId::new(required::<Uuid>(&row, "release_id")?),
-        project_id: ProjectId::new(required::<Uuid>(&row, "release_project_id")?),
-        version: ReleaseVersion::new(required_string(&row, "release_version")?)?,
+        id: ReleaseId::new(required::<Uuid>(row, "release_id")?),
+        project_id: ProjectId::new(required::<Uuid>(row, "release_project_id")?),
+        version: ReleaseVersion::new(required_string(row, "release_version")?)?,
         yanked: parse_yank(
-            optional_string(&row, "release_yanked_reason")?,
-            optional::<DateTime<Utc>>(&row, "release_yanked_changed_at")?,
+            optional_string(row, "release_yanked_reason")?,
+            optional::<DateTime<Utc>>(row, "release_yanked_changed_at")?,
         ),
-        created_at: required::<DateTime<Utc>>(&row, "release_created_at")?,
+        created_at: required::<DateTime<Utc>>(row, "release_created_at")?,
     })
 }
 
 fn map_artifact(row: &Row) -> Result<Artifact, ApplicationError> {
-    let size_bytes = required::<i64>(&row, "size_bytes")?;
+    let size_bytes = required::<i64>(row, "size_bytes")?;
     if size_bytes < 0 {
         return Err(ApplicationError::External(
             "artifact size cannot be negative".into(),
@@ -1233,28 +1233,28 @@ fn map_artifact(row: &Row) -> Result<Artifact, ApplicationError> {
     }
 
     Ok(Artifact {
-        id: ArtifactId::new(required::<Uuid>(&row, "id")?),
-        release_id: ReleaseId::new(required::<Uuid>(&row, "release_id")?),
-        filename: required_string(&row, "filename")?,
-        kind: parse_artifact_kind(required_string(&row, "kind")?)?,
+        id: ArtifactId::new(required::<Uuid>(row, "id")?),
+        release_id: ReleaseId::new(required::<Uuid>(row, "release_id")?),
+        filename: required_string(row, "filename")?,
+        kind: parse_artifact_kind(required_string(row, "kind")?)?,
         size_bytes: size_bytes as u64,
         digests: DigestSet::new(
-            required_string(&row, "sha256")?,
-            optional_string(&row, "blake2b_256")?,
+            required_string(row, "sha256")?,
+            optional_string(row, "blake2b_256")?,
         )?,
-        object_key: required_string(&row, "object_key")?,
-        upstream_url: optional_string(&row, "upstream_url")?,
-        provenance_key: optional_string(&row, "provenance_key")?,
+        object_key: required_string(row, "object_key")?,
+        upstream_url: optional_string(row, "upstream_url")?,
+        provenance_key: optional_string(row, "provenance_key")?,
         yanked: parse_yank(
-            optional_string(&row, "yanked_reason")?,
-            optional::<DateTime<Utc>>(&row, "yanked_changed_at")?,
+            optional_string(row, "yanked_reason")?,
+            optional::<DateTime<Utc>>(row, "yanked_changed_at")?,
         ),
-        created_at: required::<DateTime<Utc>>(&row, "created_at")?,
+        created_at: required::<DateTime<Utc>>(row, "created_at")?,
     })
 }
 
 fn map_artifact_alias(row: &Row) -> Result<Artifact, ApplicationError> {
-    let size_bytes = required::<i64>(&row, "artifact_size_bytes")?;
+    let size_bytes = required::<i64>(row, "artifact_size_bytes")?;
     if size_bytes < 0 {
         return Err(ApplicationError::External(
             "artifact size cannot be negative".into(),
@@ -1262,58 +1262,58 @@ fn map_artifact_alias(row: &Row) -> Result<Artifact, ApplicationError> {
     }
 
     Ok(Artifact {
-        id: ArtifactId::new(required::<Uuid>(&row, "artifact_id")?),
-        release_id: ReleaseId::new(required::<Uuid>(&row, "artifact_release_id")?),
-        filename: required_string(&row, "artifact_filename")?,
-        kind: parse_artifact_kind(required_string(&row, "artifact_kind")?)?,
+        id: ArtifactId::new(required::<Uuid>(row, "artifact_id")?),
+        release_id: ReleaseId::new(required::<Uuid>(row, "artifact_release_id")?),
+        filename: required_string(row, "artifact_filename")?,
+        kind: parse_artifact_kind(required_string(row, "artifact_kind")?)?,
         size_bytes: size_bytes as u64,
         digests: DigestSet::new(
-            required_string(&row, "artifact_sha256")?,
-            optional_string(&row, "artifact_blake2b_256")?,
+            required_string(row, "artifact_sha256")?,
+            optional_string(row, "artifact_blake2b_256")?,
         )?,
-        object_key: required_string(&row, "artifact_object_key")?,
-        upstream_url: optional_string(&row, "artifact_upstream_url")?,
-        provenance_key: optional_string(&row, "artifact_provenance_key")?,
+        object_key: required_string(row, "artifact_object_key")?,
+        upstream_url: optional_string(row, "artifact_upstream_url")?,
+        provenance_key: optional_string(row, "artifact_provenance_key")?,
         yanked: parse_yank(
-            optional_string(&row, "artifact_yanked_reason")?,
-            optional::<DateTime<Utc>>(&row, "artifact_yanked_changed_at")?,
+            optional_string(row, "artifact_yanked_reason")?,
+            optional::<DateTime<Utc>>(row, "artifact_yanked_changed_at")?,
         ),
-        created_at: required::<DateTime<Utc>>(&row, "artifact_created_at")?,
+        created_at: required::<DateTime<Utc>>(row, "artifact_created_at")?,
     })
 }
 
 fn map_attestation(row: &Row) -> Result<AttestationBundle, ApplicationError> {
     Ok(AttestationBundle {
-        artifact_id: ArtifactId::new(required::<Uuid>(&row, "artifact_id")?),
-        media_type: required_string(&row, "media_type")?,
-        payload: required_string(&row, "payload")?,
-        source: parse_attestation_source(required_string(&row, "source")?)?,
-        recorded_at: required::<DateTime<Utc>>(&row, "recorded_at")?,
+        artifact_id: ArtifactId::new(required::<Uuid>(row, "artifact_id")?),
+        media_type: required_string(row, "media_type")?,
+        payload: required_string(row, "payload")?,
+        source: parse_attestation_source(required_string(row, "source")?)?,
+        recorded_at: required::<DateTime<Utc>>(row, "recorded_at")?,
     })
 }
 
 fn map_trusted_publisher(row: &Row) -> Result<TrustedPublisher, ApplicationError> {
     Ok(TrustedPublisher {
-        id: TrustedPublisherId::new(required::<Uuid>(&row, "id")?),
-        tenant_id: TenantId::new(required::<Uuid>(&row, "tenant_id")?),
-        project_name: ProjectName::new(required_string(&row, "project_original_name")?)?,
-        provider: parse_provider(required_string(&row, "provider")?)?,
-        issuer: required_string(&row, "issuer")?,
-        audience: required_string(&row, "audience")?,
-        claim_rules: parse_claims_json(required_string(&row, "claim_rules_json")?)?,
-        created_at: required::<DateTime<Utc>>(&row, "created_at")?,
+        id: TrustedPublisherId::new(required::<Uuid>(row, "id")?),
+        tenant_id: TenantId::new(required::<Uuid>(row, "tenant_id")?),
+        project_name: ProjectName::new(required_string(row, "project_original_name")?)?,
+        provider: parse_provider(required_string(row, "provider")?)?,
+        issuer: required_string(row, "issuer")?,
+        audience: required_string(row, "audience")?,
+        claim_rules: parse_claims_json(required_string(row, "claim_rules_json")?)?,
+        created_at: required::<DateTime<Utc>>(row, "created_at")?,
     })
 }
 
 fn map_audit_event(row: &Row) -> Result<AuditEvent, ApplicationError> {
     AuditEvent::new(
-        AuditEventId::new(required::<Uuid>(&row, "id")?),
-        required::<DateTime<Utc>>(&row, "occurred_at")?,
-        required_string(&row, "actor")?,
-        required_string(&row, "action")?,
-        optional_string(&row, "tenant_slug")?,
-        optional_string(&row, "target")?,
-        parse_claims_json(required_string(&row, "metadata_json")?)?,
+        AuditEventId::new(required::<Uuid>(row, "id")?),
+        required::<DateTime<Utc>>(row, "occurred_at")?,
+        required_string(row, "actor")?,
+        required_string(row, "action")?,
+        optional_string(row, "tenant_slug")?,
+        optional_string(row, "target")?,
+        parse_claims_json(required_string(row, "metadata_json")?)?,
     )
     .map_err(ApplicationError::Domain)
 }
