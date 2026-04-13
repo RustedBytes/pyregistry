@@ -235,6 +235,11 @@ pub(crate) struct IssueTokenFormData {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct RevokeTokenFormData {
+    pub(crate) label: String,
+}
+
+#[derive(Deserialize)]
 pub(crate) struct SearchQuery {
     pub(crate) tenant: Option<String>,
     pub(crate) q: Option<String>,

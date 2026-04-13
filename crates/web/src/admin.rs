@@ -8,8 +8,8 @@ use crate::{
         DependencyVulnerabilityView, IndexTemplate, IssueTokenFormData, LoginFormData,
         LoginTemplate, MessageTemplate, MirrorFormData, MirrorJobView, PackageArtifactView,
         PackageDetailTemplate, PackageDetailView, PackageReleaseView, PackageSecuritySummaryView,
-        PackageVulnerabilityView, PublisherFormData, SearchQuery, TenantView, WheelAuditResponse,
-        YankFormData,
+        PackageVulnerabilityView, PublisherFormData, RevokeTokenFormData, SearchQuery, TenantView,
+        WheelAuditResponse, YankFormData,
     },
     state::{AppState, MirrorJobPhase, MirrorJobStatus, mirror_job_key},
 };
@@ -264,6 +264,44 @@ pub(crate) async fn issue_token(
         title: "Token issued",
         message: &format!("New token `{}`: {}", token.label, token.secret),
         back_href: &format!("/admin/t/{tenant}/packages"),
+    })
+}
+
+pub(crate) async fn revoke_token(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(tenant): Path<String>,
+    Form(form): Form<RevokeTokenFormData>,
+) -> Result<Html<String>, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    let label = form.label.trim().to_string();
+    if label.is_empty() {
+        return Err(WebError {
+            status: StatusCode::BAD_REQUEST,
+            message: "Token label cannot be empty".into(),
+        });
+    }
+
+    info!(
+        "admin `{}` is revoking token `{}` for tenant `{}`",
+        session.email, label, tenant
+    );
+    state.app.revoke_api_token(&tenant, &label).await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "api_token.revoke",
+        Some(tenant.clone()),
+        Some(label.clone()),
+        audit_metadata([("label", label.clone())]),
+    )
+    .await;
+
+    render_html(MessageTemplate {
+        title: "Token revoked",
+        message: &format!("Token `{label}` can no longer access this tenant."),
+        back_href: &format!("/admin/search?tenant={tenant}"),
     })
 }
 

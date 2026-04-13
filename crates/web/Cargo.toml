@@ -2,7 +2,15 @@
 name = "pyregistry-web"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+description.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -15,8 +23,8 @@ chrono.workspace = true
 http.workspace = true
 log.workspace = true
 mime.workspace = true
-pyregistry-application = { path = "../application" }
-pyregistry-domain = { path = "../domain" }
+pyregistry-application = { path = "../application", version = "0.1.1" }
+pyregistry-domain = { path = "../domain", version = "0.1.1" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -26,5 +34,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
-pyregistry-infrastructure = { path = "../infrastructure" }
+pyregistry-infrastructure = { path = "../infrastructure", version = "0.1.1" }
 tower.workspace = true

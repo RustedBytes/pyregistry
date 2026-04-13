@@ -2,10 +2,19 @@
 name = "pyregistry-infrastructure"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+description.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+aegis.workspace = true
 argon2.workspace = true
 async-trait.workspace = true
 base64.workspace = true
@@ -17,8 +26,8 @@ include_dir.workspace = true
 jsonwebtoken.workspace = true
 log.workspace = true
 opendal.workspace = true
-pyregistry-application = { path = "../application" }
-pyregistry-domain = { path = "../domain" }
+pyregistry-application = { path = "../application", version = "0.1.1" }
+pyregistry-domain = { path = "../domain", version = "0.1.1" }
 rand.workspace = true
 reqwest.workspace = true
 turso.workspace = true

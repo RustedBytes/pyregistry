@@ -2,7 +2,15 @@
 name = "pyregistry-application"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+description.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
@@ -12,7 +20,7 @@ futures-channel.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 log.workspace = true
-pyregistry-domain = { path = "../domain" }
+pyregistry-domain = { path = "../domain", version = "0.1.1" }
 rand.workspace = true
 rayon.workspace = true
 rustpython-parser.workspace = true

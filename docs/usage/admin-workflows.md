@@ -49,6 +49,11 @@ Use tokens to separate read, publish, and admin actions.
 
 Set expiration when the token is temporary or tied to a rollout.
 
+Revoke tokens by label when credentials are rotated, a job no longer needs
+access, or a secret may have been exposed. Revocation is immediate: the stored
+token hash is removed and future package API requests using that secret are
+rejected.
+
 ## Manage Packages
 
 Package pages show project metadata, releases, artifacts, yanked state, trusted

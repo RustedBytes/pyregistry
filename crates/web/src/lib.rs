@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/tenants", post(admin::create_tenant))
         .route("/admin/search", get(admin::search))
         .route("/admin/t/{tenant}/tokens", post(admin::issue_token))
+        .route("/admin/t/{tenant}/tokens/revoke", post(admin::revoke_token))
         .route(
             "/admin/t/{tenant}/mirror-cache",
             post(admin::cache_mirror_project),
@@ -970,6 +971,57 @@ mod tests {
             .await
             .expect("mirror response");
         assert_eq!(mirror.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn admin_can_revoke_api_tokens_by_label() {
+        let state = state().await;
+        let issued = state
+            .app
+            .issue_api_token(IssueApiTokenCommand {
+                tenant_slug: "acme".into(),
+                label: "ci".into(),
+                scopes: vec![TokenScope::Read],
+                ttl_hours: None,
+            })
+            .await
+            .expect("token");
+        state
+            .app
+            .authenticate_tenant_token("acme", &issued.secret, TokenScope::Read)
+            .await
+            .expect("token authenticates before revocation");
+
+        let app = router(state.clone());
+        let cookie = login_cookie(app.clone()).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/tokens/revoke")
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("label=ci"))
+                    .expect("request"),
+            )
+            .await
+            .expect("revoke response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("Token revoked"));
+        assert!(matches!(
+            state
+                .app
+                .authenticate_tenant_token("acme", &issued.secret, TokenScope::Read)
+                .await,
+            Err(ApplicationError::Unauthorized(_))
+        ));
+        let audit = state
+            .app
+            .list_audit_trail(Some("acme"), 10)
+            .await
+            .expect("audit");
+        assert!(audit.iter().any(|event| event.action == "api_token.revoke"));
     }
 
     #[tokio::test]

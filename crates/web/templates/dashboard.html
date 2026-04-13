@@ -565,6 +565,14 @@
         </section>
 
         <section class="control-card">
+          <h2>Revoke API token</h2>
+          <form method="post" action="/admin/t/{{ tenant_metrics.tenant_slug }}/tokens/revoke">
+            <input type="text" name="label" placeholder="token label" required>
+            <button type="submit">Revoke token</button>
+          </form>
+        </section>
+
+        <section class="control-card">
           <h2>Mirror package</h2>
           <p class="muted">Starts a background sync so the page returns immediately while artifacts download.</p>
           <form method="post" action="/admin/t/{{ tenant_metrics.tenant_slug }}/mirror-cache">
