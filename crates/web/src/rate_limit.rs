@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::{error::WebError, state::AppState};
 use axum::{
     extract::{Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -228,10 +228,9 @@ fn should_rate_limit_path(path: &str) -> bool {
 }
 
 fn client_key(request: &Request, trust_proxy_headers: bool) -> String {
-    if trust_proxy_headers
-        && let Some(forwarded) = forwarded_client(request.headers()) {
-            return forwarded;
-        }
+    if trust_proxy_headers && let Some(forwarded) = forwarded_client(request.headers()) {
+        return forwarded;
+    }
 
     request
         .extensions()
@@ -287,11 +286,11 @@ fn sanitize_forwarded_client(raw: &str) -> Option<String> {
 }
 
 fn too_many_requests(decision: RateLimitDecision) -> Response {
-    let mut response = (
-        StatusCode::TOO_MANY_REQUESTS,
-        "Too many API requests; please retry later.",
-    )
-        .into_response();
+    let mut response = WebError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        message: "Too many API requests; please retry later.".into(),
+    }
+    .into_response();
     insert_rate_limit_headers(response.headers_mut(), decision);
     response
 }

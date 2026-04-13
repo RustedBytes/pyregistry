@@ -94,6 +94,8 @@ pub fn router(state: AppState) -> Router {
             "/_/oidc/mint-token",
             post(package_api::mint_oidc_publish_token),
         )
+        .method_not_allowed_fallback(error::method_not_allowed)
+        .fallback(error::not_found)
         .layer(rate_limit_layer)
         .with_state(state)
 }
@@ -524,6 +526,50 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         assert!(body_text(response).await.contains("pyregistry"));
+    }
+
+    #[tokio::test]
+    async fn router_renders_html_error_pages_for_missing_routes_and_methods() {
+        let app = router(state().await);
+
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/missing")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("missing response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert!(
+            missing
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/html"))
+        );
+        let missing_body = body_text(missing).await;
+        assert!(missing_body.contains("<!doctype html>"));
+        assert!(missing_body.contains("404"));
+        assert!(missing_body.contains("Not Found"));
+
+        let wrong_method = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("wrong method response");
+        assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let wrong_method_body = body_text(wrong_method).await;
+        assert!(wrong_method_body.contains("<!doctype html>"));
+        assert!(wrong_method_body.contains("405"));
+        assert!(wrong_method_body.contains("Method Not Allowed"));
     }
 
     #[tokio::test]

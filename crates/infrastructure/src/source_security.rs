@@ -31,13 +31,14 @@ impl WheelSourceSecurityScanner for FoxGuardWheelSourceSecurityScanner {
         let scan_result = self.scan_archive_in_temp_dir(archive, &root);
 
         if let Err(error) = fs::remove_dir_all(&root)
-            && root.exists() {
-                warn!(
-                    "failed to clean FoxGuard temporary directory {}: {}",
-                    root.display(),
-                    error
-                );
-            }
+            && root.exists()
+        {
+            warn!(
+                "failed to clean FoxGuard temporary directory {}: {}",
+                root.display(),
+                error
+            );
+        }
 
         scan_result
     }

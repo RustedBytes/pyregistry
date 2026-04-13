@@ -428,36 +428,80 @@ impl RegistryStore for SqliteRegistryStore {
     }
 
     async fn save_project(&self, project: Project) -> Result<(), ApplicationError> {
-        self.execute(
-            r#"
-            INSERT INTO projects (
-                id, tenant_id, original_name, normalized_name, source,
-                summary, description, created_at, updated_at
+        let _guard = self.operation_lock.lock().await;
+        let id = uuid_string(project.id.into_inner());
+        let tenant_id = uuid_string(project.tenant_id.into_inner());
+        let original_name = project.name.original().to_string();
+        let normalized_name = project.name.normalized().to_string();
+        let source = project_source_str(&project.source);
+        let created_at = date_string(project.created_at);
+        let updated_at = date_string(project.updated_at);
+
+        let project_exists = {
+            let mut rows = self
+                .connection
+                .query("SELECT 1 FROM projects WHERE id = ?1", params![id.clone()])
+                .await
+                .map_err(sqlite_error)?;
+            rows.next().await.map_err(sqlite_error)?.is_some()
+        };
+
+        if project_exists {
+            self.connection
+                .execute(
+                    r#"
+                    UPDATE projects
+                    SET tenant_id = ?2,
+                        original_name = ?3,
+                        normalized_name = ?4,
+                        source = ?5,
+                        summary = ?6,
+                        description = ?7,
+                        created_at = ?8,
+                        updated_at = ?9
+                    WHERE id = ?1
+                    "#,
+                    params![
+                        id.clone(),
+                        tenant_id.clone(),
+                        original_name.clone(),
+                        normalized_name.clone(),
+                        source,
+                        project.summary.clone(),
+                        project.description.clone(),
+                        created_at.clone(),
+                        updated_at.clone(),
+                    ],
+                )
+                .await
+                .map_err(sqlite_error)?;
+            return Ok(());
+        }
+
+        self.connection
+            .execute(
+                r#"
+                INSERT INTO projects (
+                    id, tenant_id, original_name, normalized_name, source,
+                    summary, description, created_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "#,
+                params![
+                    id,
+                    tenant_id,
+                    original_name,
+                    normalized_name,
+                    source,
+                    project.summary,
+                    project.description,
+                    created_at,
+                    updated_at,
+                ],
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-            ON CONFLICT(id) DO UPDATE SET
-                tenant_id = excluded.tenant_id,
-                original_name = excluded.original_name,
-                normalized_name = excluded.normalized_name,
-                source = excluded.source,
-                summary = excluded.summary,
-                description = excluded.description,
-                created_at = excluded.created_at,
-                updated_at = excluded.updated_at
-            "#,
-            params![
-                uuid_string(project.id.into_inner()),
-                uuid_string(project.tenant_id.into_inner()),
-                project.name.original(),
-                project.name.normalized(),
-                project_source_str(&project.source),
-                project.summary,
-                project.description,
-                date_string(project.created_at),
-                date_string(project.updated_at),
-            ],
-        )
-        .await
+            .await
+            .map(|_| ())
+            .map_err(sqlite_error)
     }
 
     async fn list_projects(&self, tenant_id: TenantId) -> Result<Vec<Project>, ApplicationError> {
@@ -1732,6 +1776,61 @@ mod tests {
         assert_eq!(
             audit_events[0].metadata.get("filename").map(String::as_str),
             Some("demo_pkg-1.0.0-py3-none-any.whl")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn save_project_updates_existing_project_by_id() {
+        let path = std::env::temp_dir().join(format!("pyregistry-{}.sqlite3", Uuid::new_v4()));
+        let store = SqliteRegistryStore::open(&path)
+            .await
+            .expect("open sqlite store");
+        let now = Utc::now();
+        let tenant = Tenant::new(
+            TenantId::new(Uuid::new_v4()),
+            TenantSlug::new("acme").expect("tenant slug"),
+            "Acme Corp",
+            MirrorRule { enabled: true },
+            now,
+        )
+        .expect("tenant");
+        store.save_tenant(tenant.clone()).await.expect("tenant");
+
+        let mut project = Project::new(
+            ProjectId::new(Uuid::new_v4()),
+            tenant.id,
+            ProjectName::new("Flask").expect("project name"),
+            ProjectSource::Mirrored,
+            "old summary",
+            "old description",
+            now,
+        );
+        store.save_project(project.clone()).await.expect("project");
+
+        project.summary = "new summary".into();
+        project.description = "new description".into();
+        project.updated_at = now + Duration::minutes(5);
+        store
+            .save_project(project.clone())
+            .await
+            .expect("updated project");
+
+        assert_eq!(
+            store
+                .get_project_by_normalized_name(tenant.id, "flask")
+                .await
+                .expect("project lookup"),
+            Some(project)
+        );
+        assert_eq!(
+            store
+                .list_projects(tenant.id)
+                .await
+                .expect("projects")
+                .len(),
+            1
         );
 
         let _ = fs::remove_file(path);

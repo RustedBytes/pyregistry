@@ -934,13 +934,14 @@ fn suspicious_dependency_findings(
 
         if let Some(name) = metadata_field(&metadata, "Name")
             && let Ok(metadata_project) = ProjectName::new(name.to_string())
-                && metadata_project.normalized() != expected_project_normalized {
-                    evidence.push(format!(
-                        "metadata project name `{}` does not match requested project `{}`",
-                        metadata_project.original(),
-                        expected_project_normalized
-                    ));
-                }
+            && metadata_project.normalized() != expected_project_normalized
+        {
+            evidence.push(format!(
+                "metadata project name `{}` does not match requested project `{}`",
+                metadata_project.original(),
+                expected_project_normalized
+            ));
+        }
 
         for dependency in metadata
             .lines()

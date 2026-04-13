@@ -13,6 +13,15 @@ pub struct WebError {
     pub(crate) message: String,
 }
 
+#[derive(Template)]
+#[template(path = "error.html")]
+struct ErrorTemplate<'a> {
+    status_code: u16,
+    title: &'a str,
+    message: &'a str,
+    back_href: &'a str,
+}
+
 impl From<ApplicationError> for WebError {
     fn from(value: ApplicationError) -> Self {
         let status = match value {
@@ -37,7 +46,21 @@ impl IntoResponse for WebError {
         } else {
             warn!("returning HTTP {}: {}", self.status, self.message);
         }
-        (self.status, self.message).into_response()
+        let title = self.status.canonical_reason().unwrap_or("Error");
+        match (ErrorTemplate {
+            status_code: self.status.as_u16(),
+            title,
+            message: &self.message,
+            back_href: "/",
+        })
+        .render()
+        {
+            Ok(body) => (self.status, Html(body)).into_response(),
+            Err(error) => {
+                error!("failed to render HTTP error page: {error}");
+                (self.status, self.message).into_response()
+            }
+        }
     }
 }
 
@@ -59,11 +82,25 @@ pub(crate) fn bad_request(message: &str) -> WebError {
     }
 }
 
+pub(crate) async fn not_found() -> WebError {
+    WebError {
+        status: StatusCode::NOT_FOUND,
+        message: "That page does not exist.".into(),
+    }
+}
+
+pub(crate) async fn method_not_allowed() -> WebError {
+    WebError {
+        status: StatusCode::METHOD_NOT_ALLOWED,
+        message: "That action is not available for this URL.".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use askama::{FastWritable, NO_VALUES, Values};
-    use axum::body::to_bytes;
+    use axum::{body::to_bytes, http::header};
     use pyregistry_domain::DomainError;
     use std::fmt;
 
@@ -146,11 +183,22 @@ mod tests {
     async fn into_response_preserves_status_and_body() {
         let response = bad_request("bad input").into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/html"))
+        );
 
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
-        assert_eq!(&body[..], b"bad input");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("<!doctype html>"));
+        assert!(body.contains("400"));
+        assert!(body.contains("Bad Request"));
+        assert!(body.contains("bad input"));
     }
 
     #[tokio::test]
@@ -165,7 +213,10 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
-        assert_eq!(&body[..], b"template exploded");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("500"));
+        assert!(body.contains("Internal Server Error"));
+        assert!(body.contains("template exploded"));
     }
 
     #[test]

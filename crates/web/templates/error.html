@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ status_code }} {{ title }}</title>
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --surface: #ffffff;
+        --surface-soft: #eef7f5;
+        --ink: #171c24;
+        --muted: #667085;
+        --line: #d8dee8;
+        --accent: #0f766e;
+        --accent-strong: #0b5f59;
+        --focus: #2563eb;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 28px;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: Inter, "Avenir Next", "Segoe UI", system-ui, sans-serif;
+      }
+      main {
+        width: min(620px, 100%);
+      }
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 22px;
+        color: var(--ink);
+        text-decoration: none;
+      }
+      .brand-mark {
+        width: 42px;
+        height: 42px;
+        border-radius: 8px;
+        box-shadow: 0 10px 24px rgba(15, 118, 110, 0.18);
+      }
+      .brand strong {
+        display: block;
+        font-size: 1.08rem;
+      }
+      .brand span span {
+        display: block;
+        color: var(--muted);
+        font-size: 0.9rem;
+        font-weight: 500;
+      }
+      article {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 28px;
+        box-shadow: 0 20px 45px rgba(23, 28, 36, 0.08);
+      }
+      .status {
+        display: inline-flex;
+        align-items: center;
+        min-height: 34px;
+        margin-bottom: 18px;
+        border: 1px solid #9ed5cd;
+        border-radius: 8px;
+        padding: 6px 10px;
+        background: var(--surface-soft);
+        color: var(--accent-strong);
+        font-weight: 800;
+      }
+      h1 {
+        margin: 0;
+        font-size: 2rem;
+        line-height: 1.15;
+      }
+      p {
+        margin: 14px 0 0;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+      .actions {
+        margin-top: 24px;
+      }
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        border-radius: 8px;
+        padding: 10px 16px;
+        background: var(--accent);
+        color: #ffffff;
+        font-weight: 800;
+        text-decoration: none;
+        box-shadow: 0 12px 26px rgba(15, 118, 110, 0.18);
+      }
+      .button:hover {
+        background: var(--accent-strong);
+      }
+      a:focus-visible {
+        outline: 3px solid rgba(37, 99, 235, 0.35);
+        outline-offset: 3px;
+      }
+      @media (max-width: 560px) {
+        body {
+          padding: 18px;
+        }
+        article {
+          padding: 22px;
+        }
+        h1 {
+          font-size: 1.65rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <a class="brand" href="/">
+        <img class="brand-mark" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230f766e'/%3E%3Cpath d='M14 20l18-10 18 10v24L32 54 14 44z' fill='%23fff'/%3E%3Cpath d='M32 10v20l18-10M32 30L14 20M32 30v24' fill='none' stroke='%23171c24' stroke-width='3' stroke-linejoin='round' opacity='.34'/%3E%3C/svg%3E">
+        <span>
+          <strong>Pyregistry</strong>
+          <span>Package control plane</span>
+        </span>
+      </a>
+      <article>
+        <div class="status">{{ status_code }}</div>
+        <h1>{{ title }}</h1>
+        <p>{{ message }}</p>
+        <div class="actions">
+          <a class="button" href="{{ back_href }}">Return home</a>
+        </div>
+      </article>
+    </main>
+  </body>
+</html>
