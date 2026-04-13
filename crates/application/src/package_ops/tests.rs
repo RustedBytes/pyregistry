@@ -1,10 +1,11 @@
 use super::*;
 use crate::{
     AttestationSigner, CancellationSignal, Clock, CreateTenantCommand, DeletionCommand,
-    DistributionFileInspector, DistributionInspection, DistributionKind, IdGenerator,
-    IssueApiTokenCommand, MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot,
-    NoopVulnerabilityNotifier, NoopWheelAuditNotifier, ObjectStorage, OidcVerifier,
-    PackageArtifactDetails, PackageReleaseDetails, PackageVulnerability, PackageVulnerabilityQuery,
+    DependencyVulnerabilityQuery, DependencyVulnerabilityReport, DistributionFileInspector,
+    DistributionInspection, DistributionKind, IdGenerator, IssueApiTokenCommand,
+    MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot, NoopVulnerabilityNotifier,
+    NoopWheelAuditNotifier, ObjectStorage, OidcVerifier, PackageArtifactDetails,
+    PackageReleaseDetails, PackageVulnerability, PackageVulnerabilityQuery,
     PackageVulnerabilityReport, PasswordHasher, RecordAuditEventCommand,
     RegisterTrustedPublisherCommand, RegistryDistributionValidationStatus, RegistryOverview,
     RegistryStore, SearchHit, TokenHasher, UploadArtifactCommand,
@@ -1358,6 +1359,7 @@ fn package_artifact(filename: &str) -> PackageArtifactDetails {
         version: "1.0.0".into(),
         size_bytes: 42,
         sha256: "a".repeat(64),
+        object_key: format!("objects/{filename}"),
         yanked_reason: None,
         security: crate::ArtifactSecurityDetails::pending(),
     }
@@ -1407,6 +1409,16 @@ impl VulnerabilityScanner for ScenarioVulnerabilityScanner {
                 })
                 .collect()),
         }
+    }
+
+    async fn scan_dependency_versions(
+        &self,
+        dependencies: &[DependencyVulnerabilityQuery],
+    ) -> Result<Vec<DependencyVulnerabilityReport>, ApplicationError> {
+        Ok(dependencies
+            .iter()
+            .map(DependencyVulnerabilityReport::clean)
+            .collect())
     }
 }
 
@@ -2252,6 +2264,16 @@ impl VulnerabilityScanner for UnusedVulnerabilityScanner {
         Ok(packages
             .iter()
             .map(PackageVulnerabilityReport::clean)
+            .collect())
+    }
+
+    async fn scan_dependency_versions(
+        &self,
+        dependencies: &[DependencyVulnerabilityQuery],
+    ) -> Result<Vec<DependencyVulnerabilityReport>, ApplicationError> {
+        Ok(dependencies
+            .iter()
+            .map(DependencyVulnerabilityReport::clean)
             .collect())
     }
 }

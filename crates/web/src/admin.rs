@@ -4,11 +4,11 @@ use crate::{
     error::{WebError, render_html},
     models::{
         ArtifactSecurityView, AuditTrailEntryView, AuditTrailMetadataView, CreateTenantFormData,
-        DashboardTemplate, DashboardView, IndexTemplate, IssueTokenFormData, LoginFormData,
-        LoginTemplate, MessageTemplate, MirrorFormData, MirrorJobView, PackageArtifactView,
-        PackageDetailTemplate, PackageDetailView, PackageReleaseView, PackageSecuritySummaryView,
-        PackageVulnerabilityView, PublisherFormData, SearchQuery, TenantView, WheelAuditResponse,
-        YankFormData,
+        DashboardTemplate, DashboardView, DependencyVulnerabilityView, IndexTemplate,
+        IssueTokenFormData, LoginFormData, LoginTemplate, MessageTemplate, MirrorFormData,
+        MirrorJobView, PackageArtifactView, PackageDetailTemplate, PackageDetailView,
+        PackageReleaseView, PackageSecuritySummaryView, PackageVulnerabilityView,
+        PublisherFormData, SearchQuery, TenantView, WheelAuditResponse, YankFormData,
     },
     state::{AppState, MirrorJobPhase, MirrorJobStatus, mirror_job_key},
 };
@@ -956,6 +956,10 @@ fn package_detail_view(
             vulnerability_count: details.security.vulnerability_count,
             highest_severity: details.security.highest_severity,
             scan_error: details.security.scan_error,
+            scanned_dependency_count: details.security.scanned_dependency_count,
+            vulnerable_dependency_count: details.security.vulnerable_dependency_count,
+            dependency_vulnerability_count: details.security.dependency_vulnerability_count,
+            dependency_scan_error: details.security.dependency_scan_error,
         },
         pip_install_command,
         uv_install_command,
@@ -1026,6 +1030,41 @@ fn artifact_security_view(
         })
         .collect::<Vec<_>>();
     let hidden_vulnerability_count = vulnerability_count.saturating_sub(vulnerabilities.len());
+    let dependencies = security
+        .dependencies
+        .into_iter()
+        .map(|dependency| {
+            let vulnerability_count = dependency.vulnerability_count;
+            let vulnerabilities = dependency
+                .vulnerabilities
+                .into_iter()
+                .take(3)
+                .map(|vulnerability| PackageVulnerabilityView {
+                    id: vulnerability.id,
+                    summary: vulnerability.summary,
+                    severity: vulnerability.severity,
+                    fixed_versions: if vulnerability.fixed_versions.is_empty() {
+                        "not listed".into()
+                    } else {
+                        vulnerability.fixed_versions.join(", ")
+                    },
+                    primary_reference: vulnerability.references.into_iter().next(),
+                })
+                .collect::<Vec<_>>();
+            let hidden_vulnerability_count =
+                vulnerability_count.saturating_sub(vulnerabilities.len());
+            DependencyVulnerabilityView {
+                requirement: dependency.requirement,
+                package_name: dependency.package_name,
+                version: dependency.version,
+                vulnerability_count,
+                highest_severity: dependency.highest_severity,
+                vulnerabilities,
+                hidden_vulnerability_count,
+                scan_error: dependency.scan_error,
+            }
+        })
+        .collect();
 
     ArtifactSecurityView {
         scanned: security.scanned,
@@ -1034,6 +1073,11 @@ fn artifact_security_view(
         vulnerabilities,
         hidden_vulnerability_count,
         scan_error: security.scan_error,
+        dependency_count: security.dependency_count,
+        vulnerable_dependency_count: security.vulnerable_dependency_count,
+        dependency_vulnerability_count: security.dependency_vulnerability_count,
+        dependencies,
+        dependency_scan_error: security.dependency_scan_error,
     }
 }
 
@@ -1226,9 +1270,10 @@ mod tests {
     use askama::Template;
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
     use pyregistry_application::{
-        ArtifactSecurityDetails, PackageArtifactDetails, PackageDetails, PackageReleaseDetails,
-        PackageSecuritySummary, PackageVulnerability, WheelAuditFinding, WheelAuditFindingKind,
-        WheelAuditReport, WheelSourceSecurityScanSummary, WheelVirusScanSummary,
+        ArtifactSecurityDetails, DependencyVulnerabilityDetails, PackageArtifactDetails,
+        PackageDetails, PackageReleaseDetails, PackageSecuritySummary, PackageVulnerability,
+        WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport, WheelSourceSecurityScanSummary,
+        WheelVirusScanSummary,
     };
 
     #[test]
@@ -1349,6 +1394,7 @@ mod tests {
                     version: "0.1.14".into(),
                     size_bytes: 42,
                     sha256: "abc123".into(),
+                    object_key: "objects/rsloop.whl".into(),
                     yanked_reason: None,
                     security: ArtifactSecurityDetails::pending(),
                 }],
@@ -1384,6 +1430,7 @@ mod tests {
                     version: "0.1.14".into(),
                     size_bytes: 42,
                     sha256: "abc123".into(),
+                    object_key: "objects/rsloop.whl".into(),
                     yanked_reason: Some("bad wheel tag".into()),
                     security: ArtifactSecurityDetails::pending(),
                 }],
@@ -1417,7 +1464,24 @@ mod tests {
             ),
             vulnerability("GHSA-3", "HIGH", vec!["2.0.0", "2.0.1"], vec![]),
             vulnerability("GHSA-4", "CRITICAL", vec![], vec!["https://example.test/4"]),
-        ]);
+        ])
+        .with_dependencies(
+            vec![DependencyVulnerabilityDetails {
+                requirement: "urllib3==1.24.1".into(),
+                package_name: "urllib3".into(),
+                version: "1.24.1".into(),
+                vulnerability_count: 1,
+                highest_severity: Some("HIGH".into()),
+                vulnerabilities: vec![vulnerability(
+                    "GHSA-dep",
+                    "HIGH",
+                    vec!["1.26.5"],
+                    vec!["https://example.test/dep"],
+                )],
+                scan_error: None,
+            }],
+            None,
+        );
 
         let view = artifact_security_view(security);
 
@@ -1435,6 +1499,10 @@ mod tests {
             Some("https://example.test/2")
         );
         assert_eq!(view.vulnerabilities[2].fixed_versions, "2.0.0, 2.0.1");
+        assert_eq!(view.dependency_count, 1);
+        assert_eq!(view.vulnerable_dependency_count, 1);
+        assert_eq!(view.dependencies[0].package_name, "urllib3");
+        assert_eq!(view.dependencies[0].vulnerabilities[0].id, "GHSA-dep");
     }
 
     #[test]

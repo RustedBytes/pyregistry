@@ -1,8 +1,9 @@
 use crate::{
-    ApplicationError, ArtifactSecurityDetails, PackageDetails, PackageReleaseDetails,
-    PackageSecuritySummary, PackageVulnerabilityQuery, PyregistryApp,
+    ApplicationError, ArtifactSecurityDetails, DependencyVulnerabilityDetails,
+    DependencyVulnerabilityQuery, DependencyVulnerabilityReport, PackageDetails,
+    PackageReleaseDetails, PackageSecuritySummary, PackageVulnerabilityQuery, PyregistryApp,
     RegistryPackageSecurityReport, RegistrySecurityReport, VulnerablePackageNotification,
-    severity_rank,
+    WheelArchiveSnapshot, severity_rank,
 };
 use log::{debug, info, warn};
 use pyregistry_domain::{Project, Tenant};
@@ -64,6 +65,7 @@ impl PyregistryApp {
                     vulnerability_count: 0,
                     highest_severity: None,
                     scan_error: Some(message),
+                    ..PackageSecuritySummary::default()
                 };
             }
         };
@@ -79,10 +81,11 @@ impl PyregistryApp {
             vulnerability_count: 0,
             highest_severity: None,
             scan_error: None,
+            ..PackageSecuritySummary::default()
         };
         let mut per_version_errors = BTreeSet::new();
 
-        for release in releases {
+        for release in releases.iter_mut() {
             let Some(report) = reports_by_version.get(&release.version) else {
                 let message = "vulnerability scan did not return a result for this version";
                 per_version_errors.insert(format!("{}: {message}", release.version));
@@ -115,6 +118,9 @@ impl PyregistryApp {
             }
         }
 
+        self.attach_dependency_security(package_name, releases, &mut summary)
+            .await;
+
         if !per_version_errors.is_empty() {
             summary.scan_error = Some(
                 per_version_errors
@@ -132,6 +138,163 @@ impl PyregistryApp {
             summary.highest_severity
         );
         summary
+    }
+
+    async fn attach_dependency_security(
+        &self,
+        package_name: &str,
+        releases: &mut [PackageReleaseDetails],
+        summary: &mut PackageSecuritySummary,
+    ) {
+        let mut targets = Vec::new();
+        let mut queries = BTreeMap::new();
+
+        for (release_index, release) in releases.iter_mut().enumerate() {
+            for (artifact_index, artifact) in release.artifacts.iter_mut().enumerate() {
+                if !artifact.filename.to_ascii_lowercase().ends_with(".whl") {
+                    continue;
+                }
+
+                let bytes = match self.object_storage.get(&artifact.object_key).await {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => {
+                        artifact.security.dependency_scan_error =
+                            Some("wheel bytes are not cached, so pinned requirements could not be scanned".into());
+                        continue;
+                    }
+                    Err(error) => {
+                        artifact.security.dependency_scan_error = Some(error.to_string());
+                        continue;
+                    }
+                };
+
+                let archive = match self
+                    .wheel_archive_reader
+                    .read_wheel_bytes(&artifact.filename, &bytes)
+                {
+                    Ok(archive) => archive,
+                    Err(error) => {
+                        artifact.security.dependency_scan_error = Some(error.to_string());
+                        continue;
+                    }
+                };
+
+                let requirements = pinned_requirements_from_wheel(&archive);
+                if requirements.is_empty() {
+                    continue;
+                }
+
+                for requirement in requirements {
+                    queries
+                        .entry((
+                            requirement.package_name.clone(),
+                            requirement.version.clone(),
+                        ))
+                        .or_insert_with(|| DependencyVulnerabilityQuery {
+                            package_name: requirement.package_name.clone(),
+                            version: requirement.version.clone(),
+                        });
+                    targets.push(DependencyScanTarget {
+                        release_index,
+                        artifact_index,
+                        requirement,
+                    });
+                }
+            }
+        }
+
+        if queries.is_empty() {
+            return;
+        }
+
+        info!(
+            "running PySentry dependency vulnerability scan for package `{package_name}` across {} pinned requirement(s)",
+            queries.len()
+        );
+
+        let reports = match self
+            .vulnerability_scanner
+            .scan_dependency_versions(&queries.values().cloned().collect::<Vec<_>>())
+            .await
+        {
+            Ok(reports) => reports,
+            Err(error) => {
+                warn!(
+                    "PySentry dependency vulnerability scan failed for package `{package_name}`: {error}"
+                );
+                let message = error.to_string();
+                summary.dependency_scan_error = Some(message.clone());
+                for target in targets {
+                    releases[target.release_index].artifacts[target.artifact_index]
+                        .security
+                        .dependency_scan_error = Some(message.clone());
+                }
+                return;
+            }
+        };
+
+        let reports_by_dependency = reports
+            .into_iter()
+            .map(|report| {
+                (
+                    (report.package_name.clone(), report.version.clone()),
+                    report,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let mut details_by_artifact: BTreeMap<(usize, usize), Vec<DependencyVulnerabilityDetails>> =
+            BTreeMap::new();
+        let mut errors_by_artifact: BTreeMap<(usize, usize), BTreeSet<String>> = BTreeMap::new();
+
+        for target in targets {
+            let key = (
+                target.requirement.package_name.clone(),
+                target.requirement.version.clone(),
+            );
+            let report = reports_by_dependency.get(&key).cloned().unwrap_or_else(|| {
+                DependencyVulnerabilityReport::failed(
+                    &DependencyVulnerabilityQuery {
+                        package_name: target.requirement.package_name.clone(),
+                        version: target.requirement.version.clone(),
+                    },
+                    "dependency vulnerability scan did not return a result",
+                )
+            });
+
+            if let Some(error) = &report.scan_error {
+                errors_by_artifact
+                    .entry((target.release_index, target.artifact_index))
+                    .or_default()
+                    .insert(format!(
+                        "{}=={}: {error}",
+                        target.requirement.package_name, target.requirement.version
+                    ));
+            }
+
+            details_by_artifact
+                .entry((target.release_index, target.artifact_index))
+                .or_default()
+                .push(DependencyVulnerabilityDetails::from_report(
+                    target.requirement.requirement,
+                    report,
+                ));
+        }
+
+        for ((release_index, artifact_index), dependencies) in details_by_artifact {
+            let scan_error = errors_by_artifact
+                .remove(&(release_index, artifact_index))
+                .map(|errors| errors.into_iter().collect::<Vec<_>>().join("; "));
+            let artifact = &mut releases[release_index].artifacts[artifact_index];
+            artifact.security = artifact
+                .security
+                .clone()
+                .with_dependencies(dependencies, scan_error);
+            summary.scanned_dependency_count += artifact.security.dependency_count;
+            summary.vulnerable_dependency_count += artifact.security.vulnerable_dependency_count;
+            summary.dependency_vulnerability_count +=
+                artifact.security.dependency_vulnerability_count;
+        }
     }
 
     pub async fn check_registry_security(
@@ -259,6 +422,106 @@ fn max_severity(left: Option<String>, right: Option<String>) -> Option<String> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DependencyScanTarget {
+    release_index: usize,
+    artifact_index: usize,
+    requirement: PinnedRequirement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PinnedRequirement {
+    requirement: String,
+    package_name: String,
+    version: String,
+}
+
+fn pinned_requirements_from_wheel(archive: &WheelArchiveSnapshot) -> Vec<PinnedRequirement> {
+    let mut requirements = Vec::new();
+
+    for entry in &archive.entries {
+        if !entry.path.ends_with(".dist-info/METADATA") {
+            continue;
+        }
+
+        let Ok(metadata) = std::str::from_utf8(&entry.contents) else {
+            continue;
+        };
+
+        let mut current_header = String::new();
+        for line in metadata.lines() {
+            if line.starts_with(' ') || line.starts_with('\t') {
+                current_header.push_str(line.trim());
+                continue;
+            }
+
+            if let Some(requirement) = pinned_requirement_from_header(&current_header) {
+                requirements.push(requirement);
+            }
+            current_header = line.to_string();
+        }
+
+        if let Some(requirement) = pinned_requirement_from_header(&current_header) {
+            requirements.push(requirement);
+        }
+    }
+
+    requirements.sort_by(|left, right| {
+        left.package_name
+            .cmp(&right.package_name)
+            .then_with(|| left.version.cmp(&right.version))
+    });
+    requirements.dedup_by(|left, right| {
+        left.package_name == right.package_name && left.version == right.version
+    });
+    requirements
+}
+
+fn pinned_requirement_from_header(header: &str) -> Option<PinnedRequirement> {
+    let requirement = header.strip_prefix("Requires-Dist:")?.trim();
+    pinned_requirement(requirement)
+}
+
+fn pinned_requirement(requirement: &str) -> Option<PinnedRequirement> {
+    let requirement_without_marker = requirement.split(';').next()?.trim();
+    let requirement_without_parens = requirement_without_marker
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
+    if requirement_without_parens.contains("===") {
+        return None;
+    }
+    let (name_part, version_part) = requirement_without_parens.split_once("==")?;
+    if version_part.contains('*') {
+        return None;
+    }
+
+    let name = name_part
+        .trim()
+        .split(&['[', ' ', '\t', '<', '>', '=', '!', '~', '('][..])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let version = version_part
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim_end_matches(',')
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+
+    if name.is_empty() || version.is_empty() {
+        return None;
+    }
+
+    Some(PinnedRequirement {
+        requirement: requirement.to_string(),
+        package_name: name.to_ascii_lowercase().replace('_', "-"),
+        version: version.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +562,35 @@ mod tests {
         assert_eq!(max_severity(None, None), None);
     }
 
+    #[test]
+    fn extracts_only_pinned_wheel_requirements_for_dependency_scans() {
+        let archive = WheelArchiveSnapshot {
+            wheel_filename: "demo-1.0.0-py3-none-any.whl".into(),
+            entries: vec![crate::WheelArchiveEntry {
+                path: "demo-1.0.0.dist-info/METADATA".into(),
+                contents: b"Name: demo\nRequires-Dist: requests==2.19.0\nRequires-Dist: flask>=2\nRequires-Dist: urllib3[secure]==1.24.1 ; python_version >= '3.9'\nRequires-Dist: wildcard==1.*\n".to_vec(),
+            }],
+        };
+
+        let requirements = pinned_requirements_from_wheel(&archive);
+
+        assert_eq!(
+            requirements,
+            vec![
+                PinnedRequirement {
+                    requirement: "requests==2.19.0".into(),
+                    package_name: "requests".into(),
+                    version: "2.19.0".into(),
+                },
+                PinnedRequirement {
+                    requirement: "urllib3[secure]==1.24.1 ; python_version >= '3.9'".into(),
+                    package_name: "urllib3".into(),
+                    version: "1.24.1".into(),
+                },
+            ]
+        );
+    }
+
     fn package_report(
         tenant_slug: &str,
         project_name: &str,
@@ -317,6 +609,7 @@ mod tests {
                 vulnerability_count,
                 highest_severity: highest_severity.map(str::to_string),
                 scan_error: None,
+                ..PackageSecuritySummary::default()
             },
         }
     }

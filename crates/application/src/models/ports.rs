@@ -1,8 +1,9 @@
 use super::{
-    DistributionInspection, MirroredProjectSnapshot, PackageVulnerabilityQuery,
-    PackageVulnerabilityReport, RecentActivity, RegistryOverview, ReleaseArtifacts, SearchHit,
-    TenantDashboardStats, VulnerablePackageNotification, WheelArchiveSnapshot,
-    WheelAuditFindingNotification, WheelSourceSecurityScanResult, WheelVirusScanResult,
+    DependencyVulnerabilityQuery, DependencyVulnerabilityReport, DistributionInspection,
+    MirroredProjectSnapshot, PackageVulnerabilityQuery, PackageVulnerabilityReport, RecentActivity,
+    RegistryOverview, ReleaseArtifacts, SearchHit, TenantDashboardStats,
+    VulnerablePackageNotification, WheelArchiveSnapshot, WheelAuditFindingNotification,
+    WheelSourceSecurityScanResult, WheelVirusScanResult,
 };
 use crate::ApplicationError;
 use async_trait::async_trait;
@@ -234,6 +235,11 @@ pub trait VulnerabilityScanner: Send + Sync {
         &self,
         packages: &[PackageVulnerabilityQuery],
     ) -> Result<Vec<PackageVulnerabilityReport>, ApplicationError>;
+
+    async fn scan_dependency_versions(
+        &self,
+        dependencies: &[DependencyVulnerabilityQuery],
+    ) -> Result<Vec<DependencyVulnerabilityReport>, ApplicationError>;
 }
 
 #[async_trait]

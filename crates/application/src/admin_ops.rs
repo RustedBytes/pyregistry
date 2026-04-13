@@ -229,6 +229,7 @@ impl PyregistryApp {
                     version: group.release.version.as_str().to_string(),
                     size_bytes: artifact.size_bytes,
                     sha256: artifact.digests.sha256,
+                    object_key: artifact.object_key,
                     yanked_reason: artifact.yanked.and_then(|state| state.reason),
                     security: crate::ArtifactSecurityDetails::pending(),
                 })

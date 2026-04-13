@@ -109,7 +109,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use http_body_util::BodyExt;
     use pyregistry_application::{
-        ApplicationError, AttestationSigner, Clock, CreateTenantCommand, IdGenerator,
+        ApplicationError, AttestationSigner, Clock, CreateTenantCommand,
+        DependencyVulnerabilityQuery, DependencyVulnerabilityReport, IdGenerator,
         IssueApiTokenCommand, MirrorClient, MirroredProjectSnapshot, NoopVulnerabilityNotifier,
         NoopWheelAuditNotifier, ObjectStorage, OidcVerifier, PackageVulnerabilityQuery,
         PackageVulnerabilityReport, PasswordHasher, PyregistryApp, RegisterTrustedPublisherCommand,
@@ -255,6 +256,16 @@ mod tests {
             Ok(packages
                 .iter()
                 .map(PackageVulnerabilityReport::clean)
+                .collect())
+        }
+
+        async fn scan_dependency_versions(
+            &self,
+            dependencies: &[DependencyVulnerabilityQuery],
+        ) -> Result<Vec<DependencyVulnerabilityReport>, ApplicationError> {
+            Ok(dependencies
+                .iter()
+                .map(DependencyVulnerabilityReport::clean)
                 .collect())
         }
     }

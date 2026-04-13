@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use log::{debug, info, warn};
 use pyregistry_application::{
-    ApplicationError, PackageVulnerability, PackageVulnerabilityQuery, PackageVulnerabilityReport,
+    ApplicationError, DependencyVulnerabilityQuery, DependencyVulnerabilityReport,
+    PackageVulnerability, PackageVulnerabilityQuery, PackageVulnerabilityReport,
     VulnerabilityScanner,
 };
 use pysentry::{
@@ -164,6 +165,145 @@ impl VulnerabilityScanner for PySentryVulnerabilityScanner {
             .filter_map(|query| reports.get(&query_key(query)).cloned())
             .collect())
     }
+
+    async fn scan_dependency_versions(
+        &self,
+        dependencies: &[DependencyVulnerabilityQuery],
+    ) -> Result<Vec<DependencyVulnerabilityReport>, ApplicationError> {
+        if dependencies.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        info!(
+            "running PySentry dependency vulnerability lookup for {} pinned requirement(s)",
+            dependencies.len()
+        );
+        debug!("using PySentry cache at {}", self.cache_dir.display());
+
+        let mut reports = dependencies
+            .iter()
+            .map(|query| {
+                (
+                    dependency_query_key(query),
+                    DependencyVulnerabilityReport::clean(query),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut seen = BTreeSet::new();
+        let mut scanned_dependencies = Vec::new();
+        let mut fetch_packages = Vec::new();
+        let mut parsed_to_original = BTreeMap::new();
+
+        for query in dependencies {
+            let original_key = dependency_query_key(query);
+            if !seen.insert(original_key.clone()) {
+                continue;
+            }
+
+            let package_name = match PackageName::from_str(&query.package_name) {
+                Ok(package_name) => package_name,
+                Err(error) => {
+                    reports.insert(
+                        original_key,
+                        DependencyVulnerabilityReport::failed(
+                            query,
+                            format!("invalid dependency name for PySentry: {error}"),
+                        ),
+                    );
+                    continue;
+                }
+            };
+            let version = match Version::from_str(&query.version) {
+                Ok(version) => version,
+                Err(error) => {
+                    reports.insert(
+                        original_key,
+                        DependencyVulnerabilityReport::failed(
+                            query,
+                            format!("invalid dependency version for PySentry: {error}"),
+                        ),
+                    );
+                    continue;
+                }
+            };
+
+            parsed_to_original.insert(
+                (package_name.to_string(), version.to_string()),
+                dependency_query_key(query),
+            );
+            fetch_packages.push((package_name.to_string(), version.to_string()));
+            scanned_dependencies.push(ScannedDependency {
+                name: package_name,
+                version,
+                is_direct: true,
+                source: DependencySource::Registry,
+                path: None,
+                source_file: Some("wheel METADATA Requires-Dist".into()),
+            });
+        }
+
+        if scanned_dependencies.is_empty() {
+            warn!("PySentry dependency scan had no parseable pinned requirements to check");
+            return Ok(dependencies
+                .iter()
+                .filter_map(|query| reports.get(&dependency_query_key(query)).cloned())
+                .collect());
+        }
+
+        let cache = AuditCache::new(self.cache_dir.clone());
+        let source = VulnerabilitySource::new(
+            self.source_type.clone(),
+            cache,
+            false,
+            HttpConfig::default(),
+            self.vulnerability_ttl_hours,
+        );
+        let database = source
+            .fetch_vulnerabilities(&fetch_packages)
+            .await
+            .map_err(|error| {
+                ApplicationError::External(format!(
+                    "PySentry dependency vulnerability lookup failed: {error}"
+                ))
+            })?;
+        let matcher = VulnerabilityMatcher::new(
+            database,
+            MatcherConfig::new(SeverityLevel::Low, Vec::new(), Vec::new(), false, false),
+        );
+        let matches = matcher
+            .find_vulnerabilities(&scanned_dependencies)
+            .map_err(|error| {
+                ApplicationError::External(format!(
+                    "PySentry dependency vulnerability matching failed: {error}"
+                ))
+            })?;
+        let matches = matcher.filter_matches(matches);
+
+        for vulnerability_match in matches {
+            let parsed_key = (
+                vulnerability_match.package_name.to_string(),
+                vulnerability_match.installed_version.to_string(),
+            );
+            let Some(original_key) = parsed_to_original.get(&parsed_key).cloned() else {
+                warn!(
+                    "PySentry returned vulnerability for unmatched dependency `{}` version `{}`",
+                    vulnerability_match.package_name, vulnerability_match.installed_version
+                );
+                continue;
+            };
+
+            if let Some(report) = reports.get_mut(&original_key) {
+                report
+                    .vulnerabilities
+                    .push(map_vulnerability(vulnerability_match));
+            }
+        }
+
+        Ok(dependencies
+            .iter()
+            .filter_map(|query| reports.get(&dependency_query_key(query)).cloned())
+            .collect())
+    }
 }
 
 fn map_vulnerability(
@@ -200,6 +340,10 @@ fn severity_label(severity: Severity, cvss_score: Option<f32>) -> String {
 }
 
 fn query_key(query: &PackageVulnerabilityQuery) -> (String, String) {
+    (query.package_name.clone(), query.version.clone())
+}
+
+fn dependency_query_key(query: &DependencyVulnerabilityQuery) -> (String, String) {
     (query.package_name.clone(), query.version.clone())
 }
 

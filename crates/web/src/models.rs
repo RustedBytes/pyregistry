@@ -146,6 +146,10 @@ pub(crate) struct PackageSecuritySummaryView {
     pub(crate) vulnerability_count: usize,
     pub(crate) highest_severity: Option<String>,
     pub(crate) scan_error: Option<String>,
+    pub(crate) scanned_dependency_count: usize,
+    pub(crate) vulnerable_dependency_count: usize,
+    pub(crate) dependency_vulnerability_count: usize,
+    pub(crate) dependency_scan_error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -156,6 +160,11 @@ pub(crate) struct ArtifactSecurityView {
     pub(crate) vulnerabilities: Vec<PackageVulnerabilityView>,
     pub(crate) hidden_vulnerability_count: usize,
     pub(crate) scan_error: Option<String>,
+    pub(crate) dependency_count: usize,
+    pub(crate) vulnerable_dependency_count: usize,
+    pub(crate) dependency_vulnerability_count: usize,
+    pub(crate) dependencies: Vec<DependencyVulnerabilityView>,
+    pub(crate) dependency_scan_error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -165,6 +174,18 @@ pub(crate) struct PackageVulnerabilityView {
     pub(crate) severity: String,
     pub(crate) fixed_versions: String,
     pub(crate) primary_reference: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct DependencyVulnerabilityView {
+    pub(crate) requirement: String,
+    pub(crate) package_name: String,
+    pub(crate) version: String,
+    pub(crate) vulnerability_count: usize,
+    pub(crate) highest_severity: Option<String>,
+    pub(crate) vulnerabilities: Vec<PackageVulnerabilityView>,
+    pub(crate) hidden_vulnerability_count: usize,
+    pub(crate) scan_error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]

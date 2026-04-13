@@ -46,6 +46,8 @@ pub struct PackageArtifactDetails {
     pub version: String,
     pub size_bytes: u64,
     pub sha256: String,
+    #[serde(skip)]
+    pub object_key: String,
     pub yanked_reason: Option<String>,
     pub security: ArtifactSecurityDetails,
 }

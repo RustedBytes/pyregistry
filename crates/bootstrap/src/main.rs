@@ -1449,6 +1449,7 @@ mod tests {
                     vulnerability_count: 3,
                     highest_severity: Some("HIGH".into()),
                     scan_error: Some("advisory db warning".into()),
+                    ..PackageSecuritySummary::default()
                 },
             }],
         });

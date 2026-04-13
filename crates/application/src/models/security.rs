@@ -8,6 +8,10 @@ pub struct PackageSecuritySummary {
     pub vulnerability_count: usize,
     pub highest_severity: Option<String>,
     pub scan_error: Option<String>,
+    pub scanned_dependency_count: usize,
+    pub vulnerable_dependency_count: usize,
+    pub dependency_vulnerability_count: usize,
+    pub dependency_scan_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +21,11 @@ pub struct ArtifactSecurityDetails {
     pub highest_severity: Option<String>,
     pub vulnerabilities: Vec<PackageVulnerability>,
     pub scan_error: Option<String>,
+    pub dependency_count: usize,
+    pub vulnerable_dependency_count: usize,
+    pub dependency_vulnerability_count: usize,
+    pub dependencies: Vec<DependencyVulnerabilityDetails>,
+    pub dependency_scan_error: Option<String>,
 }
 
 impl ArtifactSecurityDetails {
@@ -28,6 +37,11 @@ impl ArtifactSecurityDetails {
             highest_severity: None,
             vulnerabilities: Vec::new(),
             scan_error: None,
+            dependency_count: 0,
+            vulnerable_dependency_count: 0,
+            dependency_vulnerability_count: 0,
+            dependencies: Vec::new(),
+            dependency_scan_error: None,
         }
     }
 
@@ -39,6 +53,11 @@ impl ArtifactSecurityDetails {
             highest_severity: None,
             vulnerabilities: Vec::new(),
             scan_error: Some(error.into()),
+            dependency_count: 0,
+            vulnerable_dependency_count: 0,
+            dependency_vulnerability_count: 0,
+            dependencies: Vec::new(),
+            dependency_scan_error: None,
         }
     }
 
@@ -56,7 +75,31 @@ impl ArtifactSecurityDetails {
             highest_severity,
             vulnerabilities,
             scan_error: None,
+            dependency_count: 0,
+            vulnerable_dependency_count: 0,
+            dependency_vulnerability_count: 0,
+            dependencies: Vec::new(),
+            dependency_scan_error: None,
         }
+    }
+
+    pub fn with_dependencies(
+        mut self,
+        dependencies: Vec<DependencyVulnerabilityDetails>,
+        scan_error: Option<String>,
+    ) -> Self {
+        self.dependency_count = dependencies.len();
+        self.vulnerable_dependency_count = dependencies
+            .iter()
+            .filter(|dependency| dependency.vulnerability_count > 0)
+            .count();
+        self.dependency_vulnerability_count = dependencies
+            .iter()
+            .map(|dependency| dependency.vulnerability_count)
+            .sum();
+        self.dependencies = dependencies;
+        self.dependency_scan_error = scan_error;
+        self
     }
 }
 
@@ -134,6 +177,75 @@ pub struct VulnerablePackageNotification {
     pub vulnerable_file_count: usize,
     pub vulnerability_count: usize,
     pub highest_severity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependencyVulnerabilityQuery {
+    pub package_name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependencyVulnerabilityReport {
+    pub package_name: String,
+    pub version: String,
+    pub vulnerabilities: Vec<PackageVulnerability>,
+    pub scan_error: Option<String>,
+}
+
+impl DependencyVulnerabilityReport {
+    #[must_use]
+    pub fn clean(query: &DependencyVulnerabilityQuery) -> Self {
+        Self {
+            package_name: query.package_name.clone(),
+            version: query.version.clone(),
+            vulnerabilities: Vec::new(),
+            scan_error: None,
+        }
+    }
+
+    #[must_use]
+    pub fn failed(query: &DependencyVulnerabilityQuery, error: impl Into<String>) -> Self {
+        Self {
+            package_name: query.package_name.clone(),
+            version: query.version.clone(),
+            vulnerabilities: Vec::new(),
+            scan_error: Some(error.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependencyVulnerabilityDetails {
+    pub requirement: String,
+    pub package_name: String,
+    pub version: String,
+    pub vulnerability_count: usize,
+    pub highest_severity: Option<String>,
+    pub vulnerabilities: Vec<PackageVulnerability>,
+    pub scan_error: Option<String>,
+}
+
+impl DependencyVulnerabilityDetails {
+    #[must_use]
+    pub fn from_report(requirement: String, report: DependencyVulnerabilityReport) -> Self {
+        let highest_severity = report
+            .vulnerabilities
+            .iter()
+            .map(|vulnerability| vulnerability.severity.as_str())
+            .max_by_key(|severity| severity_rank(severity))
+            .map(ToOwned::to_owned);
+
+        Self {
+            requirement,
+            package_name: report.package_name,
+            version: report.version,
+            vulnerability_count: report.vulnerabilities.len(),
+            highest_severity,
+            vulnerabilities: report.vulnerabilities,
+            scan_error: report.scan_error,
+        }
+    }
 }
 
 impl VulnerablePackageNotification {

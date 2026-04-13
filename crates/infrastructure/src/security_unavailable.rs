@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use log::warn;
 use pyregistry_application::{
-    ApplicationError, PackageVulnerabilityQuery, PackageVulnerabilityReport, VulnerabilityScanner,
+    ApplicationError, DependencyVulnerabilityQuery, DependencyVulnerabilityReport,
+    PackageVulnerabilityQuery, PackageVulnerabilityReport, VulnerabilityScanner,
 };
 use std::path::PathBuf;
 
@@ -34,6 +35,23 @@ impl VulnerabilityScanner for PySentryVulnerabilityScanner {
         );
         Err(ApplicationError::External(
             "PySentry vulnerability lookup is unavailable on Windows GNU targets".into(),
+        ))
+    }
+
+    async fn scan_dependency_versions(
+        &self,
+        dependencies: &[DependencyVulnerabilityQuery],
+    ) -> Result<Vec<DependencyVulnerabilityReport>, ApplicationError> {
+        if dependencies.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        warn!(
+            "PySentry dependency vulnerability lookup is unavailable on Windows GNU targets; cache path was {}",
+            self.cache_dir.display()
+        );
+        Err(ApplicationError::External(
+            "PySentry dependency vulnerability lookup is unavailable on Windows GNU targets".into(),
         ))
     }
 }

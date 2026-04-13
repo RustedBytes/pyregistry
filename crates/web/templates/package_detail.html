@@ -479,11 +479,16 @@
       </header>
 
       <section class="section-block">
-        <div class="status-panel {% if details.security.vulnerable_file_count > 0 %}security-card{% else %}security-ok{% endif %}">
+        <div class="status-panel {% if details.security.vulnerable_file_count > 0 || details.security.vulnerable_dependency_count > 0 %}security-card{% else %}security-ok{% endif %}">
           <h2>Known Vulnerabilities</h2>
           {% match details.security.scan_error %}
           {% when Some with (error) %}
           <p class="security-warning">PySentry scan did not complete for every release file: {{ error }}</p>
+          {% when None %}
+          {% endmatch %}
+          {% match details.security.dependency_scan_error %}
+          {% when Some with (error) %}
+          <p class="security-warning">PySentry dependency scan did not complete for every pinned requirement: {{ error }}</p>
           {% when None %}
           {% endmatch %}
 
@@ -499,6 +504,14 @@
           {% endmatch %}
           {% else %}
           <p>PySentry found no known vulnerabilities in {{ details.security.scanned_file_count }} scanned release file{% if details.security.scanned_file_count != 1 %}s{% endif %}.</p>
+          {% endif %}
+
+          {% if details.security.scanned_dependency_count > 0 %}
+          <p>
+            Pinned requirements checked: <strong>{{ details.security.scanned_dependency_count }}</strong>.
+            Vulnerable requirements: <strong>{{ details.security.vulnerable_dependency_count }}</strong>
+            with <strong>{{ details.security.dependency_vulnerability_count }}</strong> advisory match{% if details.security.dependency_vulnerability_count != 1 %}es{% endif %}.
+          </p>
           {% endif %}
         </div>
       </section>
@@ -650,6 +663,57 @@
                     {% endif %}
                   {% endif %}
                 {% endmatch %}
+
+                {% match artifact.security.dependency_scan_error %}
+                {% when Some with (error) %}
+                <div class="security-muted">
+                  <strong>Dependency scan unavailable</strong>
+                  <p class="muted">{{ error }}</p>
+                </div>
+                {% when None %}
+                {% endmatch %}
+
+                {% if artifact.security.dependency_count > 0 %}
+                  {% if artifact.security.vulnerable_dependency_count > 0 %}
+                  <div class="security-warning">
+                    <strong>{{ artifact.security.vulnerable_dependency_count }} vulnerable pinned requirement{% if artifact.security.vulnerable_dependency_count != 1 %}s{% endif %}</strong>
+                    <p class="muted">PySentry checked {{ artifact.security.dependency_count }} pinned requirement{% if artifact.security.dependency_count != 1 %}s{% endif %} from wheel METADATA.</p>
+                    <ul class="vuln-list">
+                      {% for dependency in artifact.security.dependencies %}
+                        {% if dependency.vulnerability_count > 0 %}
+                        <li>
+                          <strong>{{ dependency.package_name }}=={{ dependency.version }}</strong>
+                          {% match dependency.highest_severity %}
+                          {% when Some with (severity) %}
+                          <span class="pill">{{ severity }}</span>
+                          {% when None %}
+                          {% endmatch %}
+                          <br><span class="muted">{{ dependency.requirement }}</span>
+                          <ul class="vuln-list">
+                            {% for vulnerability in dependency.vulnerabilities %}
+                            <li>
+                              <strong>{{ vulnerability.id }}</strong> {{ vulnerability.severity }} - {{ vulnerability.summary }}
+                              <br><span class="muted">Fixed versions: {{ vulnerability.fixed_versions }}</span>
+                              {% match vulnerability.primary_reference %}
+                              {% when Some with (reference) %}
+                              <br><a href="{{ reference }}" rel="noreferrer">Reference</a>
+                              {% when None %}
+                              {% endmatch %}
+                            </li>
+                            {% endfor %}
+                          </ul>
+                          {% if dependency.hidden_vulnerability_count > 0 %}
+                          <p class="muted">Plus {{ dependency.hidden_vulnerability_count }} more advisory match{% if dependency.hidden_vulnerability_count != 1 %}es{% endif %}.</p>
+                          {% endif %}
+                        </li>
+                        {% endif %}
+                      {% endfor %}
+                    </ul>
+                  </div>
+                  {% else %}
+                  <p class="security-muted">No known vulnerabilities found in {{ artifact.security.dependency_count }} pinned requirement{% if artifact.security.dependency_count != 1 %}s{% endif %} from wheel METADATA.</p>
+                  {% endif %}
+                {% endif %}
 
                 <div class="file-actions">
                   <a class="button-link" href="{{ artifact.download_url }}" download="{{ artifact.filename }}">Download</a>
