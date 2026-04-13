@@ -534,6 +534,10 @@
           <div class="meta-line"><span class="muted">Tenant</span><strong>{{ details.tenant_slug }}</strong></div>
           <div class="meta-line"><span class="muted">Releases</span><strong>{{ details.releases.len() }}</strong></div>
           <div class="meta-line"><span class="muted">Publishers</span><strong>{{ details.trusted_publishers.len() }}</strong></div>
+          <p class="muted">Remove deletes local metadata and stored files for this package. Mirrored packages can be cached again from upstream.</p>
+          <form class="danger-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/remove" onsubmit="return confirm('Remove package {{ details.project_name }} and its local files? This cannot be undone.');">
+            <button class="danger" type="submit">Remove package</button>
+          </form>
         </aside>
       </header>
 

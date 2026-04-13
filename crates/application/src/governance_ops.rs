@@ -1,6 +1,6 @@
 use crate::{ApplicationError, DeletionCommand, PyregistryApp};
 use log::info;
-use pyregistry_domain::ensure_purge_allowed;
+use pyregistry_domain::{ProjectName, ProjectSource, ensure_purge_allowed};
 
 impl PyregistryApp {
     pub async fn yank_artifact(&self, command: DeletionCommand) -> Result<(), ApplicationError> {
@@ -158,6 +158,29 @@ impl PyregistryApp {
         ensure_purge_allowed(&project.source)?;
         self.purge_project_internal(&project).await?;
         info!("project purge completed");
+        Ok(())
+    }
+
+    pub async fn remove_package(
+        &self,
+        tenant_slug: &str,
+        project_name: &str,
+    ) -> Result<(), ApplicationError> {
+        info!("removing package for tenant `{tenant_slug}` project `{project_name}`");
+        let tenant = self.require_tenant(tenant_slug).await?;
+        let project_name = ProjectName::new(project_name)?;
+        let project = self
+            .store
+            .get_project_by_normalized_name(tenant.id, project_name.normalized())
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("package".into()))?;
+
+        if matches!(project.source, ProjectSource::Local) {
+            ensure_purge_allowed(&project.source)?;
+        }
+
+        self.purge_project_internal(&project).await?;
+        info!("package removal completed");
         Ok(())
     }
 }

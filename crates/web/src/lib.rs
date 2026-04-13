@@ -51,6 +51,10 @@ pub fn router(state: AppState) -> Router {
             get(admin::package_detail),
         )
         .route(
+            "/admin/t/{tenant}/packages/{project}/remove",
+            post(admin::remove_package),
+        )
+        .route(
             "/admin/t/{tenant}/packages/{project}/releases/{version}/yank",
             post(admin::yank_release),
         )
@@ -1331,6 +1335,7 @@ mod tests {
         let detail_body = body_text(detail).await;
         assert!(detail_body.contains("demo_pkg-1.0.0-py3-none-any.whl"));
         assert!(detail_body.contains("uv pip install"));
+        assert!(detail_body.contains("Remove package"));
 
         let list = app
             .clone()
@@ -1467,16 +1472,44 @@ mod tests {
 
         upload_demo_package(app.clone(), &auth).await;
         let purge_release = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/admin/t/acme/packages/demo-pkg/releases/1.0.0/purge")
-                    .header(header::COOKIE, cookie)
+                    .header(header::COOKIE, cookie.clone())
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("purge release");
         assert_eq!(purge_release.status(), StatusCode::SEE_OTHER);
+
+        upload_demo_package(app.clone(), &auth).await;
+        let remove_package = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/demo-pkg/remove")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("remove package");
+        assert_eq!(remove_package.status(), StatusCode::SEE_OTHER);
+
+        let removed_detail = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/t/acme/packages/demo-pkg")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("removed detail");
+        assert_eq!(removed_detail.status(), StatusCode::NOT_FOUND);
     }
 }

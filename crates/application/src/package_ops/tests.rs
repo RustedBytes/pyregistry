@@ -367,6 +367,50 @@ async fn evict_mirror_cache_purges_mirrored_projects_but_ignores_local_projects(
     assert_eq!(storage.object_count(), 0);
 }
 
+#[tokio::test]
+async fn remove_package_purges_local_packages_and_evicts_mirrored_packages() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true));
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_artifact_count(1));
+    let app = test_app(store.clone(), storage.clone(), mirror, 1);
+
+    app.resolve_project_from_mirror("acme", "demo")
+        .await
+        .expect("mirror resolution")
+        .expect("mirrored project");
+    assert_eq!(store.artifact_count(), 1);
+    assert_eq!(storage.object_count(), 1);
+
+    app.remove_package("acme", "demo")
+        .await
+        .expect("remove mirrored package");
+    let tenant = store
+        .get_tenant_by_slug("acme")
+        .await
+        .expect("tenant lookup")
+        .expect("tenant");
+    assert!(
+        store
+            .get_project_by_normalized_name(tenant.id, "demo")
+            .await
+            .expect("mirrored lookup")
+            .is_none()
+    );
+    assert_eq!(store.artifact_count(), 0);
+    assert_eq!(storage.object_count(), 0);
+
+    app.remove_package("acme", "internal")
+        .await
+        .expect("remove local package");
+    assert!(
+        store
+            .get_project_by_normalized_name(tenant.id, "internal")
+            .await
+            .expect("local lookup")
+            .is_none()
+    );
+}
+
 #[test]
 fn mirrored_artifact_payload_validation_checks_size_and_sha256() {
     let bytes = b"expected artifact bytes";

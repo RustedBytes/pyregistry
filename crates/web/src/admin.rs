@@ -518,6 +518,30 @@ pub(crate) async fn package_detail(
     render_html(PackageDetailTemplate { details })
 }
 
+pub(crate) async fn remove_package(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project)): Path<(String, String)>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    info!(
+        "admin `{}` is removing package `{}` in tenant `{}`",
+        session.email, project, tenant
+    );
+    state.app.remove_package(&tenant, &project).await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "package.remove",
+        Some(tenant.clone()),
+        Some(project.clone()),
+        audit_metadata([]),
+    )
+    .await;
+    Ok(Redirect::to(&format!("/admin/t/{tenant}/packages")))
+}
+
 pub(crate) async fn yank_release(
     State(state): State<AppState>,
     jar: CookieJar,
