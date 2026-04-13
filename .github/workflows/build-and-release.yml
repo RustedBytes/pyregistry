@@ -37,7 +37,7 @@ jobs:
           - name: macos-aarch64
             os: macos-15
             target: aarch64-apple-darwin
-            rustflags: ""
+            rustflags: -Ctarget-feature=-sha3
             artifact_name: pyregistry-macos-aarch64
             binary_name: pyregistry
 
