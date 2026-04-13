@@ -121,11 +121,11 @@ mod tests {
     use pyregistry_application::{
         ApplicationError, AttestationSigner, Clock, CreateTenantCommand,
         DependencyVulnerabilityQuery, DependencyVulnerabilityReport, IdGenerator,
-        IssueApiTokenCommand, MirrorClient, MirroredProjectSnapshot, NoopVulnerabilityNotifier,
-        NoopWheelAuditNotifier, ObjectStorage, OidcVerifier, PackageVulnerabilityQuery,
-        PackageVulnerabilityReport, PasswordHasher, PyregistryApp, RegisterTrustedPublisherCommand,
-        TokenHasher, UploadArtifactCommand, VulnerabilityScanner, WheelArchiveEntry,
-        WheelArchiveReader, WheelArchiveSnapshot, WheelSourceSecurityScanResult,
+        IssueApiTokenCommand, MirrorClient, MirroredProjectSnapshot, NoopPackagePublishNotifier,
+        NoopVulnerabilityNotifier, NoopWheelAuditNotifier, ObjectStorage, OidcVerifier,
+        PackageVulnerabilityQuery, PackageVulnerabilityReport, PasswordHasher, PyregistryApp,
+        RegisterTrustedPublisherCommand, TokenHasher, UploadArtifactCommand, VulnerabilityScanner,
+        WheelArchiveEntry, WheelArchiveReader, WheelArchiveSnapshot, WheelSourceSecurityScanResult,
         WheelSourceSecurityScanner, WheelVirusScanResult, WheelVirusScanner,
     };
     use pyregistry_domain::{
@@ -380,6 +380,7 @@ mod tests {
             Arc::new(PlainTokenHasher),
             Arc::new(CleanVulnerabilityScanner),
             Arc::new(NoopVulnerabilityNotifier),
+            Arc::new(NoopPackagePublishNotifier),
             Arc::new(NoopWheelAuditNotifier),
             Arc::new(StaticWheelArchiveReader),
             Arc::new(NoopVirusScanner),

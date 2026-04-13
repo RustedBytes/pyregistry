@@ -1,9 +1,9 @@
 use super::{
     DependencyVulnerabilityQuery, DependencyVulnerabilityReport, DistributionInspection,
-    MirroredProjectSnapshot, PackageVulnerabilityQuery, PackageVulnerabilityReport, RecentActivity,
-    RegistryOverview, ReleaseArtifacts, SearchHit, TenantDashboardStats,
-    VulnerablePackageNotification, WheelArchiveSnapshot, WheelAuditFindingNotification,
-    WheelSourceSecurityScanResult, WheelVirusScanResult,
+    MirroredProjectSnapshot, PackagePublishNotification, PackageVulnerabilityQuery,
+    PackageVulnerabilityReport, RecentActivity, RegistryOverview, ReleaseArtifacts, SearchHit,
+    TenantDashboardStats, VulnerablePackageNotification, WheelArchiveSnapshot,
+    WheelAuditFindingNotification, WheelSourceSecurityScanResult, WheelVirusScanResult,
 };
 use crate::ApplicationError;
 use async_trait::async_trait;
@@ -257,6 +257,26 @@ impl VulnerabilityNotifier for NoopVulnerabilityNotifier {
     async fn notify_vulnerable_package(
         &self,
         _notification: &VulnerablePackageNotification,
+    ) -> Result<(), ApplicationError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+pub trait PackagePublishNotifier: Send + Sync {
+    async fn notify_package_publish(
+        &self,
+        notification: &PackagePublishNotification,
+    ) -> Result<(), ApplicationError>;
+}
+
+pub struct NoopPackagePublishNotifier;
+
+#[async_trait]
+impl PackagePublishNotifier for NoopPackagePublishNotifier {
+    async fn notify_package_publish(
+        &self,
+        _notification: &PackagePublishNotification,
     ) -> Result<(), ApplicationError> {
         Ok(())
     }

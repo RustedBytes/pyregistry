@@ -234,6 +234,11 @@ url = "https://discord.com/api/webhooks/..."
 username = "Pyregistry"
 timeout_seconds = 10
 
+[security.package_publish_webhook]
+url = "https://discord.com/api/webhooks/..."
+username = "Pyregistry"
+timeout_seconds = 10
+
 [rate_limit]
 enabled = true
 requests_per_minute = 120
@@ -333,6 +338,9 @@ Useful environment variables:
 - `VULNERABILITY_WEBHOOK_URL`
 - `VULNERABILITY_WEBHOOK_USERNAME`
 - `VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS`
+- `PACKAGE_PUBLISH_WEBHOOK_URL`
+- `PACKAGE_PUBLISH_WEBHOOK_USERNAME`
+- `PACKAGE_PUBLISH_WEBHOOK_TIMEOUT_SECONDS`
 - `RATE_LIMIT_ENABLED`
 - `RATE_LIMIT_REQUESTS_PER_MINUTE`
 - `RATE_LIMIT_BURST`
@@ -408,6 +416,10 @@ for known vulnerabilities through the PySentry adapter. Configure
 `[security.vulnerability_webhook]` or `VULNERABILITY_WEBHOOK_URL` to send a
 Discord-compatible webhook message for each vulnerable package found by that
 command.
+
+Configure `[security.package_publish_webhook]` or
+`PACKAGE_PUBLISH_WEBHOOK_URL` to send Discord-compatible notifications when a
+publish creates a new package or adds a new version.
 
 ## Python Tooling
 

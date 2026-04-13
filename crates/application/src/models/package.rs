@@ -80,3 +80,21 @@ pub struct PackageDetails {
     pub releases: Vec<PackageReleaseDetails>,
     pub trusted_publishers: Vec<TrustedPublisherDescriptor>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PackagePublishEventKind {
+    NewPackage,
+    NewVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackagePublishNotification {
+    pub kind: PackagePublishEventKind,
+    pub tenant_slug: String,
+    pub project_name: String,
+    pub normalized_name: String,
+    pub version: String,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}

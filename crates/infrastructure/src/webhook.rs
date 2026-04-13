@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use pyregistry_application::{
-    ApplicationError, VulnerabilityNotifier, VulnerablePackageNotification,
-    WheelAuditFindingNotification, WheelAuditNotifier, severity_rank,
+    ApplicationError, PackagePublishEventKind, PackagePublishNotification, PackagePublishNotifier,
+    VulnerabilityNotifier, VulnerablePackageNotification, WheelAuditFindingNotification,
+    WheelAuditNotifier, severity_rank,
 };
 use reqwest::{Client, Url};
 use serde::Serialize;
@@ -77,6 +78,18 @@ impl WheelAuditNotifier for DiscordWebhookVulnerabilityNotifier {
     ) -> Result<(), ApplicationError> {
         let payload =
             DiscordWebhookPayload::for_wheel_audit_findings(notification, self.username.as_deref());
+        post_webhook_payload(&self.client, self.endpoint.clone(), &payload).await
+    }
+}
+
+#[async_trait]
+impl PackagePublishNotifier for DiscordWebhookVulnerabilityNotifier {
+    async fn notify_package_publish(
+        &self,
+        notification: &PackagePublishNotification,
+    ) -> Result<(), ApplicationError> {
+        let payload =
+            DiscordWebhookPayload::for_package_publish(notification, self.username.as_deref());
         post_webhook_payload(&self.client, self.endpoint.clone(), &payload).await
     }
 }
@@ -215,6 +228,49 @@ impl DiscordWebhookPayload {
                 description:
                     "The mirrored wheel update scan found suspicious install-time signals.".into(),
                 color: 0xe67e22,
+                fields,
+            }],
+            allowed_mentions: DiscordAllowedMentions { parse: Vec::new() },
+        }
+    }
+
+    fn for_package_publish(
+        notification: &PackagePublishNotification,
+        username: Option<&str>,
+    ) -> Self {
+        let (title, description, color) = match notification.kind {
+            PackagePublishEventKind::NewPackage => (
+                "New package published",
+                "A new package was pushed into the registry.",
+                0x2ecc71,
+            ),
+            PackagePublishEventKind::NewVersion => (
+                "New package version published",
+                "A new version was added to an existing package.",
+                0x3498db,
+            ),
+        };
+        let package = format!(
+            "{}/{} {}",
+            notification.tenant_slug, notification.project_name, notification.version
+        );
+        let fields = vec![
+            DiscordEmbedField::inline("Tenant", &notification.tenant_slug),
+            DiscordEmbedField::inline("Package", &notification.project_name),
+            DiscordEmbedField::inline("Normalized name", &notification.normalized_name),
+            DiscordEmbedField::inline("Version", &notification.version),
+            DiscordEmbedField::inline("File", &notification.filename),
+            DiscordEmbedField::inline("Size", notification.size_bytes.to_string()),
+            DiscordEmbedField::inline("SHA256", &notification.sha256),
+        ];
+
+        Self {
+            content: format!("{title}: `{package}`"),
+            username: username.map(ToOwned::to_owned),
+            embeds: vec![DiscordEmbed {
+                title: title.into(),
+                description: description.into(),
+                color,
                 fields,
             }],
             allowed_mentions: DiscordAllowedMentions { parse: Vec::new() },
@@ -388,6 +444,45 @@ mod tests {
                                 && field["value"].as_str().is_some_and(|value| {
                                     value.contains("PostInstallClue") && value.contains("demo.pth")
                                 })
+                        })
+                })
+        );
+    }
+
+    #[test]
+    fn discord_payload_contains_package_publish_summary() {
+        let notification = PackagePublishNotification {
+            kind: PackagePublishEventKind::NewVersion,
+            tenant_slug: "acme".into(),
+            project_name: "Demo_Pkg".into(),
+            normalized_name: "demo-pkg".into(),
+            version: "1.1.0".into(),
+            filename: "demo-pkg-1.1.0-py3-none-any.whl".into(),
+            size_bytes: 42,
+            sha256: "abc123".into(),
+        };
+
+        let payload = DiscordWebhookPayload::for_package_publish(&notification, Some("Pyregistry"));
+        let json = serde_json::to_value(payload).expect("payload json");
+
+        assert_eq!(json["username"], "Pyregistry");
+        assert_eq!(
+            json["content"],
+            "New package version published: `acme/Demo_Pkg 1.1.0`"
+        );
+        assert_eq!(json["allowed_mentions"]["parse"], Value::Array(Vec::new()));
+        assert_eq!(json["embeds"][0]["title"], "New package version published");
+        assert_eq!(json["embeds"][0]["color"], 0x3498db);
+        assert!(
+            json["embeds"][0]["fields"]
+                .as_array()
+                .is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .any(|field| field["name"] == "Version" && field["value"] == "1.1.0")
+                        && fields.iter().any(|field| {
+                            field["name"] == "File"
+                                && field["value"] == "demo-pkg-1.1.0-py3-none-any.whl"
                         })
                 })
         );

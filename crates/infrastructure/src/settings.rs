@@ -143,6 +143,7 @@ impl Settings {
                     foxguard_rule_ids: read_csv_env("FOXGUARD_IGNORE_RULE_IDS"),
                 },
                 vulnerability_webhook: vulnerability_webhook_from_env()?,
+                package_publish_webhook: package_publish_webhook_from_env()?,
             },
             rate_limit: RateLimitConfig {
                 enabled: read_env_bool("RATE_LIMIT_ENABLED", true),
@@ -554,6 +555,7 @@ pub struct SecurityConfig {
     pub yara_rules_path: PathBuf,
     pub scanner_ignores: SecurityScannerIgnoreConfig,
     pub vulnerability_webhook: VulnerabilityWebhookConfig,
+    pub package_publish_webhook: PackagePublishWebhookConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -594,10 +596,11 @@ impl SecurityConfig {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "yara_rules_path={}, scanner_ignores={}, vulnerability_webhook={}",
+            "yara_rules_path={}, scanner_ignores={}, vulnerability_webhook={}, package_publish_webhook={}",
             self.yara_rules_path.display(),
             self.scanner_ignores.log_safe_summary(),
-            self.vulnerability_webhook.log_safe_summary()
+            self.vulnerability_webhook.log_safe_summary(),
+            self.package_publish_webhook.log_safe_summary()
         )
     }
 
@@ -607,7 +610,8 @@ impl SecurityConfig {
                 "yara_rules_path must not be empty".into(),
             ));
         }
-        self.vulnerability_webhook.validate()
+        self.vulnerability_webhook.validate()?;
+        self.package_publish_webhook.validate()
     }
 }
 
@@ -687,6 +691,76 @@ impl VulnerabilityWebhookConfig {
                 "vulnerability_webhook.url must use http or https, got `{other}`"
             ))),
         }
+    }
+}
+
+fn log_safe_webhook_summary(
+    url: &Option<String>,
+    username: Option<&str>,
+    timeout_seconds: u64,
+) -> String {
+    let Some(url) = url else {
+        return "disabled".into();
+    };
+    let endpoint = Url::parse(url)
+        .ok()
+        .map(|url| {
+            let host = url.host_str().unwrap_or("configured");
+            let path = url.path();
+            if path.is_empty() || path == "/" {
+                host.to_string()
+            } else {
+                format!("{host}/<redacted>")
+            }
+        })
+        .unwrap_or_else(|| "configured".into());
+    let username = username.unwrap_or("default");
+    format!("enabled(endpoint={endpoint}, username={username}, timeout_seconds={timeout_seconds})")
+}
+
+fn validate_webhook_config(
+    name: &'static str,
+    url: Option<&str>,
+    timeout_seconds: u64,
+) -> Result<(), SettingsError> {
+    if timeout_seconds == 0 {
+        return Err(SettingsError::InvalidSecurityConfig(format!(
+            "{name}.timeout_seconds must be greater than zero"
+        )));
+    }
+    let Some(url) = url else {
+        return Ok(());
+    };
+    let parsed = Url::parse(url).map_err(|error| {
+        SettingsError::InvalidSecurityConfig(format!("{name}.url must be a valid URL: {error}"))
+    })?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        other => Err(SettingsError::InvalidSecurityConfig(format!(
+            "{name}.url must use http or https, got `{other}`"
+        ))),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackagePublishWebhookConfig {
+    pub url: Option<String>,
+    pub username: Option<String>,
+    pub timeout_seconds: u64,
+}
+
+impl PackagePublishWebhookConfig {
+    #[must_use]
+    pub fn log_safe_summary(&self) -> String {
+        log_safe_webhook_summary(&self.url, self.username.as_deref(), self.timeout_seconds)
+    }
+
+    fn validate(&self) -> Result<(), SettingsError> {
+        validate_webhook_config(
+            "package_publish_webhook",
+            self.url.as_deref(),
+            self.timeout_seconds,
+        )
     }
 }
 
@@ -939,6 +1013,7 @@ struct SecurityConfigFile {
     #[serde(default)]
     scanner_ignores: SecurityScannerIgnoreConfigFile,
     vulnerability_webhook: Option<VulnerabilityWebhookConfigFile>,
+    package_publish_webhook: Option<PackagePublishWebhookConfigFile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -961,6 +1036,13 @@ struct SecurityScannerIgnoreConfigFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VulnerabilityWebhookConfigFile {
+    url: Option<String>,
+    username: Option<String>,
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PackagePublishWebhookConfigFile {
     url: Option<String>,
     username: Option<String>,
     timeout_seconds: Option<u64>,
@@ -1353,6 +1435,11 @@ impl TryFrom<SecurityConfigFile> for SecurityConfig {
                 .map(VulnerabilityWebhookConfig::try_from)
                 .transpose()?
                 .unwrap_or_else(default_vulnerability_webhook_config),
+            package_publish_webhook: value
+                .package_publish_webhook
+                .map(PackagePublishWebhookConfig::try_from)
+                .transpose()?
+                .unwrap_or_else(default_package_publish_webhook_config),
         };
         config.validate()?;
         Ok(config)
@@ -1365,6 +1452,7 @@ impl From<SecurityConfig> for SecurityConfigFile {
             yara_rules_path: value.yara_rules_path,
             scanner_ignores: value.scanner_ignores.into(),
             vulnerability_webhook: Some(value.vulnerability_webhook.into()),
+            package_publish_webhook: Some(value.package_publish_webhook.into()),
         }
     }
 }
@@ -1413,6 +1501,38 @@ impl TryFrom<VulnerabilityWebhookConfigFile> for VulnerabilityWebhookConfig {
 
 impl From<VulnerabilityWebhookConfig> for VulnerabilityWebhookConfigFile {
     fn from(value: VulnerabilityWebhookConfig) -> Self {
+        Self {
+            url: value.url,
+            username: value.username,
+            timeout_seconds: Some(value.timeout_seconds),
+        }
+    }
+}
+
+impl TryFrom<PackagePublishWebhookConfigFile> for PackagePublishWebhookConfig {
+    type Error = SettingsError;
+
+    fn try_from(value: PackagePublishWebhookConfigFile) -> Result<Self, Self::Error> {
+        let config = Self {
+            url: value
+                .url
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty()),
+            username: value
+                .username
+                .map(|username| username.trim().to_string())
+                .filter(|username| !username.is_empty()),
+            timeout_seconds: value
+                .timeout_seconds
+                .unwrap_or_else(default_package_publish_webhook_timeout_seconds),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl From<PackagePublishWebhookConfig> for PackagePublishWebhookConfigFile {
+    fn from(value: PackagePublishWebhookConfig) -> Self {
         Self {
             url: value.url,
             username: value.username,
@@ -1670,6 +1790,7 @@ fn default_security_config() -> SecurityConfig {
         yara_rules_path: PathBuf::from("supplied/signature-base/yara"),
         scanner_ignores: SecurityScannerIgnoreConfig::default(),
         vulnerability_webhook: default_vulnerability_webhook_config(),
+        package_publish_webhook: default_package_publish_webhook_config(),
     }
 }
 
@@ -1682,6 +1803,18 @@ fn default_vulnerability_webhook_config() -> VulnerabilityWebhookConfig {
 }
 
 fn default_vulnerability_webhook_timeout_seconds() -> u64 {
+    10
+}
+
+fn default_package_publish_webhook_config() -> PackagePublishWebhookConfig {
+    PackagePublishWebhookConfig {
+        url: None,
+        username: Some("Pyregistry".into()),
+        timeout_seconds: default_package_publish_webhook_timeout_seconds(),
+    }
+}
+
+fn default_package_publish_webhook_timeout_seconds() -> u64 {
     10
 }
 
@@ -1840,6 +1973,26 @@ fn vulnerability_webhook_from_env() -> Result<VulnerabilityWebhookConfig, Settin
         timeout_seconds: read_env_u64(
             "VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS",
             default_vulnerability_webhook_timeout_seconds(),
+        ),
+    };
+    config.validate()?;
+    Ok(config)
+}
+
+fn package_publish_webhook_from_env() -> Result<PackagePublishWebhookConfig, SettingsError> {
+    let config = PackagePublishWebhookConfig {
+        url: std::env::var("PACKAGE_PUBLISH_WEBHOOK_URL")
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty()),
+        username: std::env::var("PACKAGE_PUBLISH_WEBHOOK_USERNAME")
+            .ok()
+            .map(|username| username.trim().to_string())
+            .filter(|username| !username.is_empty())
+            .or_else(|| default_package_publish_webhook_config().username),
+        timeout_seconds: read_env_u64(
+            "PACKAGE_PUBLISH_WEBHOOK_TIMEOUT_SECONDS",
+            default_package_publish_webhook_timeout_seconds(),
         ),
     };
     config.validate()?;

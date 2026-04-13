@@ -1,7 +1,8 @@
 use crate::{
     ApplicationError, AuthenticatedAccess, IssueApiTokenCommand, IssuedApiToken,
-    MintOidcPublishTokenCommand, PublishTokenGrant, PyregistryApp, RegisterTrustedPublisherCommand,
-    TrustedPublisherDescriptor, UploadArtifactCommand,
+    MintOidcPublishTokenCommand, PackagePublishEventKind, PackagePublishNotification,
+    PublishTokenGrant, PyregistryApp, RegisterTrustedPublisherCommand, TrustedPublisherDescriptor,
+    UploadArtifactCommand,
 };
 use base64::Engine;
 use chrono::Duration;
@@ -143,6 +144,7 @@ impl PyregistryApp {
             .store
             .get_project_by_normalized_name(access.tenant.id, project_name.normalized())
             .await?;
+        let is_new_project = existing_project.is_none();
         let mut project = existing_project.unwrap_or_else(|| {
             Project::new(
                 ProjectId::new(self.ids.next()),
@@ -160,17 +162,25 @@ impl PyregistryApp {
         project.updated_at = now;
         self.store.save_project(project.clone()).await?;
 
-        let release = self
+        let (is_new_release, release) = self
             .store
             .get_release_by_version(project.id, &version)
             .await?
-            .unwrap_or(Release {
-                id: ReleaseId::new(self.ids.next()),
-                project_id: project.id,
-                version: version.clone(),
-                yanked: None,
-                created_at: now,
-            });
+            .map_or_else(
+                || {
+                    (
+                        true,
+                        Release {
+                            id: ReleaseId::new(self.ids.next()),
+                            project_id: project.id,
+                            version: version.clone(),
+                            yanked: None,
+                            created_at: now,
+                        },
+                    )
+                },
+                |release| (false, release),
+            );
         self.store.save_release(release.clone()).await?;
 
         let existing_artifacts = self.store.list_artifacts(release.id).await?;
@@ -245,8 +255,42 @@ impl PyregistryApp {
             );
         }
 
+        let notification = if is_new_project || is_new_release {
+            Some(PackagePublishNotification {
+                kind: if is_new_project {
+                    PackagePublishEventKind::NewPackage
+                } else {
+                    PackagePublishEventKind::NewVersion
+                },
+                tenant_slug: access.tenant.slug.as_str().to_string(),
+                project_name: project.name.original().to_string(),
+                normalized_name: project.name.normalized().to_string(),
+                version: version.as_str().to_string(),
+                filename: artifact.filename.clone(),
+                size_bytes: artifact.size_bytes,
+                sha256: artifact.digests.sha256.clone(),
+            })
+        } else {
+            None
+        };
         let filename = artifact.filename.clone();
         self.store.save_artifact(artifact).await?;
+        if let Some(notification) = notification {
+            if let Err(error) = self
+                .package_publish_notifier
+                .notify_package_publish(&notification)
+                .await
+            {
+                warn!(
+                    "package publish webhook notification failed for tenant `{}` project `{}` version `{}` filename `{}`: {}",
+                    notification.tenant_slug,
+                    notification.project_name,
+                    notification.version,
+                    notification.filename,
+                    error
+                );
+            }
+        }
         info!(
             "upload completed for tenant `{}` project `{}` version `{}` filename `{}`",
             access.tenant.slug.as_str(),

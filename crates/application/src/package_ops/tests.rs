@@ -3,9 +3,10 @@ use crate::{
     AttestationSigner, CancellationSignal, Clock, CreateTenantCommand, DeletionCommand,
     DependencyVulnerabilityQuery, DependencyVulnerabilityReport, DistributionFileInspector,
     DistributionInspection, DistributionKind, IdGenerator, IssueApiTokenCommand,
-    MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot, NoopVulnerabilityNotifier,
-    NoopWheelAuditNotifier, ObjectStorage, OidcVerifier, PackageArtifactDetails,
-    PackageReleaseDetails, PackageVulnerability, PackageVulnerabilityQuery,
+    MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot,
+    NoopPackagePublishNotifier, NoopVulnerabilityNotifier, NoopWheelAuditNotifier, ObjectStorage,
+    OidcVerifier, PackageArtifactDetails, PackagePublishEventKind, PackagePublishNotification,
+    PackagePublishNotifier, PackageReleaseDetails, PackageVulnerability, PackageVulnerabilityQuery,
     PackageVulnerabilityReport, PasswordHasher, RecordAuditEventCommand,
     RegisterTrustedPublisherCommand, RegistryDistributionValidationStatus, RegistryOverview,
     RegistryStore, SearchHit, TokenHasher, UploadArtifactCommand,
@@ -79,6 +80,7 @@ async fn mirrored_project_scans_cached_wheels_and_notifies_findings() {
         Arc::new(UnusedTokenHasher),
         Arc::new(UnusedVulnerabilityScanner),
         Arc::new(NoopVulnerabilityNotifier),
+        Arc::new(NoopPackagePublishNotifier),
         notifier.clone(),
         Arc::new(SuspiciousWheelArchiveReader),
         Arc::new(UnusedWheelVirusScanner),
@@ -787,6 +789,66 @@ async fn registry_security_check_notifies_for_vulnerable_packages_only() {
 }
 
 #[tokio::test]
+async fn upload_artifact_notifies_when_package_or_version_is_new() {
+    let publish_notifier = Arc::new(RecordingPackagePublishNotifier::default());
+    let app = test_app_with_package_publish_notifier(publish_notifier.clone());
+
+    app.create_tenant(CreateTenantCommand {
+        slug: "acme".into(),
+        display_name: "Acme".into(),
+        mirroring_enabled: false,
+        admin_email: "admin@acme.test".into(),
+        admin_password: "tenant-secret".into(),
+    })
+    .await
+    .expect("tenant");
+    let publish_token = app
+        .issue_api_token(IssueApiTokenCommand {
+            tenant_slug: "acme".into(),
+            label: "publisher".into(),
+            scopes: vec![TokenScope::Publish],
+            ttl_hours: None,
+        })
+        .await
+        .expect("publish token");
+    let publish_access = app
+        .authenticate_tenant_token("acme", &publish_token.secret, TokenScope::Publish)
+        .await
+        .expect("publish access");
+
+    for (version, filename) in [
+        ("1.0.0", "demo_pkg-1.0.0-py3-none-any.whl"),
+        ("1.0.0", "demo_pkg-1.0.0.tar.gz"),
+        ("1.1.0", "demo_pkg-1.1.0-py3-none-any.whl"),
+    ] {
+        app.upload_artifact(
+            &publish_access,
+            UploadArtifactCommand {
+                tenant_slug: "acme".into(),
+                project_name: "Demo_Pkg".into(),
+                version: version.into(),
+                filename: filename.into(),
+                summary: "Demo package".into(),
+                description: "Demo package".into(),
+                content: format!("bytes-{filename}").into_bytes(),
+            },
+        )
+        .await
+        .expect("artifact");
+    }
+
+    let notifications = publish_notifier.notifications();
+    assert_eq!(notifications.len(), 2);
+    assert_eq!(notifications[0].kind, PackagePublishEventKind::NewPackage);
+    assert_eq!(notifications[0].tenant_slug, "acme");
+    assert_eq!(notifications[0].project_name, "Demo_Pkg");
+    assert_eq!(notifications[0].normalized_name, "demo-pkg");
+    assert_eq!(notifications[0].version, "1.0.0");
+    assert_eq!(notifications[1].kind, PackagePublishEventKind::NewVersion);
+    assert_eq!(notifications[1].version, "1.1.0");
+}
+
+#[tokio::test]
 async fn admin_and_publish_use_cases_report_missing_expired_and_oidc_edges() {
     let app = test_app(
         Arc::new(FakeRegistryStore::default()),
@@ -1284,6 +1346,31 @@ fn test_app_with_vulnerability_scanner(scanner: Arc<dyn VulnerabilityScanner>) -
     )
 }
 
+fn test_app_with_package_publish_notifier(
+    notifier: Arc<dyn PackagePublishNotifier>,
+) -> PyregistryApp {
+    init_test_logger();
+    PyregistryApp::new(
+        Arc::new(FakeRegistryStore::default()),
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(FakeMirrorClient::with_artifact_count(0)),
+        Arc::new(UnusedOidcVerifier),
+        Arc::new(UnusedAttestationSigner),
+        Arc::new(UnusedPasswordHasher),
+        Arc::new(UnusedTokenHasher),
+        Arc::new(UnusedVulnerabilityScanner),
+        Arc::new(NoopVulnerabilityNotifier),
+        notifier,
+        Arc::new(NoopWheelAuditNotifier),
+        Arc::new(UnusedWheelArchiveReader),
+        Arc::new(UnusedWheelVirusScanner),
+        Arc::new(UnusedWheelSourceSecurityScanner),
+        Arc::new(FixedClock),
+        Arc::new(SequentialIds::default()),
+        1,
+    )
+}
+
 fn test_app_with_mirror(
     store: Arc<FakeRegistryStore>,
     storage: Arc<FakeObjectStorage>,
@@ -1335,6 +1422,7 @@ fn test_app_with_ports_and_notifier(
         Arc::new(UnusedTokenHasher),
         vulnerability_scanner,
         vulnerability_notifier,
+        Arc::new(NoopPackagePublishNotifier),
         Arc::new(NoopWheelAuditNotifier),
         Arc::new(UnusedWheelArchiveReader),
         Arc::new(UnusedWheelVirusScanner),
@@ -1438,6 +1526,31 @@ impl VulnerabilityNotifier for RecordingVulnerabilityNotifier {
     async fn notify_vulnerable_package(
         &self,
         notification: &VulnerablePackageNotification,
+    ) -> Result<(), ApplicationError> {
+        self.notifications
+            .lock()
+            .expect("notifier state")
+            .push(notification.clone());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingPackagePublishNotifier {
+    notifications: Mutex<Vec<PackagePublishNotification>>,
+}
+
+impl RecordingPackagePublishNotifier {
+    fn notifications(&self) -> Vec<PackagePublishNotification> {
+        self.notifications.lock().expect("notifier state").clone()
+    }
+}
+
+#[async_trait]
+impl PackagePublishNotifier for RecordingPackagePublishNotifier {
+    async fn notify_package_publish(
+        &self,
+        notification: &PackagePublishNotification,
     ) -> Result<(), ApplicationError> {
         self.notifications
             .lock()

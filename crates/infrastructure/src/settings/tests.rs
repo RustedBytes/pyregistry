@@ -579,9 +579,14 @@ fn component_log_summaries_include_operational_knobs() {
                 username: Some("Security Bot".into()),
                 timeout_seconds: 7,
             },
+            package_publish_webhook: PackagePublishWebhookConfig {
+                url: Some("https://discord.example/api/webhooks/publish-token".into()),
+                username: Some("Publish Bot".into()),
+                timeout_seconds: 5,
+            },
         }
         .log_safe_summary(),
-        "yara_rules_path=rules, scanner_ignores=pysentry_vulnerability_ids=1, yara_rule_ids=2, foxguard_rule_ids=1, vulnerability_webhook=enabled(endpoint=discord.example/<redacted>, username=Security Bot, timeout_seconds=7)"
+        "yara_rules_path=rules, scanner_ignores=pysentry_vulnerability_ids=1, yara_rule_ids=2, foxguard_rule_ids=1, vulnerability_webhook=enabled(endpoint=discord.example/<redacted>, username=Security Bot, timeout_seconds=7), package_publish_webhook=enabled(endpoint=discord.example/<redacted>, username=Publish Bot, timeout_seconds=5)"
     );
     assert_eq!(
         RateLimitConfig {
@@ -715,6 +720,7 @@ fn rejects_invalid_component_config_files() {
             yara_rules_path: PathBuf::new(),
             scanner_ignores: SecurityScannerIgnoreConfigFile::default(),
             vulnerability_webhook: None,
+            package_publish_webhook: None,
         }),
         Err(SettingsError::InvalidSecurityConfig(_))
     ));

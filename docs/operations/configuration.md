@@ -221,6 +221,11 @@ url = "https://discord.com/api/webhooks/..."
 username = "Pyregistry"
 timeout_seconds = 10
 
+[security.package_publish_webhook]
+url = "https://discord.com/api/webhooks/..."
+username = "Pyregistry"
+timeout_seconds = 10
+
 [validation]
 distribution_parallelism = 4
 ```
@@ -241,6 +246,10 @@ Set `security.vulnerability_webhook.url` to enable Discord-compatible webhook
 notifications from `check-registry` when vulnerable packages are found and from
 mirror updates when cached wheel audits report findings. The webhook URL is
 redacted from logs; leave `url` unset to disable notifications.
+
+Set `security.package_publish_webhook.url` to notify when an upload creates a
+new package or adds a new version to an existing package. Uploading additional
+files to an already-known version does not send a publish notification.
 
 ## Logging
 
@@ -323,6 +332,9 @@ Common environment variables:
 | `VULNERABILITY_WEBHOOK_URL` | Discord-compatible webhook URL for vulnerable package notifications. |
 | `VULNERABILITY_WEBHOOK_USERNAME` | Optional webhook display name. |
 | `VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS` | Webhook POST timeout. |
+| `PACKAGE_PUBLISH_WEBHOOK_URL` | Discord-compatible webhook URL for new package and new version notifications. |
+| `PACKAGE_PUBLISH_WEBHOOK_USERNAME` | Optional publish webhook display name. |
+| `PACKAGE_PUBLISH_WEBHOOK_TIMEOUT_SECONDS` | Publish webhook POST timeout. |
 | `RATE_LIMIT_ENABLED` | Enable or disable API rate limiting. |
 | `RATE_LIMIT_REQUESTS_PER_MINUTE` | Sustained per-client request rate. |
 | `RATE_LIMIT_BURST` | Per-client burst capacity. |
