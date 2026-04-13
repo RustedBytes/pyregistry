@@ -1,3 +1,4 @@
+use crate::ignored_findings::IgnoredFindings;
 use foxguard::{Finding, engine, rules::RuleRegistry, secrets};
 use log::{debug, info, warn};
 use pyregistry_application::{
@@ -13,12 +14,21 @@ const MAX_FOXGUARD_FILE_SIZE_BYTES: u64 = 1_048_576;
 
 pub struct FoxGuardWheelSourceSecurityScanner {
     registry: RuleRegistry,
+    ignored_rule_ids: IgnoredFindings,
 }
 
 impl Default for FoxGuardWheelSourceSecurityScanner {
     fn default() -> Self {
+        Self::with_ignored_rules(Vec::<String>::new())
+    }
+}
+
+impl FoxGuardWheelSourceSecurityScanner {
+    #[must_use]
+    pub fn with_ignored_rules(ignored_rule_ids: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         Self {
             registry: RuleRegistry::new(),
+            ignored_rule_ids: IgnoredFindings::new(ignored_rule_ids),
         }
     }
 }
@@ -77,12 +87,10 @@ impl FoxGuardWheelSourceSecurityScanner {
         );
 
         let mut findings = Vec::new();
-        findings.extend(
-            source_scan
-                .findings
-                .into_iter()
-                .map(|finding| map_foxguard_finding("source-rule", root, finding)),
-        );
+        findings.extend(source_scan.findings.into_iter().filter_map(|finding| {
+            (!self.ignored_rule_ids.matches(&finding.rule_id))
+                .then(|| map_foxguard_finding("source-rule", root, finding))
+        }));
         findings.extend(
             secrets::scan_paths_with_config(
                 root,
@@ -91,7 +99,10 @@ impl FoxGuardWheelSourceSecurityScanner {
                 MAX_FOXGUARD_FILE_SIZE_BYTES,
             )
             .into_iter()
-            .map(|finding| map_foxguard_finding("secret", root, finding)),
+            .filter_map(|finding| {
+                (!self.ignored_rule_ids.matches(&finding.rule_id))
+                    .then(|| map_foxguard_finding("secret", root, finding))
+            }),
         );
 
         Ok(WheelSourceSecurityScanResult {
@@ -248,6 +259,24 @@ mod tests {
                     .iter()
                     .any(|value| value.contains("secret/aws-access-key-id"))
         }));
+    }
+
+    #[test]
+    fn configured_foxguard_rule_ignores_suppress_findings() {
+        let scanner =
+            FoxGuardWheelSourceSecurityScanner::with_ignored_rules(["secret/aws-access-key-id"]);
+        let archive = WheelArchiveSnapshot {
+            wheel_filename: "demo-0.1.0-py3-none-any.whl".into(),
+            entries: vec![WheelArchiveEntry {
+                path: "demo/secrets.py".into(),
+                contents: b"AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE'".to_vec(),
+            }],
+        };
+
+        let result = scanner.scan_archive(&archive).expect("FoxGuard scan");
+
+        assert_eq!(result.scanned_file_count, 1);
+        assert!(result.findings.is_empty());
     }
 
     #[test]

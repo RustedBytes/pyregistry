@@ -59,16 +59,26 @@ pub async fn build_application(
         Arc::new(JsonAttestationSigner),
         Arc::new(ArgonPasswordHasher),
         Arc::new(Sha256TokenHasher),
-        Arc::new(PySentryVulnerabilityScanner::new(pysentry_cache_dir(
-            settings,
-        ))),
+        Arc::new(
+            PySentryVulnerabilityScanner::with_ignored_vulnerability_ids(
+                pysentry_cache_dir(settings),
+                settings
+                    .security
+                    .scanner_ignores
+                    .pysentry_vulnerability_ids
+                    .clone(),
+            ),
+        ),
         vulnerability_notifier,
         wheel_audit_notifier,
         Arc::new(ZipWheelArchiveReader),
-        Arc::new(YaraWheelVirusScanner::from_rules_dir(
+        Arc::new(YaraWheelVirusScanner::from_rules_dir_with_ignored_rules(
             settings.security.yara_rules_path.clone(),
+            settings.security.scanner_ignores.yara_rule_ids.clone(),
         )),
-        Arc::new(FoxGuardWheelSourceSecurityScanner::default()),
+        Arc::new(FoxGuardWheelSourceSecurityScanner::with_ignored_rules(
+            settings.security.scanner_ignores.foxguard_rule_ids.clone(),
+        )),
         Arc::new(SystemClock),
         Arc::new(UuidGenerator),
         settings.pypi.mirror_download_concurrency,

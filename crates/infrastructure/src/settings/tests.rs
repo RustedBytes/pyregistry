@@ -482,6 +482,11 @@ fn component_log_summaries_include_operational_knobs() {
     assert_eq!(
         SecurityConfig {
             yara_rules_path: PathBuf::from("rules"),
+            scanner_ignores: SecurityScannerIgnoreConfig {
+                pysentry_vulnerability_ids: vec!["GHSA-demo".into()],
+                yara_rule_ids: vec!["YaraDemo".into(), "sigfile:YaraOther".into()],
+                foxguard_rule_ids: vec!["secret/aws-access-key-id".into()],
+            },
             vulnerability_webhook: VulnerabilityWebhookConfig {
                 url: Some("https://discord.example/api/webhooks/token".into()),
                 username: Some("Security Bot".into()),
@@ -489,7 +494,7 @@ fn component_log_summaries_include_operational_knobs() {
             },
         }
         .log_safe_summary(),
-        "yara_rules_path=rules, vulnerability_webhook=enabled(endpoint=discord.example/<redacted>, username=Security Bot, timeout_seconds=7)"
+        "yara_rules_path=rules, scanner_ignores=pysentry_vulnerability_ids=1, yara_rule_ids=2, foxguard_rule_ids=1, vulnerability_webhook=enabled(endpoint=discord.example/<redacted>, username=Security Bot, timeout_seconds=7)"
     );
     assert_eq!(
         RateLimitConfig {
@@ -590,6 +595,7 @@ fn rejects_invalid_component_config_files() {
     assert!(matches!(
         SecurityConfig::try_from(SecurityConfigFile {
             yara_rules_path: PathBuf::new(),
+            scanner_ignores: SecurityScannerIgnoreConfigFile::default(),
             vulnerability_webhook: None,
         }),
         Err(SettingsError::InvalidSecurityConfig(_))
@@ -798,6 +804,9 @@ fn loads_runtime_settings_from_environment() {
         "PYPI_MIRROR_UPDATE_INTERVAL_SECONDS",
         "PYPI_MIRROR_UPDATE_ON_STARTUP",
         "YARA_RULES_PATH",
+        "PYSENTRY_IGNORE_VULNERABILITY_IDS",
+        "YARA_IGNORE_RULE_IDS",
+        "FOXGUARD_IGNORE_RULE_IDS",
         "VULNERABILITY_WEBHOOK_URL",
         "VULNERABILITY_WEBHOOK_USERNAME",
         "VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS",
@@ -842,6 +851,12 @@ fn loads_runtime_settings_from_environment() {
     env.set("PYPI_MIRROR_UPDATE_INTERVAL_SECONDS", "120");
     env.set("PYPI_MIRROR_UPDATE_ON_STARTUP", "no");
     env.set("YARA_RULES_PATH", "/tmp/yara");
+    env.set(
+        "PYSENTRY_IGNORE_VULNERABILITY_IDS",
+        "GHSA-demo, CVE-2026-0001",
+    );
+    env.set("YARA_IGNORE_RULE_IDS", "Pyregistry_Test, sigdemo:OtherRule");
+    env.set("FOXGUARD_IGNORE_RULE_IDS", "secret/aws-access-key-id");
     env.set(
         "VULNERABILITY_WEBHOOK_URL",
         "https://discord.example/api/webhooks/secret-token",
@@ -901,6 +916,18 @@ fn loads_runtime_settings_from_environment() {
     assert_eq!(
         settings.security.yara_rules_path,
         PathBuf::from("/tmp/yara")
+    );
+    assert_eq!(
+        settings.security.scanner_ignores.pysentry_vulnerability_ids,
+        vec!["GHSA-demo", "CVE-2026-0001"]
+    );
+    assert_eq!(
+        settings.security.scanner_ignores.yara_rule_ids,
+        vec!["Pyregistry_Test", "sigdemo:OtherRule"]
+    );
+    assert_eq!(
+        settings.security.scanner_ignores.foxguard_rule_ids,
+        vec!["secret/aws-access-key-id"]
     );
     assert_eq!(
         settings.security.vulnerability_webhook.url.as_deref(),

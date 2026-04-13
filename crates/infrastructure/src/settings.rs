@@ -124,6 +124,11 @@ impl Settings {
                 yara_rules_path: std::env::var("YARA_RULES_PATH")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| default_security_config().yara_rules_path),
+                scanner_ignores: SecurityScannerIgnoreConfig {
+                    pysentry_vulnerability_ids: read_csv_env("PYSENTRY_IGNORE_VULNERABILITY_IDS"),
+                    yara_rule_ids: read_csv_env("YARA_IGNORE_RULE_IDS"),
+                    foxguard_rule_ids: read_csv_env("FOXGUARD_IGNORE_RULE_IDS"),
+                },
                 vulnerability_webhook: vulnerability_webhook_from_env()?,
             },
             rate_limit: RateLimitConfig {
@@ -512,6 +517,7 @@ impl SqliteConfig {
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
     pub yara_rules_path: PathBuf,
+    pub scanner_ignores: SecurityScannerIgnoreConfig,
     pub vulnerability_webhook: VulnerabilityWebhookConfig,
 }
 
@@ -519,8 +525,9 @@ impl SecurityConfig {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "yara_rules_path={}, vulnerability_webhook={}",
+            "yara_rules_path={}, scanner_ignores={}, vulnerability_webhook={}",
             self.yara_rules_path.display(),
+            self.scanner_ignores.log_safe_summary(),
             self.vulnerability_webhook.log_safe_summary()
         )
     }
@@ -532,6 +539,25 @@ impl SecurityConfig {
             ));
         }
         self.vulnerability_webhook.validate()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SecurityScannerIgnoreConfig {
+    pub pysentry_vulnerability_ids: Vec<String>,
+    pub yara_rule_ids: Vec<String>,
+    pub foxguard_rule_ids: Vec<String>,
+}
+
+impl SecurityScannerIgnoreConfig {
+    #[must_use]
+    pub fn log_safe_summary(&self) -> String {
+        format!(
+            "pysentry_vulnerability_ids={}, yara_rule_ids={}, foxguard_rule_ids={}",
+            self.pysentry_vulnerability_ids.len(),
+            self.yara_rule_ids.len(),
+            self.foxguard_rule_ids.len()
+        )
     }
 }
 
@@ -810,7 +836,19 @@ struct SqliteConfigFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SecurityConfigFile {
     yara_rules_path: PathBuf,
+    #[serde(default)]
+    scanner_ignores: SecurityScannerIgnoreConfigFile,
     vulnerability_webhook: Option<VulnerabilityWebhookConfigFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SecurityScannerIgnoreConfigFile {
+    #[serde(default)]
+    pysentry_vulnerability_ids: Vec<String>,
+    #[serde(default)]
+    yara_rule_ids: Vec<String>,
+    #[serde(default)]
+    foxguard_rule_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1140,6 +1178,7 @@ impl TryFrom<SecurityConfigFile> for SecurityConfig {
 
         let config = Self {
             yara_rules_path: value.yara_rules_path,
+            scanner_ignores: value.scanner_ignores.into(),
             vulnerability_webhook: value
                 .vulnerability_webhook
                 .map(VulnerabilityWebhookConfig::try_from)
@@ -1155,7 +1194,28 @@ impl From<SecurityConfig> for SecurityConfigFile {
     fn from(value: SecurityConfig) -> Self {
         Self {
             yara_rules_path: value.yara_rules_path,
+            scanner_ignores: value.scanner_ignores.into(),
             vulnerability_webhook: Some(value.vulnerability_webhook.into()),
+        }
+    }
+}
+
+impl From<SecurityScannerIgnoreConfigFile> for SecurityScannerIgnoreConfig {
+    fn from(value: SecurityScannerIgnoreConfigFile) -> Self {
+        Self {
+            pysentry_vulnerability_ids: clean_ignore_values(value.pysentry_vulnerability_ids),
+            yara_rule_ids: clean_ignore_values(value.yara_rule_ids),
+            foxguard_rule_ids: clean_ignore_values(value.foxguard_rule_ids),
+        }
+    }
+}
+
+impl From<SecurityScannerIgnoreConfig> for SecurityScannerIgnoreConfigFile {
+    fn from(value: SecurityScannerIgnoreConfig) -> Self {
+        Self {
+            pysentry_vulnerability_ids: value.pysentry_vulnerability_ids,
+            yara_rule_ids: value.yara_rule_ids,
+            foxguard_rule_ids: value.foxguard_rule_ids,
         }
     }
 }
@@ -1404,6 +1464,7 @@ fn default_sqlite_config() -> SqliteConfig {
 fn default_security_config() -> SecurityConfig {
     SecurityConfig {
         yara_rules_path: PathBuf::from("supplied/signature-base/yara"),
+        scanner_ignores: SecurityScannerIgnoreConfig::default(),
         vulnerability_webhook: default_vulnerability_webhook_config(),
     }
 }
@@ -1482,6 +1543,27 @@ fn read_env_bool(name: &str, default: bool) -> bool {
             _ => None,
         })
         .unwrap_or(default)
+}
+
+fn read_csv_env(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn clean_ignore_values(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 fn vulnerability_webhook_from_env() -> Result<VulnerabilityWebhookConfig, SettingsError> {

@@ -1,3 +1,4 @@
+use crate::ignored_findings::IgnoredFindings;
 use crate::supplied_assets::bundled_yara_rule_files;
 use log::{debug, info, warn};
 use pyregistry_application::{
@@ -17,12 +18,22 @@ pub struct YaraWheelVirusScanner {
     signature_rule_count: usize,
     skipped_rule_count: usize,
     load_error: Option<String>,
+    ignored_rule_ids: IgnoredFindings,
 }
 
 impl YaraWheelVirusScanner {
     #[must_use]
     pub fn from_rules_dir(rules_path: impl Into<PathBuf>) -> Self {
+        Self::from_rules_dir_with_ignored_rules(rules_path, Vec::<String>::new())
+    }
+
+    #[must_use]
+    pub fn from_rules_dir_with_ignored_rules(
+        rules_path: impl Into<PathBuf>,
+        ignored_rule_ids: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
         let rules_path = rules_path.into();
+        let ignored_rule_ids = IgnoredFindings::new(ignored_rule_ids);
         match compile_rules_dir(&rules_path) {
             Ok(compiled) => {
                 info!(
@@ -37,6 +48,7 @@ impl YaraWheelVirusScanner {
                     signature_rule_count: compiled.signature_rule_count,
                     skipped_rule_count: compiled.skipped_rule_count,
                     load_error: None,
+                    ignored_rule_ids,
                 }
             }
             Err(error) => {
@@ -57,6 +69,7 @@ impl YaraWheelVirusScanner {
                             signature_rule_count: compiled.signature_rule_count,
                             skipped_rule_count: compiled.skipped_rule_count,
                             load_error: None,
+                            ignored_rule_ids,
                         }
                     }
                     Err(bundled_error) => {
@@ -71,6 +84,7 @@ impl YaraWheelVirusScanner {
                             load_error: Some(format!(
                                 "configured rules failed: {error}; bundled rules failed: {bundled_error}"
                             )),
+                            ignored_rule_ids,
                         }
                     }
                 }
@@ -116,6 +130,13 @@ impl WheelVirusScanner for YaraWheelVirusScanner {
             for matching_rule in results.matching_rules() {
                 let rule_name = matching_rule.identifier().to_string();
                 let namespace = matching_rule.namespace().to_string();
+                if self.ignored_rule_ids.matches(&rule_name)
+                    || self
+                        .ignored_rule_ids
+                        .matches(&format!("{namespace}:{rule_name}"))
+                {
+                    continue;
+                }
                 let tags = matching_rule
                     .tags()
                     .map(|tag| tag.identifier().to_string())
@@ -555,6 +576,7 @@ rule Pyregistry_Meta_Test : malware test {
             signature_rule_count: 0,
             skipped_rule_count: 0,
             load_error: Some("boom".into()),
+            ignored_rule_ids: IgnoredFindings::default(),
         };
 
         let error = scanner
@@ -657,6 +679,43 @@ rule Pyregistry_Meta_Test : malware test {
         assert_eq!(compiled.signature_rule_count, 1);
         assert_eq!(compiled.skipped_rule_count, 1);
 
+        let _ = fs::remove_dir_all(rules_dir);
+    }
+
+    #[test]
+    fn configured_yara_rule_ignores_suppress_matches() {
+        init_test_logger();
+        let rules_dir =
+            std::env::temp_dir().join(format!("pyregistry-yara-ignore-{}", Uuid::new_v4()));
+        fs::create_dir_all(&rules_dir).expect("create rules dir");
+        fs::write(
+            rules_dir.join("ignored.yar"),
+            r#"
+rule Pyregistry_Ignored_Test {
+    strings:
+        $payload = "PYREGISTRY-IGNORED-YARA"
+    condition:
+        $payload
+}
+"#,
+        )
+        .expect("write rule");
+
+        let scanner = YaraWheelVirusScanner::from_rules_dir_with_ignored_rules(
+            &rules_dir,
+            ["pyregistry_ignored_test"],
+        );
+        let result = scanner
+            .scan_archive(&WheelArchiveSnapshot {
+                wheel_filename: "demo.whl".into(),
+                entries: vec![WheelArchiveEntry {
+                    path: "demo/payload.bin".into(),
+                    contents: b"PYREGISTRY-IGNORED-YARA".to_vec(),
+                }],
+            })
+            .expect("scan archive");
+
+        assert!(result.findings.is_empty());
         let _ = fs::remove_dir_all(rules_dir);
     }
 

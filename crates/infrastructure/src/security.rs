@@ -1,3 +1,4 @@
+use crate::ignored_findings::IgnoredFindings;
 use async_trait::async_trait;
 use log::{debug, info, warn};
 use pyregistry_application::{
@@ -19,15 +20,25 @@ pub struct PySentryVulnerabilityScanner {
     cache_dir: PathBuf,
     source_type: VulnerabilitySourceType,
     vulnerability_ttl_hours: u64,
+    ignored_vulnerability_ids: IgnoredFindings,
 }
 
 impl PySentryVulnerabilityScanner {
     #[must_use]
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
+        Self::with_ignored_vulnerability_ids(cache_dir, Vec::<String>::new())
+    }
+
+    #[must_use]
+    pub fn with_ignored_vulnerability_ids(
+        cache_dir: impl Into<PathBuf>,
+        ignored_vulnerability_ids: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
         Self {
             cache_dir: cache_dir.into(),
             source_type: VulnerabilitySourceType::Pypa,
             vulnerability_ttl_hours: 48,
+            ignored_vulnerability_ids: IgnoredFindings::new(ignored_vulnerability_ids),
         }
     }
 }
@@ -154,9 +165,11 @@ impl VulnerabilityScanner for PySentryVulnerabilityScanner {
             };
 
             if let Some(report) = reports.get_mut(&original_key) {
-                report
-                    .vulnerabilities
-                    .push(map_vulnerability(vulnerability_match));
+                push_unignored_vulnerability(
+                    &self.ignored_vulnerability_ids,
+                    &mut report.vulnerabilities,
+                    map_vulnerability(vulnerability_match),
+                );
             }
         }
 
@@ -293,9 +306,11 @@ impl VulnerabilityScanner for PySentryVulnerabilityScanner {
             };
 
             if let Some(report) = reports.get_mut(&original_key) {
-                report
-                    .vulnerabilities
-                    .push(map_vulnerability(vulnerability_match));
+                push_unignored_vulnerability(
+                    &self.ignored_vulnerability_ids,
+                    &mut report.vulnerabilities,
+                    map_vulnerability(vulnerability_match),
+                );
             }
         }
 
@@ -324,6 +339,16 @@ fn map_vulnerability(
         references: value.vulnerability.references,
         source: value.vulnerability.source,
         cvss_score: value.vulnerability.cvss_score,
+    }
+}
+
+fn push_unignored_vulnerability(
+    ignored_vulnerability_ids: &IgnoredFindings,
+    vulnerabilities: &mut Vec<PackageVulnerability>,
+    vulnerability: PackageVulnerability,
+) {
+    if !ignored_vulnerability_ids.matches(&vulnerability.id) {
+        vulnerabilities.push(vulnerability);
     }
 }
 
@@ -445,6 +470,7 @@ mod tests {
         assert_eq!(scanner.cache_dir, cache_dir);
         assert_eq!(scanner.vulnerability_ttl_hours, 48);
         assert!(matches!(scanner.source_type, VulnerabilitySourceType::Pypa));
+        assert!(!scanner.ignored_vulnerability_ids.matches("GHSA-demo"));
 
         let cases = [
             (Severity::Low, None, "LOW"),
@@ -506,5 +532,41 @@ mod tests {
         assert_eq!(mapped.references, vec!["https://example.test/advisory"]);
         assert_eq!(mapped.source.as_deref(), Some("pypa"));
         assert_eq!(mapped.cvss_score, Some(9.8));
+    }
+
+    #[test]
+    fn ignores_configured_pysentry_vulnerability_ids() {
+        let ignores = IgnoredFindings::new(["ghsa-demo"]);
+        let mut vulnerabilities = Vec::new();
+
+        push_unignored_vulnerability(
+            &ignores,
+            &mut vulnerabilities,
+            PackageVulnerability {
+                id: "GHSA-DEMO".into(),
+                summary: "ignored".into(),
+                severity: "LOW".into(),
+                fixed_versions: Vec::new(),
+                references: Vec::new(),
+                source: None,
+                cvss_score: None,
+            },
+        );
+        push_unignored_vulnerability(
+            &ignores,
+            &mut vulnerabilities,
+            PackageVulnerability {
+                id: "GHSA-KEPT".into(),
+                summary: "kept".into(),
+                severity: "LOW".into(),
+                fixed_versions: Vec::new(),
+                references: Vec::new(),
+                source: None,
+                cvss_score: None,
+            },
+        );
+
+        assert_eq!(vulnerabilities.len(), 1);
+        assert_eq!(vulnerabilities[0].id, "GHSA-KEPT");
     }
 }

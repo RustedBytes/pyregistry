@@ -1,5 +1,6 @@
 mod crypto;
 mod distribution_validation;
+mod ignored_findings;
 mod mirror;
 mod oidc;
 mod postgres_store;

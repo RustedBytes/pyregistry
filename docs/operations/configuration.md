@@ -170,6 +170,11 @@ By default limits are keyed by the direct TCP peer IP. Set
 [security]
 yara_rules_path = "supplied/signature-base/yara"
 
+[security.scanner_ignores]
+pysentry_vulnerability_ids = []
+yara_rule_ids = []
+foxguard_rule_ids = []
+
 [security.vulnerability_webhook]
 url = "https://discord.com/api/webhooks/..."
 username = "Pyregistry"
@@ -181,6 +186,11 @@ distribution_parallelism = 4
 
 If the configured YARA directory is readable, Pyregistry uses it. Otherwise it
 falls back to bundled supplied rules embedded at compile time.
+
+Use `security.scanner_ignores` for known false positives. PySentry entries
+match vulnerability IDs such as `GHSA-...` or `CVE-...`; YARA entries match rule
+identifiers or `namespace:rule`; FoxGuard entries match rule IDs such as
+`secret/aws-access-key-id`.
 
 For one-off runs or container entrypoints that should not edit the TOML file,
 pass `--yara-rules-path /path/to/yara-rules`. This CLI override wins over both
@@ -262,6 +272,9 @@ Common environment variables:
 | `PYPI_MIRROR_UPDATE_INTERVAL_SECONDS` | Background mirror refresh interval. |
 | `PYPI_MIRROR_UPDATE_ON_STARTUP` | Refresh mirrored projects when the service starts. |
 | `YARA_RULES_PATH` | External YARA rules directory when no TOML config overrides it. |
+| `PYSENTRY_IGNORE_VULNERABILITY_IDS` | Comma-separated PySentry vulnerability IDs to suppress. |
+| `YARA_IGNORE_RULE_IDS` | Comma-separated YARA rule identifiers, or `namespace:rule`, to suppress. |
+| `FOXGUARD_IGNORE_RULE_IDS` | Comma-separated FoxGuard rule IDs to suppress. |
 | `VULNERABILITY_WEBHOOK_URL` | Discord-compatible webhook URL for vulnerable package notifications. |
 | `VULNERABILITY_WEBHOOK_USERNAME` | Optional webhook display name. |
 | `VULNERABILITY_WEBHOOK_TIMEOUT_SECONDS` | Webhook POST timeout. |

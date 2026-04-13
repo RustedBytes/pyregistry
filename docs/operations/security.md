@@ -139,6 +139,18 @@ that external rule set. Otherwise it falls back to the bundled supplied rules.
 Use `--yara-rules-path /path/to/yara-rules` to override the directory for a
 single command or service start without editing the TOML config.
 
+Known false positives can be suppressed per scanner:
+
+```toml
+[security.scanner_ignores]
+pysentry_vulnerability_ids = ["GHSA-..."]
+yara_rule_ids = ["Pyregistry_Test_Rule", "sigcustom_rule_yar:OtherRule"]
+foxguard_rule_ids = ["secret/aws-access-key-id"]
+```
+
+Ignore matching is case-insensitive and trims surrounding whitespace. YARA
+ignores match either the rule identifier or `namespace:rule`.
+
 Refresh local supplied signatures with:
 
 ```bash
