@@ -72,6 +72,16 @@ fn round_trips_settings_through_toml_shape() {
             .as_ref()
             .map(|postgres| &postgres.connection_url)
     );
+    assert_eq!(
+        round_trip
+            .sql_server
+            .as_ref()
+            .map(|sql_server| &sql_server.connection_url),
+        original
+            .sql_server
+            .as_ref()
+            .map(|sql_server| &sql_server.connection_url)
+    );
     assert_eq!(round_trip.logging.filter, original.logging.filter);
     assert_eq!(round_trip.logging.module_path, original.logging.module_path);
     assert_eq!(round_trip.logging.target, original.logging.target);
@@ -230,6 +240,7 @@ fn rejects_s3_storage_without_bucket() {
         }),
         sqlite: Some(default_sqlite_config().into()),
         postgres: Some(default_postgres_config().into()),
+        sql_server: Some(default_sql_server_config().into()),
         security: Some(default_security_config().into()),
         rate_limit: Some(default_rate_limit_config().into()),
         validation: Some(default_validation_config().into()),
@@ -339,6 +350,7 @@ fn rejects_pgsql_store_without_postgres_config() {
         }),
         sqlite: Some(default_sqlite_config().into()),
         postgres: None,
+        sql_server: Some(default_sql_server_config().into()),
         security: Some(default_security_config().into()),
         rate_limit: Some(default_rate_limit_config().into()),
         validation: Some(default_validation_config().into()),
@@ -356,6 +368,52 @@ fn rejects_pgsql_store_without_postgres_config() {
 }
 
 #[test]
+fn rejects_sqlserver_store_without_sql_server_config() {
+    let file = SettingsFile {
+        bind_address: "127.0.0.1:3000".into(),
+        blob_root: PathBuf::from(".pyregistry/blobs"),
+        superadmin_email: "admin@pyregistry.local".into(),
+        superadmin_password: "change-me-now".into(),
+        cookie_secret: "secret".into(),
+        database_store: Some("sqlserver".into()),
+        artifact_storage: Some(ArtifactStorageConfigFile {
+            backend: Some("opendal".into()),
+            opendal: Some(OpenDalStorageConfigFile {
+                scheme: "fs".into(),
+                options: BTreeMap::from([("root".into(), ".pyregistry/blobs".into())]),
+            }),
+        }),
+        pypi: Some(PypiConfigFile {
+            base_url: "https://pypi.org".into(),
+            mirror_download_concurrency: Some(default_mirror_download_concurrency()),
+            artifact_download_max_attempts: Some(default_artifact_download_max_attempts()),
+            artifact_download_initial_backoff_millis: Some(
+                default_artifact_download_initial_backoff_millis(),
+            ),
+            mirror_update_enabled: Some(true),
+            mirror_update_interval_seconds: Some(default_mirror_update_interval_seconds()),
+            mirror_update_on_startup: Some(true),
+        }),
+        sqlite: Some(default_sqlite_config().into()),
+        postgres: Some(default_postgres_config().into()),
+        sql_server: None,
+        security: Some(default_security_config().into()),
+        rate_limit: Some(default_rate_limit_config().into()),
+        validation: Some(default_validation_config().into()),
+        logging: Some(LoggingConfigFile {
+            filter: "info".into(),
+            module_path: true,
+            target: false,
+            timestamp: "seconds".into(),
+        }),
+        oidc_issuers: default_oidc_issuers().into_iter().map(Into::into).collect(),
+    };
+
+    let error = Settings::try_from(file).expect_err("sqlserver store should require sql_server");
+    assert!(matches!(error, SettingsError::InvalidDatabaseStore(_)));
+}
+
+#[test]
 fn parses_database_store_aliases_and_rejects_unknown_values() {
     for (raw, expected) in [
         ("in-memory", DatabaseStoreKind::InMemory),
@@ -367,6 +425,9 @@ fn parses_database_store_aliases_and_rejects_unknown_values() {
         ("pgsql", DatabaseStoreKind::Pgsql),
         ("postgres", DatabaseStoreKind::Pgsql),
         ("postgresql", DatabaseStoreKind::Pgsql),
+        ("sqlserver", DatabaseStoreKind::SqlServer),
+        ("sql-server", DatabaseStoreKind::SqlServer),
+        ("mssql", DatabaseStoreKind::SqlServer),
     ] {
         assert_eq!(
             DatabaseStoreKind::parse(raw).expect("database store"),
@@ -448,6 +509,17 @@ fn log_safe_summaries_are_human_readable_and_redact_secrets() {
     }
     .log_safe_summary();
     assert!(invalid_postgres_summary.contains("endpoint=configured"));
+
+    let sql_server_summary = SqlServerConfig {
+        connection_url:
+            "sqlserver://sa:secret@sql.example:1433/registry?trust_server_certificate=true".into(),
+        max_connections: 10,
+        min_connections: 1,
+        acquire_timeout_seconds: 5,
+    }
+    .log_safe_summary();
+    assert!(sql_server_summary.contains("sql.example:1433/registry"));
+    assert!(!sql_server_summary.contains("secret"));
 
     let settings = Settings::new_minio_template();
     let summary = settings.log_safe_summary();
@@ -567,6 +639,24 @@ fn rejects_invalid_component_config_files() {
             acquire_timeout_seconds: 5,
         }),
         Err(SettingsError::InvalidPostgresConfig(_))
+    ));
+    assert!(matches!(
+        SqlServerConfig::try_from(SqlServerConfigFile {
+            connection_url: " ".into(),
+            max_connections: 10,
+            min_connections: 1,
+            acquire_timeout_seconds: 5,
+        }),
+        Err(SettingsError::InvalidSqlServerConfig(_))
+    ));
+    assert!(matches!(
+        SqlServerConfig::try_from(SqlServerConfigFile {
+            connection_url: "sqlserver://localhost/db".into(),
+            max_connections: 1,
+            min_connections: 2,
+            acquire_timeout_seconds: 5,
+        }),
+        Err(SettingsError::InvalidSqlServerConfig(_))
     ));
     assert!(matches!(
         PostgresConfig::try_from(PostgresConfigFile {
@@ -786,6 +876,11 @@ fn loads_runtime_settings_from_environment() {
         "POSTGRES_MAX_CONNECTIONS",
         "POSTGRES_MIN_CONNECTIONS",
         "POSTGRES_ACQUIRE_TIMEOUT_SECONDS",
+        "SQL_SERVER_URL",
+        "MSSQL_URL",
+        "SQL_SERVER_MAX_CONNECTIONS",
+        "SQL_SERVER_MIN_CONNECTIONS",
+        "SQL_SERVER_ACQUIRE_TIMEOUT_SECONDS",
         "SQLITE_PATH",
         "LOG_FILTER",
         "LOG_MODULE_PATH",
@@ -830,6 +925,13 @@ fn loads_runtime_settings_from_environment() {
     env.set("POSTGRES_MAX_CONNECTIONS", "9");
     env.set("POSTGRES_MIN_CONNECTIONS", "3");
     env.set("POSTGRES_ACQUIRE_TIMEOUT_SECONDS", "7");
+    env.set(
+        "SQL_SERVER_URL",
+        "sqlserver://sa:secret@localhost:1433/registry?trust_server_certificate=true",
+    );
+    env.set("SQL_SERVER_MAX_CONNECTIONS", "8");
+    env.set("SQL_SERVER_MIN_CONNECTIONS", "2");
+    env.set("SQL_SERVER_ACQUIRE_TIMEOUT_SECONDS", "6");
     env.set("SQLITE_PATH", "/tmp/pyregistry.sqlite3");
     env.set("LOG_FILTER", "debug,pyregistry=trace");
     env.set("LOG_MODULE_PATH", "false");
@@ -899,6 +1001,16 @@ fn loads_runtime_settings_from_environment() {
     assert_eq!(
         settings.postgres.as_ref().unwrap().acquire_timeout_seconds,
         7
+    );
+    assert_eq!(settings.sql_server.as_ref().unwrap().max_connections, 8);
+    assert_eq!(settings.sql_server.as_ref().unwrap().min_connections, 2);
+    assert_eq!(
+        settings
+            .sql_server
+            .as_ref()
+            .unwrap()
+            .acquire_timeout_seconds,
+        6
     );
     assert_eq!(
         settings.sqlite.as_ref().unwrap().path,

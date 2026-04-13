@@ -21,14 +21,16 @@ pyregistry-application = { path = "../application" }
 pyregistry-domain = { path = "../domain" }
 rand.workspace = true
 reqwest.workspace = true
-limbo.workspace = true
+turso.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
 thiserror.workspace = true
+tiberius.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
+tokio-util.workspace = true
 toml.workspace = true
 url.workspace = true
 uuid.workspace = true

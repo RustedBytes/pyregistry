@@ -20,6 +20,7 @@ Common causes:
 | Config file rejected | Path does not end in `.toml`. | Use a `.toml` config path. |
 | SQLite config required | `database_store = "sqlite"` without `[sqlite]`. | Add SQLite config or generate a new template. |
 | Postgres config required | `database_store = "pgsql"` without `[postgres]`. | Add Postgres config. |
+| SQL Server config required | `database_store = "sqlserver"` without `[sql_server]`. | Add SQL Server config or set `SQL_SERVER_URL`. |
 | Object storage error | OpenDAL options do not match the backend. | Check `scheme` and backend options. |
 | Bind failure | Address already in use or unavailable. | Change `bind_address` or stop the other process. |
 

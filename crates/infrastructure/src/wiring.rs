@@ -3,8 +3,8 @@ use crate::{
     DiscordWebhookVulnerabilityNotifier, FileSystemObjectStorage,
     FoxGuardWheelSourceSecurityScanner, InMemoryRegistryStore, JsonAttestationSigner,
     OpenDalObjectStorage, PostgresRegistryStore, PySentryVulnerabilityScanner, PypiMirrorClient,
-    Settings, Sha256TokenHasher, SimpleJwksOidcVerifier, SqliteRegistryStore,
-    YaraWheelVirusScanner, ZipWheelArchiveReader,
+    Settings, Sha256TokenHasher, SimpleJwksOidcVerifier, SqlServerRegistryStore,
+    SqliteRegistryStore, YaraWheelVirusScanner, ZipWheelArchiveReader,
 };
 use log::{info, warn};
 use pyregistry_application::{
@@ -99,6 +99,12 @@ async fn build_registry_store(
                     postgres.log_safe_summary()
                 );
             }
+            if let Some(sql_server) = &settings.sql_server {
+                warn!(
+                    "sql server config is present ({}) but database_store is `in-memory`, so sql server metadata storage will not be used",
+                    sql_server.log_safe_summary()
+                );
+            }
             Ok(Arc::new(InMemoryRegistryStore::default()))
         }
         DatabaseStoreKind::Sqlite => {
@@ -125,6 +131,20 @@ async fn build_registry_store(
                 postgres.log_safe_summary()
             );
             PostgresRegistryStore::connect(postgres)
+                .await
+                .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
+                .map_err(|error| InfrastructureError::MetadataStoreConfiguration(error.to_string()))
+        }
+        DatabaseStoreKind::SqlServer => {
+            let sql_server = settings
+                .sql_server
+                .as_ref()
+                .ok_or(InfrastructureError::SqlServerConfigurationRequired)?;
+            info!(
+                "building application with SQL Server metadata store: {}",
+                sql_server.log_safe_summary()
+            );
+            SqlServerRegistryStore::connect(sql_server)
                 .await
                 .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
                 .map_err(|error| InfrastructureError::MetadataStoreConfiguration(error.to_string()))
@@ -250,6 +270,8 @@ pub enum InfrastructureError {
     SqliteConfigurationRequired,
     #[error("database_store `pgsql` requires postgres connection settings")]
     PostgresConfigurationRequired,
+    #[error("database_store `sqlserver` requires sql server connection settings")]
+    SqlServerConfigurationRequired,
     #[error("metadata store is not configured correctly: {0}")]
     MetadataStoreConfiguration(String),
     #[error("artifact object storage is not configured correctly: {0}")]
@@ -261,7 +283,7 @@ pub enum InfrastructureError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OpenDalStorageConfig, PostgresConfig, SqliteConfig};
+    use crate::{OpenDalStorageConfig, PostgresConfig, SqlServerConfig, SqliteConfig};
     use std::collections::BTreeMap;
     use std::sync::Once;
     use uuid::Uuid;
@@ -360,6 +382,14 @@ mod tests {
             build_registry_store(&postgres_settings).await,
             Err(InfrastructureError::PostgresConfigurationRequired)
         ));
+
+        let mut sql_server_settings = in_memory_settings();
+        sql_server_settings.database_store = DatabaseStoreKind::SqlServer;
+        sql_server_settings.sql_server = None;
+        assert!(matches!(
+            build_registry_store(&sql_server_settings).await,
+            Err(InfrastructureError::SqlServerConfigurationRequired)
+        ));
     }
 
     #[tokio::test]
@@ -393,6 +423,25 @@ mod tests {
         settings.database_store = DatabaseStoreKind::Pgsql;
         settings.postgres = Some(PostgresConfig {
             connection_url: "postgres://invalid:invalid@127.0.0.1:1/pyregistry".into(),
+            max_connections: 1,
+            min_connections: 0,
+            acquire_timeout_seconds: 1,
+        });
+
+        assert!(matches!(
+            build_registry_store(&settings).await,
+            Err(InfrastructureError::MetadataStoreConfiguration(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn build_registry_store_reports_sql_server_connection_errors() {
+        init_test_logger();
+        let mut settings = in_memory_settings();
+        settings.database_store = DatabaseStoreKind::SqlServer;
+        settings.sql_server = Some(SqlServerConfig {
+            connection_url:
+                "sqlserver://sa:invalid@127.0.0.1:1/pyregistry?trust_server_certificate=true".into(),
             max_connections: 1,
             min_connections: 0,
             acquire_timeout_seconds: 1,

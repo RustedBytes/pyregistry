@@ -43,7 +43,7 @@ rand = "0.10.1"
 rayon = "1.10"
 regex = "1.12"
 reqwest = { version = "0.13.2", default-features = false, features = ["charset", "http2", "json", "multipart", "rustls"] }
-limbo = { version = "0.0.22", features = ["index_experimental"] }
+turso = { version = "0.6.0-pre.17", default-features = false, features = ["pure-rust-crypto"] }
 rustpython-parser = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -53,6 +53,8 @@ thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"] }
 tokio = { version = "1.48", features = ["full"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tiberius = { version = "0.12.3", default-features = false, features = ["chrono", "rustls", "tds73", "tokio"] }
 toml = "1.1.2+spec-1.1.0"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace"] }

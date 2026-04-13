@@ -86,7 +86,7 @@ Application code owns orchestration. Examples:
 Adapters own external details. Examples:
 
 - HTTP routes and Askama templates in `crates/web`.
-- SQLite, Postgres, OpenDAL, PyPI HTTP, OIDC JWKS, hashing, and scanners in
+- SQLite, Postgres, SQL Server, OpenDAL, PyPI HTTP, OIDC JWKS, hashing, and scanners in
   `crates/infrastructure`.
 - CLI parsing and process startup in `crates/bootstrap`.
 

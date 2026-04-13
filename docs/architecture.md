@@ -30,7 +30,7 @@ The domain crate must not depend on:
 | `crates/domain` | Domain | `Tenant`, `Project`, `Release`, `Artifact`, `ProjectName`, `ReleaseVersion`, `DomainError`. |
 | `crates/application` | Application | `PyregistryApp`, commands, DTOs, ports, upload, mirror, token, audit, scan, and validation use cases. |
 | `crates/web` | Interface adapters | Routes, request models, response models, session auth, rate limit middleware, Askama templates. |
-| `crates/infrastructure` | Infrastructure | SQLite, Postgres, object storage, PyPI mirror client, OIDC verifier, hashing, scanners, settings, wiring. |
+| `crates/infrastructure` | Infrastructure | SQLite, Postgres, SQL Server, object storage, PyPI mirror client, OIDC verifier, hashing, scanners, settings, wiring. |
 | `crates/bootstrap` | Bootstrap | CLI parsing, command dispatch, HTTP listener, logging setup, background mirror updater. |
 
 ## Domain Layer
@@ -131,7 +131,7 @@ that logic into the application or domain layer.
 It owns:
 
 - Settings loading from TOML and environment.
-- SQLite and Postgres stores.
+- SQLite, Postgres, and SQL Server stores.
 - In-memory store for throwaway runs.
 - OpenDAL filesystem and S3 object storage.
 - PyPI mirror HTTP client.

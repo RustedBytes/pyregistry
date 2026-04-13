@@ -53,9 +53,9 @@ Implemented today:
 
 Important limitations:
 
-- SQLite is the default metadata store. PostgreSQL is available for persistent
-  deployments, and the `in-memory` store is still available for throwaway
-  development runs.
+- SQLite is the default metadata store. PostgreSQL and Microsoft SQL Server are
+  available for persistent deployments, and the `in-memory` store is still
+  available for throwaway development runs.
 - The UI is intentionally small and admin-focused.
 - Mirroring targets a PyPI-compatible JSON/files API and defaults to
   `https://pypi.org`.
@@ -67,7 +67,7 @@ The workspace keeps dependency direction pointed inward:
 - `crates/domain`: pure entities, value objects, invariants, and domain errors.
 - `crates/application`: use cases, commands, DTOs, and ports.
 - `crates/web`: Axum handlers, Askama templates, presenters, and web auth.
-- `crates/infrastructure`: config, logging, SQLite and in-memory stores,
+- `crates/infrastructure`: config, logging, SQLite, PostgreSQL, SQL Server, and in-memory stores,
   OpenDAL storage, PyPI mirror client, OIDC verification, hashing, PySentry,
   YARA-X, and wiring.
 - `crates/bootstrap`: binary entrypoint and CLI command dispatch.
@@ -83,7 +83,7 @@ drivers, serialization formats, or config loading.
   `cargo install cargo-nextest --locked`
 - `cargo-llvm-cov` for the coverage gate:
   `cargo install cargo-llvm-cov --locked`
-- Docker Compose, optional, for local Postgres, MinIO, and the test JWKS server.
+- Docker Compose, optional, for local Postgres, SQL Server, MinIO, and the test JWKS server.
 - Python tooling such as `pip`, `uv`, and `twine`, optional, for compatibility
   smoke tests.
 
@@ -140,6 +140,7 @@ Docker Compose port mappings:
 - Pyregistry at `http://127.0.0.1:3000`, backed by SQLite and filesystem
   artifact storage in the `pyregistry-data` volume.
 - Postgres at `127.0.0.1:5432`.
+- SQL Server at `127.0.0.1:1433`.
 - MinIO S3 API at `127.0.0.1:9000`.
 - MinIO console at `127.0.0.1:9001`.
 - JWKS test server at `127.0.0.1:8081`.
@@ -157,7 +158,7 @@ Legacy Compose v1 users can run the same commands with `docker-compose`.
 Start the optional local dependencies without the registry container:
 
 ```bash
-docker compose up -d postgres minio minio-init jwks
+docker compose up -d postgres sqlserver minio minio-init jwks
 ```
 
 Generate a MinIO-oriented config:
@@ -219,6 +220,12 @@ max_connections = 20
 min_connections = 2
 acquire_timeout_seconds = 10
 
+[sql_server]
+connection_url = "sqlserver://sa:Pyregistry123!@127.0.0.1:1433/pyregistry?trust_server_certificate=true"
+max_connections = 20
+min_connections = 2
+acquire_timeout_seconds = 10
+
 [security]
 yara_rules_path = "supplied/signature-base/yara"
 
@@ -248,6 +255,10 @@ The current PostgreSQL adapter uses a single `tokio-postgres` connection with
 connection pipelining. `max_connections` and `min_connections` are accepted
 configuration fields for compatibility with future pooling, but they do not
 create a connection pool today.
+
+The SQL Server adapter uses `tiberius` and the same application `RegistryStore`
+port. Select it with `database_store = "sqlserver"` and configure `[sql_server]`
+or `SQL_SERVER_URL`.
 
 Set `security.yara_rules_path` to a directory containing your own `.yar` or
 `.yara` files to replace the default on-disk rule directory. For one-off runs,
@@ -288,6 +299,10 @@ Useful environment variables:
 - `POSTGRES_MAX_CONNECTIONS`
 - `POSTGRES_MIN_CONNECTIONS`
 - `POSTGRES_ACQUIRE_TIMEOUT_SECONDS`
+- `SQL_SERVER_URL` or `MSSQL_URL`
+- `SQL_SERVER_MAX_CONNECTIONS`
+- `SQL_SERVER_MIN_CONNECTIONS`
+- `SQL_SERVER_ACQUIRE_TIMEOUT_SECONDS`
 - `ARTIFACT_STORAGE_BACKEND`
 - `OPENDAL_SCHEME`
 - `OPENDAL_OPTIONS`

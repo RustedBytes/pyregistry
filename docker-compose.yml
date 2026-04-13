@@ -36,6 +36,17 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: Pyregistry123!
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
@@ -69,4 +80,5 @@ services:
 volumes:
   pyregistry-data:
   postgres-data:
+  sqlserver-data:
   minio-data:

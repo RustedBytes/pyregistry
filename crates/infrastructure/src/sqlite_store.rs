@@ -1,8 +1,5 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use limbo::params;
-use limbo::params::IntoParams;
-use limbo::{Connection, Row, Value};
 use pyregistry_application::{
     ApplicationError, RecentActivity, RegistryOverview, RegistryStore, ReleaseArtifacts, SearchHit,
     TenantDashboardStats,
@@ -18,10 +15,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
+use turso::params;
+use turso::params::IntoParams;
+use turso::{Connection, Row, Value};
 use uuid::Uuid;
 
 pub struct SqliteRegistryStore {
-    _database: limbo::Database,
+    _database: turso::Database,
     connection: Connection,
     operation_lock: tokio::sync::Mutex<()>,
 }
@@ -47,7 +47,7 @@ impl SqliteRegistryStore {
                 path.display()
             ))
         })?;
-        let database = limbo::Builder::new_local(path)
+        let database = turso::Builder::new_local(path)
             .build()
             .await
             .map_err(sqlite_error)?;
@@ -1167,6 +1167,14 @@ async fn execute_batch(connection: &Connection, sql: &str) -> Result<(), Applica
     for statement in sql.split(';').map(str::trim).filter(|sql| !sql.is_empty()) {
         if let Err(error) = connection.execute(statement, ()).await {
             let message = error.to_string();
+            if message.contains("unexpected row during execution") {
+                let mut rows = connection
+                    .query(statement, ())
+                    .await
+                    .map_err(sqlite_error)?;
+                while rows.next().await.map_err(sqlite_error)?.is_some() {}
+                continue;
+            }
             if statement
                 .trim_start()
                 .to_ascii_uppercase()
@@ -1186,7 +1194,7 @@ type SqliteResult<T> = std::result::Result<T, SqliteStoreError>;
 #[derive(Debug, Error)]
 enum SqliteStoreError {
     #[error("{0}")]
-    Database(#[from] limbo::Error),
+    Database(#[from] turso::Error),
     #[error("query returned no rows")]
     NoRows,
     #[error("column {column}: {message}")]

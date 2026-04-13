@@ -53,7 +53,7 @@ database_store = "sqlite"
 | `superadmin_email` | Bootstrap superadmin login. |
 | `superadmin_password` | Bootstrap superadmin password. |
 | `cookie_secret` | Secret used for signed web cookies. |
-| `database_store` | Metadata backend: `sqlite`, `pgsql`, or `in-memory`. |
+| `database_store` | Metadata backend: `sqlite`, `pgsql`, `sqlserver`, or `in-memory`. |
 
 Do not use generated credentials or cookie secrets in shared environments.
 
@@ -121,6 +121,22 @@ Set:
 
 ```toml
 database_store = "pgsql"
+```
+
+Microsoft SQL Server is also available for persistent deployments:
+
+```toml
+[sql_server]
+connection_url = "sqlserver://sa:Pyregistry123!@127.0.0.1:1433/pyregistry?trust_server_certificate=true"
+max_connections = 20
+min_connections = 2
+acquire_timeout_seconds = 10
+```
+
+Set:
+
+```toml
+database_store = "sqlserver"
 ```
 
 Use `in-memory` only for throwaway development runs.
@@ -250,6 +266,10 @@ Common environment variables:
 | `POSTGRES_MAX_CONNECTIONS` | Maximum Postgres pool connections. |
 | `POSTGRES_MIN_CONNECTIONS` | Minimum Postgres pool connections. |
 | `POSTGRES_ACQUIRE_TIMEOUT_SECONDS` | Postgres connection acquire timeout. |
+| `SQL_SERVER_URL` or `MSSQL_URL` | SQL Server connection URL. |
+| `SQL_SERVER_MAX_CONNECTIONS` | Maximum SQL Server pool connections. |
+| `SQL_SERVER_MIN_CONNECTIONS` | Minimum SQL Server pool connections. |
+| `SQL_SERVER_ACQUIRE_TIMEOUT_SECONDS` | SQL Server connection acquire timeout. |
 | `ARTIFACT_STORAGE_BACKEND` | Artifact backend: `opendal` or `filesystem`. |
 | `OPENDAL_SCHEME` | OpenDAL scheme such as `fs` or `s3`. |
 | `OPENDAL_OPTIONS` | Comma-separated OpenDAL `key=value` options. |

@@ -21,6 +21,7 @@ pub struct Settings {
     pub pypi: PypiConfig,
     pub sqlite: Option<SqliteConfig>,
     pub postgres: Option<PostgresConfig>,
+    pub sql_server: Option<SqlServerConfig>,
     pub security: SecurityConfig,
     pub rate_limit: RateLimitConfig,
     pub validation: ValidationConfig,
@@ -47,6 +48,15 @@ impl Settings {
                 max_connections: read_env_u32("POSTGRES_MAX_CONNECTIONS", 20),
                 min_connections: read_env_u32("POSTGRES_MIN_CONNECTIONS", 2),
                 acquire_timeout_seconds: read_env_u64("POSTGRES_ACQUIRE_TIMEOUT_SECONDS", 10),
+            });
+        let sql_server = std::env::var("SQL_SERVER_URL")
+            .or_else(|_| std::env::var("MSSQL_URL"))
+            .ok()
+            .map(|connection_url| SqlServerConfig {
+                connection_url,
+                max_connections: read_env_u32("SQL_SERVER_MAX_CONNECTIONS", 20),
+                min_connections: read_env_u32("SQL_SERVER_MIN_CONNECTIONS", 2),
+                acquire_timeout_seconds: read_env_u64("SQL_SERVER_ACQUIRE_TIMEOUT_SECONDS", 10),
             });
         let sqlite = Some(SqliteConfig {
             path: std::env::var("SQLITE_PATH")
@@ -120,6 +130,7 @@ impl Settings {
             },
             sqlite,
             postgres,
+            sql_server,
             security: SecurityConfig {
                 yara_rules_path: std::env::var("YARA_RULES_PATH")
                     .map(PathBuf::from)
@@ -170,6 +181,7 @@ impl Settings {
             pypi: default_pypi_config(),
             sqlite: Some(default_sqlite_config()),
             postgres: Some(default_postgres_config()),
+            sql_server: Some(default_sql_server_config()),
             security: default_security_config(),
             rate_limit: default_rate_limit_config(),
             validation: default_validation_config(),
@@ -247,7 +259,7 @@ impl Settings {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, security={}, rate_limit={}, validation={}, logging={}, oidc_issuers={}",
+            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, sql_server={}, security={}, rate_limit={}, validation={}, logging={}, oidc_issuers={}",
             self.bind_address,
             self.blob_root.display(),
             self.superadmin_email,
@@ -260,6 +272,9 @@ impl Settings {
             self.postgres
                 .as_ref()
                 .map_or_else(|| "disabled".to_string(), PostgresConfig::log_safe_summary),
+            self.sql_server
+                .as_ref()
+                .map_or_else(|| "disabled".to_string(), SqlServerConfig::log_safe_summary),
             self.security.log_safe_summary(),
             self.rate_limit.log_safe_summary(),
             self.validation.log_safe_summary(),
@@ -272,6 +287,13 @@ impl Settings {
         if matches!(self.database_store, DatabaseStoreKind::Pgsql) && self.postgres.is_none() {
             return Err(SettingsError::InvalidDatabaseStore(
                 "database_store `pgsql` requires a [postgres] config section or DATABASE_URL"
+                    .into(),
+            ));
+        }
+        if matches!(self.database_store, DatabaseStoreKind::SqlServer) && self.sql_server.is_none()
+        {
+            return Err(SettingsError::InvalidDatabaseStore(
+                "database_store `sqlserver` requires a [sql_server] config section or SQL_SERVER_URL"
                     .into(),
             ));
         }
@@ -417,6 +439,7 @@ pub enum DatabaseStoreKind {
     InMemory,
     Sqlite,
     Pgsql,
+    SqlServer,
 }
 
 impl DatabaseStoreKind {
@@ -426,6 +449,7 @@ impl DatabaseStoreKind {
             Self::InMemory => "in-memory",
             Self::Sqlite => "sqlite",
             Self::Pgsql => "pgsql",
+            Self::SqlServer => "sqlserver",
         }
     }
 
@@ -434,8 +458,9 @@ impl DatabaseStoreKind {
             "in-memory" | "inmemory" | "memory" | "mem" => Ok(Self::InMemory),
             "sqlite" | "sqlite3" => Ok(Self::Sqlite),
             "pgsql" | "postgres" | "postgresql" => Ok(Self::Pgsql),
+            "sqlserver" | "sql-server" | "mssql" | "microsoft-sql-server" => Ok(Self::SqlServer),
             other => Err(SettingsError::InvalidDatabaseStore(format!(
-                "unsupported database_store `{other}`; expected `sqlite`, `in-memory`, or `pgsql`"
+                "unsupported database_store `{other}`; expected `sqlite`, `in-memory`, `pgsql`, or `sqlserver`"
             ))),
         }
     }
@@ -519,6 +544,40 @@ pub struct SecurityConfig {
     pub yara_rules_path: PathBuf,
     pub scanner_ignores: SecurityScannerIgnoreConfig,
     pub vulnerability_webhook: VulnerabilityWebhookConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct SqlServerConfig {
+    pub connection_url: String,
+    pub max_connections: u32,
+    pub min_connections: u32,
+    pub acquire_timeout_seconds: u64,
+}
+
+impl SqlServerConfig {
+    #[must_use]
+    pub fn log_safe_summary(&self) -> String {
+        let endpoint = Url::parse(&self.connection_url)
+            .ok()
+            .map(|url| {
+                let host = url.host_str().unwrap_or("unknown");
+                let port = url
+                    .port()
+                    .map_or_else(|| "default".to_string(), |port| port.to_string());
+                let database = url.path().trim_start_matches('/');
+                if database.is_empty() {
+                    format!("{host}:{port}")
+                } else {
+                    format!("{host}:{port}/{database}")
+                }
+            })
+            .unwrap_or_else(|| "configured".into());
+
+        format!(
+            "enabled(endpoint={}, min_connections={}, max_connections={}, acquire_timeout_seconds={})",
+            endpoint, self.min_connections, self.max_connections, self.acquire_timeout_seconds
+        )
+    }
 }
 
 impl SecurityConfig {
@@ -757,6 +816,8 @@ pub enum SettingsError {
     InvalidPypiConfig(String),
     #[error("invalid postgres config: {0}")]
     InvalidPostgresConfig(String),
+    #[error("invalid sql server config: {0}")]
+    InvalidSqlServerConfig(String),
     #[error("invalid sqlite config: {0}")]
     InvalidSqliteConfig(String),
     #[error("invalid database store config: {0}")]
@@ -789,6 +850,7 @@ struct SettingsFile {
     pypi: Option<PypiConfigFile>,
     sqlite: Option<SqliteConfigFile>,
     postgres: Option<PostgresConfigFile>,
+    sql_server: Option<SqlServerConfigFile>,
     security: Option<SecurityConfigFile>,
     rate_limit: Option<RateLimitConfigFile>,
     validation: Option<ValidationConfigFile>,
@@ -839,6 +901,14 @@ struct SecurityConfigFile {
     #[serde(default)]
     scanner_ignores: SecurityScannerIgnoreConfigFile,
     vulnerability_webhook: Option<VulnerabilityWebhookConfigFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SqlServerConfigFile {
+    connection_url: String,
+    max_connections: u32,
+    min_connections: u32,
+    acquire_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -923,6 +993,10 @@ impl TryFrom<SettingsFile> for Settings {
                     .unwrap_or_else(default_sqlite_config),
             ),
             postgres: value.postgres.map(PostgresConfig::try_from).transpose()?,
+            sql_server: value
+                .sql_server
+                .map(SqlServerConfig::try_from)
+                .transpose()?,
             security: value
                 .security
                 .map(SecurityConfig::try_from)
@@ -967,6 +1041,7 @@ impl From<Settings> for SettingsFile {
             pypi: Some(value.pypi.into()),
             sqlite: value.sqlite.map(Into::into),
             postgres: value.postgres.map(Into::into),
+            sql_server: value.sql_server.map(Into::into),
             security: Some(value.security.into()),
             rate_limit: Some(value.rate_limit.into()),
             validation: Some(value.validation.into()),
@@ -1137,6 +1212,46 @@ impl TryFrom<PostgresConfigFile> for PostgresConfig {
 
 impl From<PostgresConfig> for PostgresConfigFile {
     fn from(value: PostgresConfig) -> Self {
+        Self {
+            connection_url: value.connection_url,
+            max_connections: value.max_connections,
+            min_connections: value.min_connections,
+            acquire_timeout_seconds: value.acquire_timeout_seconds,
+        }
+    }
+}
+
+impl TryFrom<SqlServerConfigFile> for SqlServerConfig {
+    type Error = SettingsError;
+
+    fn try_from(value: SqlServerConfigFile) -> Result<Self, Self::Error> {
+        if value.connection_url.trim().is_empty() {
+            return Err(SettingsError::InvalidSqlServerConfig(
+                "connection_url must not be empty".into(),
+            ));
+        }
+        if value.min_connections > value.max_connections {
+            return Err(SettingsError::InvalidSqlServerConfig(
+                "min_connections cannot be greater than max_connections".into(),
+            ));
+        }
+        if value.max_connections == 0 {
+            return Err(SettingsError::InvalidSqlServerConfig(
+                "max_connections must be greater than zero".into(),
+            ));
+        }
+
+        Ok(Self {
+            connection_url: value.connection_url,
+            max_connections: value.max_connections,
+            min_connections: value.min_connections,
+            acquire_timeout_seconds: value.acquire_timeout_seconds,
+        })
+    }
+}
+
+impl From<SqlServerConfig> for SqlServerConfigFile {
+    fn from(value: SqlServerConfig) -> Self {
         Self {
             connection_url: value.connection_url,
             max_connections: value.max_connections,
@@ -1449,6 +1564,17 @@ fn minio_opendal_options() -> BTreeMap<String, String> {
 fn default_postgres_config() -> PostgresConfig {
     PostgresConfig {
         connection_url: "postgres://pyregistry:pyregistry@127.0.0.1:5432/pyregistry".into(),
+        max_connections: 20,
+        min_connections: 2,
+        acquire_timeout_seconds: 10,
+    }
+}
+
+fn default_sql_server_config() -> SqlServerConfig {
+    SqlServerConfig {
+        connection_url:
+            "sqlserver://sa:Pyregistry123!@127.0.0.1:1433/pyregistry?trust_server_certificate=true"
+                .into(),
         max_connections: 20,
         min_connections: 2,
         acquire_timeout_seconds: 10,
