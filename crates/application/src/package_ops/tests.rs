@@ -39,7 +39,8 @@ async fn mirrored_project_caches_artifacts_with_bounded_parallelism() {
     let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
     let storage = Arc::new(FakeObjectStorage::default());
     let mirror = Arc::new(FakeMirrorClient::with_artifact_count(6));
-    let app = test_app(store.clone(), storage.clone(), mirror.clone(), 2);
+    let app = test_app(store.clone(), storage.clone(), mirror.clone(), 2)
+        .with_mirror_eager_download_percent(100);
 
     let project = app
         .resolve_project_from_mirror("acme", "demo")
@@ -137,7 +138,8 @@ async fn refresh_mirrored_projects_updates_existing_mirrors_only() {
     let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true));
     let storage = Arc::new(FakeObjectStorage::default());
     let mirror = Arc::new(FakeMirrorClient::with_artifact_count(3));
-    let app = test_app(store.clone(), storage.clone(), mirror.clone(), 2);
+    let app = test_app(store.clone(), storage.clone(), mirror.clone(), 2)
+        .with_mirror_eager_download_percent(100);
 
     let report = app
         .refresh_mirrored_projects()
