@@ -54,12 +54,12 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          key: stable-${{ matrix.target }}-minimal-local
+          key: stable-${{ matrix.target }}-minimal-local-opendal-fs
 
       - name: Build release binary
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
-        run: cargo build --release -p pyregistry --no-default-features --features minimal-local --target ${{ matrix.target }}
+        run: cargo build --release -p pyregistry --no-default-features --features minimal-local,opendal-fs --target ${{ matrix.target }}
 
       - name: Stage release binary
         shell: bash
