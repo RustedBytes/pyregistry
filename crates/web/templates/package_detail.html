@@ -483,12 +483,20 @@
           <h2>Known Vulnerabilities</h2>
           {% match details.security.scan_error %}
           {% when Some with (error) %}
+          {% if details.security.scan_unavailable %}
+          <p class="security-muted">PySentry scan unavailable on this server: {{ error }}</p>
+          {% else %}
           <p class="security-warning">PySentry scan did not complete for every release file: {{ error }}</p>
+          {% endif %}
           {% when None %}
           {% endmatch %}
           {% match details.security.dependency_scan_error %}
           {% when Some with (error) %}
+          {% if details.security.dependency_scan_unavailable %}
+          <p class="security-muted">PySentry dependency scan unavailable on this server: {{ error }}</p>
+          {% else %}
           <p class="security-warning">PySentry dependency scan did not complete for every pinned requirement: {{ error }}</p>
+          {% endif %}
           {% when None %}
           {% endmatch %}
 
@@ -503,7 +511,11 @@
           {% when None %}
           {% endmatch %}
           {% else %}
+          {% if details.security.scan_unavailable %}
+          <p class="security-muted">No release files were checked because PySentry is unavailable for this server target.</p>
+          {% else %}
           <p>PySentry found no known vulnerabilities in {{ details.security.scanned_file_count }} scanned release file{% if details.security.scanned_file_count != 1 %}s{% endif %}.</p>
+          {% endif %}
           {% endif %}
 
           {% if details.security.scanned_dependency_count > 0 %}

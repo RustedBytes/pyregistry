@@ -146,10 +146,12 @@ pub(crate) struct PackageSecuritySummaryView {
     pub(crate) vulnerability_count: usize,
     pub(crate) highest_severity: Option<String>,
     pub(crate) scan_error: Option<String>,
+    pub(crate) scan_unavailable: bool,
     pub(crate) scanned_dependency_count: usize,
     pub(crate) vulnerable_dependency_count: usize,
     pub(crate) dependency_vulnerability_count: usize,
     pub(crate) dependency_scan_error: Option<String>,
+    pub(crate) dependency_scan_unavailable: bool,
 }
 
 #[derive(Clone, Serialize)]

@@ -6,6 +6,11 @@ use pyregistry_application::{
 };
 use std::path::PathBuf;
 
+const PACKAGE_LOOKUP_UNAVAILABLE: &str =
+    "PySentry vulnerability lookup is unavailable on Windows GNU targets";
+const DEPENDENCY_LOOKUP_UNAVAILABLE: &str =
+    "PySentry dependency vulnerability lookup is unavailable on Windows GNU targets";
+
 pub struct PySentryVulnerabilityScanner {
     cache_dir: PathBuf,
 }
@@ -33,9 +38,10 @@ impl VulnerabilityScanner for PySentryVulnerabilityScanner {
             "PySentry vulnerability lookup is unavailable on Windows GNU targets; cache path was {}",
             self.cache_dir.display()
         );
-        Err(ApplicationError::External(
-            "PySentry vulnerability lookup is unavailable on Windows GNU targets".into(),
-        ))
+        Ok(packages
+            .iter()
+            .map(|query| PackageVulnerabilityReport::failed(query, PACKAGE_LOOKUP_UNAVAILABLE))
+            .collect())
     }
 
     async fn scan_dependency_versions(
@@ -50,9 +56,12 @@ impl VulnerabilityScanner for PySentryVulnerabilityScanner {
             "PySentry dependency vulnerability lookup is unavailable on Windows GNU targets; cache path was {}",
             self.cache_dir.display()
         );
-        Err(ApplicationError::External(
-            "PySentry dependency vulnerability lookup is unavailable on Windows GNU targets".into(),
-        ))
+        Ok(dependencies
+            .iter()
+            .map(|query| {
+                DependencyVulnerabilityReport::failed(query, DEPENDENCY_LOOKUP_UNAVAILABLE)
+            })
+            .collect())
     }
 }
 
@@ -81,15 +90,47 @@ mod tests {
             std::env::temp_dir().join(format!("pyregistry-pysentry-{}", Uuid::new_v4())),
         );
 
-        let result = scanner
+        let reports = scanner
             .scan_package_versions(&[PackageVulnerabilityQuery {
                 package_name: "demo".into(),
                 version: "1.0.0".into(),
             }])
-            .await;
+            .await
+            .expect("unavailable report");
 
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].package_name, "demo");
+        assert_eq!(reports[0].version, "1.0.0");
         assert!(
-            matches!(result, Err(ApplicationError::External(message)) if message.contains("Windows GNU"))
+            reports[0]
+                .scan_error
+                .as_deref()
+                .is_some_and(|message| message.contains("Windows GNU"))
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_dependency_lookup_unavailable_for_non_empty_input() {
+        let scanner = PySentryVulnerabilityScanner::new(
+            std::env::temp_dir().join(format!("pyregistry-pysentry-{}", Uuid::new_v4())),
+        );
+
+        let reports = scanner
+            .scan_dependency_versions(&[DependencyVulnerabilityQuery {
+                package_name: "requests".into(),
+                version: "2.19.0".into(),
+            }])
+            .await
+            .expect("unavailable report");
+
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].package_name, "requests");
+        assert_eq!(reports[0].version, "2.19.0");
+        assert!(
+            reports[0]
+                .scan_error
+                .as_deref()
+                .is_some_and(|message| message.contains("Windows GNU"))
         );
     }
 }

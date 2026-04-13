@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
 const MAX_SNIPPET_LEN: usize = 240;
+const MAX_FOXGUARD_FILE_SIZE_BYTES: u64 = 1_048_576;
 
 pub struct FoxGuardWheelSourceSecurityScanner {
     registry: RuleRegistry,
@@ -64,7 +65,12 @@ impl FoxGuardWheelSourceSecurityScanner {
             paths.len()
         );
 
-        let source_scan = engine::scan_paths_with_root(root, &paths, &self.registry);
+        let source_scan = engine::scan_paths_with_root(
+            root,
+            &paths,
+            &self.registry,
+            MAX_FOXGUARD_FILE_SIZE_BYTES,
+        );
         debug!(
             "FoxGuard source rules scanned {} language file(s) in {:?}",
             source_scan.files_scanned, source_scan.duration
@@ -78,9 +84,14 @@ impl FoxGuardWheelSourceSecurityScanner {
                 .map(|finding| map_foxguard_finding("source-rule", root, finding)),
         );
         findings.extend(
-            secrets::scan_paths_with_config(root, &paths, &secrets::SecretScanConfig::default())
-                .into_iter()
-                .map(|finding| map_foxguard_finding("secret", root, finding)),
+            secrets::scan_paths_with_config(
+                root,
+                &paths,
+                &secrets::SecretScanConfig::default(),
+                MAX_FOXGUARD_FILE_SIZE_BYTES,
+            )
+            .into_iter()
+            .map(|finding| map_foxguard_finding("secret", root, finding)),
         );
 
         Ok(WheelSourceSecurityScanResult {
@@ -359,6 +370,11 @@ mod tests {
             end_line: 7,
             end_column: 20,
             snippet: "x".repeat(MAX_SNIPPET_LEN + 20),
+            source_line: None,
+            source_description: None,
+            sink_line: None,
+            sink_description: None,
+            fix_suggestion: None,
         };
 
         let mapped = map_foxguard_finding("source-rule", root, finding);

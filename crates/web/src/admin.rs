@@ -955,10 +955,16 @@ fn package_detail_view(
             vulnerable_file_count: details.security.vulnerable_file_count,
             vulnerability_count: details.security.vulnerability_count,
             highest_severity: details.security.highest_severity,
+            scan_unavailable: is_pysentry_package_scan_unavailable(
+                details.security.scan_error.as_deref(),
+            ),
             scan_error: details.security.scan_error,
             scanned_dependency_count: details.security.scanned_dependency_count,
             vulnerable_dependency_count: details.security.vulnerable_dependency_count,
             dependency_vulnerability_count: details.security.dependency_vulnerability_count,
+            dependency_scan_unavailable: is_pysentry_dependency_scan_unavailable(
+                details.security.dependency_scan_error.as_deref(),
+            ),
             dependency_scan_error: details.security.dependency_scan_error,
         },
         pip_install_command,
@@ -1007,6 +1013,20 @@ fn package_detail_view(
             .collect(),
         trusted_publishers: details.trusted_publishers,
     }
+}
+
+fn is_pysentry_package_scan_unavailable(error: Option<&str>) -> bool {
+    error.is_some_and(|error| {
+        error.contains("PySentry vulnerability lookup is unavailable on Windows GNU targets")
+    })
+}
+
+fn is_pysentry_dependency_scan_unavailable(error: Option<&str>) -> bool {
+    error.is_some_and(|error| {
+        error.contains(
+            "PySentry dependency vulnerability lookup is unavailable on Windows GNU targets",
+        )
+    })
 }
 
 fn artifact_security_view(
@@ -1374,6 +1394,55 @@ mod tests {
         assert!(rendered.contains("<details class=\"install-panel\">"));
         assert!(!rendered.contains("<details class=\"install-panel\" open>"));
         assert!(rendered.contains("Index URL, pip, and uv commands"));
+    }
+
+    #[test]
+    fn package_detail_template_labels_windows_gnu_pysentry_as_unavailable() {
+        let unavailable =
+            "1.0.0: PySentry vulnerability lookup is unavailable on Windows GNU targets";
+        let details = PackageDetails {
+            tenant_slug: "acme".into(),
+            project_name: "rsloop".into(),
+            normalized_name: "rsloop".into(),
+            summary: String::new(),
+            description: String::new(),
+            source: "Local".into(),
+            security: PackageSecuritySummary {
+                scan_error: Some(unavailable.into()),
+                ..PackageSecuritySummary::default()
+            },
+            releases: vec![PackageReleaseDetails {
+                version: "1.0.0".into(),
+                yanked_reason: None,
+                artifacts: vec![PackageArtifactDetails {
+                    filename: "rsloop-1.0.0-py3-none-any.whl".into(),
+                    version: "1.0.0".into(),
+                    size_bytes: 42,
+                    sha256: "abc123".into(),
+                    object_key: "objects/rsloop.whl".into(),
+                    yanked_reason: None,
+                    security: ArtifactSecurityDetails::failed(
+                        "PySentry vulnerability lookup is unavailable on Windows GNU targets",
+                    ),
+                }],
+            }],
+            trusted_publishers: Vec::new(),
+        };
+
+        let rendered = PackageDetailTemplate {
+            details: package_detail_view(details, "http://127.0.0.1:3000"),
+        }
+        .render()
+        .expect("render package detail");
+
+        assert!(rendered.contains("PySentry scan unavailable on this server"));
+        assert!(rendered.contains("No release files were checked"));
+        assert!(!rendered.contains("external dependency failure"));
+        assert!(!rendered.contains("PySentry scan did not complete for every release file"));
+        assert!(
+            !rendered
+                .contains("PySentry found no known vulnerabilities in 0 scanned release files")
+        );
     }
 
     #[test]
