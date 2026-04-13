@@ -9,6 +9,24 @@ The project is intentionally server-rendered and minimal: Axum for HTTP, Askama
 templates compiled into the binary, TOML configuration, and no frontend build
 pipeline.
 
+## Table of Contents
+
+- [Current Status](#current-status)
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Quickstart](#quickstart)
+- [Docker Compose](#docker-compose)
+- [Local Services](#local-services)
+- [Configuration](#configuration)
+- [CLI](#cli)
+- [Python Tooling](#python-tooling)
+- [HTTP Interfaces](#http-interfaces)
+- [Security Scanning](#security-scanning)
+- [Mirroring](#mirroring)
+- [Trusted Publishing](#trusted-publishing)
+- [Development Notes](#development-notes)
+- [License](#license)
+
 ## Current Status
 
 This is base code for a registry service, not a production release yet.
