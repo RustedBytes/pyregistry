@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use limbo::params;
+use limbo::params::IntoParams;
+use limbo::{Connection, Row, Value};
 use pyregistry_application::{
     ApplicationError, RecentActivity, RegistryOverview, RegistryStore, ReleaseArtifacts, SearchHit,
     TenantDashboardStats,
@@ -11,20 +14,20 @@ use pyregistry_domain::{
     TenantId, TenantSlug, TokenId, TokenScope, TrustedPublisher, TrustedPublisherId,
     TrustedPublisherProvider, YankState,
 };
-use rusqlite::types::Type;
-use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use thiserror::Error;
 use uuid::Uuid;
 
 pub struct SqliteRegistryStore {
-    connection: Mutex<Connection>,
+    _database: limbo::Database,
+    connection: Connection,
+    operation_lock: tokio::sync::Mutex<()>,
 }
 
 impl SqliteRegistryStore {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
         let path = path.as_ref();
         if let Some(parent) = path
             .parent()
@@ -38,112 +41,177 @@ impl SqliteRegistryStore {
             })?;
         }
 
-        let connection = Connection::open(path).map_err(sqlite_error)?;
-        connection
-            .execute_batch(
-                r#"
-                PRAGMA foreign_keys = ON;
-                PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = NORMAL;
-                PRAGMA busy_timeout = 5000;
-                PRAGMA temp_store = MEMORY;
-                PRAGMA cache_size = -20000;
-                "#,
-            )
+        let path = path.to_str().ok_or_else(|| {
+            ApplicationError::External(format!(
+                "sqlite metadata path `{}` is not valid UTF-8",
+                path.display()
+            ))
+        })?;
+        let database = limbo::Builder::new_local(path)
+            .build()
+            .await
             .map_err(sqlite_error)?;
-        migrate(&connection)?;
-        connection
-            .execute_batch("PRAGMA optimize;")
-            .map_err(sqlite_error)?;
+        let connection = database.connect().map_err(sqlite_error)?;
+        execute_batch(
+            &connection,
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA cache_size = -20000;
+            "#,
+        )
+        .await?;
+        migrate(&connection).await?;
 
         Ok(Self {
-            connection: Mutex::new(connection),
+            _database: database,
+            connection,
+            operation_lock: tokio::sync::Mutex::new(()),
         })
     }
 
-    fn with_connection<T>(
+    async fn execute(&self, sql: &str, params: impl IntoParams) -> Result<(), ApplicationError> {
+        let _guard = self.operation_lock.lock().await;
+        self.connection
+            .execute(sql, params)
+            .await
+            .map(|_| ())
+            .map_err(sqlite_error)
+    }
+
+    async fn query_one<T>(
         &self,
-        operation: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+        sql: &str,
+        params: impl IntoParams,
+        mapper: impl FnOnce(&Row) -> SqliteResult<T>,
     ) -> Result<T, ApplicationError> {
-        let connection = self.connection.lock().map_err(|error| {
-            ApplicationError::External(format!("sqlite metadata connection lock poisoned: {error}"))
-        })?;
-        operation(&connection).map_err(sqlite_error)
+        let _guard = self.operation_lock.lock().await;
+        let mut rows = self
+            .connection
+            .query(sql, params)
+            .await
+            .map_err(sqlite_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(sqlite_error)?
+            .ok_or(SqliteStoreError::NoRows)
+            .map_err(sqlite_error)?;
+        mapper(&row).map_err(sqlite_error)
+    }
+
+    async fn query_optional<T>(
+        &self,
+        sql: &str,
+        params: impl IntoParams,
+        mapper: impl FnOnce(&Row) -> SqliteResult<T>,
+    ) -> Result<Option<T>, ApplicationError> {
+        let _guard = self.operation_lock.lock().await;
+        let mut rows = self
+            .connection
+            .query(sql, params)
+            .await
+            .map_err(sqlite_error)?;
+        let Some(row) = rows.next().await.map_err(sqlite_error)? else {
+            return Ok(None);
+        };
+        mapper(&row).map(Some).map_err(sqlite_error)
+    }
+
+    async fn query_all<T>(
+        &self,
+        sql: &str,
+        params: impl IntoParams,
+        mut mapper: impl FnMut(&Row) -> SqliteResult<T>,
+    ) -> Result<Vec<T>, ApplicationError> {
+        let _guard = self.operation_lock.lock().await;
+        let mut rows = self
+            .connection
+            .query(sql, params)
+            .await
+            .map_err(sqlite_error)?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await.map_err(sqlite_error)? {
+            items.push(mapper(&row).map_err(sqlite_error)?);
+        }
+        Ok(items)
+    }
+
+    async fn query_count(
+        &self,
+        sql: &str,
+        params: impl IntoParams,
+    ) -> Result<usize, ApplicationError> {
+        self.query_one(sql, params, |row| Ok(get_i64(row, 0)? as usize))
+            .await
     }
 }
 
 #[async_trait]
 impl RegistryStore for SqliteRegistryStore {
     async fn registry_overview(&self) -> Result<RegistryOverview, ApplicationError> {
-        self.with_connection(|connection| {
-            connection.query_row(
-                r#"
-                SELECT
-                    (SELECT COUNT(*) FROM tenants) AS tenant_count,
-                    (SELECT COUNT(*) FROM projects) AS project_count,
-                    (SELECT COUNT(*) FROM releases) AS release_count,
-                    (SELECT COUNT(*) FROM artifacts) AS artifact_count,
-                    (SELECT COALESCE(SUM(size_bytes), 0) FROM artifacts) AS total_storage_bytes,
-                    (SELECT COUNT(*) FROM projects WHERE source = 'mirrored') AS mirrored_project_count
-                "#,
-                [],
-                |row| {
-                    Ok(RegistryOverview {
-                        tenant_count: row.get::<_, i64>(0)? as usize,
-                        project_count: row.get::<_, i64>(1)? as usize,
-                        release_count: row.get::<_, i64>(2)? as usize,
-                        artifact_count: row.get::<_, i64>(3)? as usize,
-                        total_storage_bytes: row.get::<_, i64>(4)? as u64,
-                        mirrored_project_count: row.get::<_, i64>(5)? as usize,
-                    })
-                },
-            )
+        Ok(RegistryOverview {
+            tenant_count: self.query_count("SELECT COUNT(*) FROM tenants", ()).await?,
+            project_count: self
+                .query_count("SELECT COUNT(*) FROM projects", ())
+                .await?,
+            release_count: self
+                .query_count("SELECT COUNT(*) FROM releases", ())
+                .await?,
+            artifact_count: self
+                .query_count("SELECT COUNT(*) FROM artifacts", ())
+                .await?,
+            total_storage_bytes: self
+                .query_one("SELECT SUM(size_bytes) FROM artifacts", (), |row| {
+                    Ok(get_optional_i64(row, 0)?.unwrap_or(0) as u64)
+                })
+                .await?,
+            mirrored_project_count: self
+                .query_count(
+                    "SELECT COUNT(*) FROM projects WHERE source = ?1",
+                    params![project_source_str(&ProjectSource::Mirrored)],
+                )
+                .await?,
         })
     }
 
     async fn save_tenant(&self, tenant: Tenant) -> Result<(), ApplicationError> {
-        self.with_connection(|connection| {
-            connection.execute(
-                r#"
-                INSERT INTO tenants (id, slug, display_name, mirroring_enabled, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5)
-                ON CONFLICT(id) DO UPDATE SET
-                    slug = excluded.slug,
-                    display_name = excluded.display_name,
-                    mirroring_enabled = excluded.mirroring_enabled,
-                    created_at = excluded.created_at
-                "#,
-                params![
-                    uuid_string(tenant.id.into_inner()),
-                    tenant.slug.as_str(),
-                    tenant.display_name,
-                    bool_i64(tenant.mirror_rule.enabled),
-                    date_string(tenant.created_at),
-                ],
-            )?;
-            Ok(())
-        })
+        self.execute(
+            r#"
+            INSERT INTO tenants (id, slug, display_name, mirroring_enabled, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(id) DO UPDATE SET
+                slug = excluded.slug,
+                display_name = excluded.display_name,
+                mirroring_enabled = excluded.mirroring_enabled,
+                created_at = excluded.created_at
+            "#,
+            params![
+                uuid_string(tenant.id.into_inner()),
+                tenant.slug.as_str(),
+                tenant.display_name,
+                bool_i64(tenant.mirror_rule.enabled),
+                date_string(tenant.created_at),
+            ],
+        )
+        .await
     }
 
     async fn list_tenants(&self) -> Result<Vec<Tenant>, ApplicationError> {
-        self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                "SELECT id, slug, display_name, mirroring_enabled, created_at FROM tenants ORDER BY slug",
-            )?;
-            collect_rows(statement.query_map([], map_tenant)?)
-        })
+        self.query_all(
+            "SELECT id, slug, display_name, mirroring_enabled, created_at FROM tenants ORDER BY slug",
+            (),
+            map_tenant,
+        )
+        .await
     }
 
     async fn get_tenant_by_slug(&self, slug: &str) -> Result<Option<Tenant>, ApplicationError> {
-        self.with_connection(|connection| {
-            connection
-                .query_row(
-                    "SELECT id, slug, display_name, mirroring_enabled, created_at FROM tenants WHERE slug = ?1",
-                    params![slug],
-                    map_tenant,
-                )
-                .optional()
-        })
+        self.query_optional(
+            "SELECT id, slug, display_name, mirroring_enabled, created_at FROM tenants WHERE slug = ?1",
+            params![slug],
+            map_tenant,
+        )
+        .await
     }
 
     async fn tenant_dashboard_stats(
@@ -151,46 +219,51 @@ impl RegistryStore for SqliteRegistryStore {
         tenant: &Tenant,
     ) -> Result<TenantDashboardStats, ApplicationError> {
         let tenant_id = uuid_string(tenant.id.into_inner());
-        self.with_connection(|connection| {
-            let (
-                project_count,
-                release_count,
-                artifact_count,
-                token_count,
-                trusted_publisher_count,
-            ) = connection.query_row(
+        let project_count = self
+            .query_count(
+                "SELECT COUNT(*) FROM projects WHERE tenant_id = ?1",
+                params![tenant_id.clone()],
+            )
+            .await?;
+        let release_count = self
+            .query_count(
                 r#"
-                SELECT
-                    (SELECT COUNT(*) FROM projects WHERE tenant_id = ?1) AS project_count,
-                    (
-                        SELECT COUNT(*)
-                        FROM releases r
-                        INNER JOIN projects p ON p.id = r.project_id
-                        WHERE p.tenant_id = ?1
-                    ) AS release_count,
-                    (
-                        SELECT COUNT(*)
-                        FROM artifacts a
-                        INNER JOIN releases r ON r.id = a.release_id
-                        INNER JOIN projects p ON p.id = r.project_id
-                        WHERE p.tenant_id = ?1
-                    ) AS artifact_count,
-                    (SELECT COUNT(*) FROM api_tokens WHERE tenant_id = ?1) AS token_count,
-                    (SELECT COUNT(*) FROM trusted_publishers WHERE tenant_id = ?1) AS trusted_publisher_count
+                SELECT COUNT(*)
+                FROM releases r
+                INNER JOIN projects p ON p.id = r.project_id
+                WHERE p.tenant_id = ?1
                 "#,
-                params![tenant_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)? as usize,
-                        row.get::<_, i64>(1)? as usize,
-                        row.get::<_, i64>(2)? as usize,
-                        row.get::<_, i64>(3)? as usize,
-                        row.get::<_, i64>(4)? as usize,
-                    ))
-                },
-            )?;
+                params![tenant_id.clone()],
+            )
+            .await?;
+        let artifact_count = self
+            .query_count(
+                r#"
+                SELECT COUNT(*)
+                FROM artifacts a
+                INNER JOIN releases r ON r.id = a.release_id
+                INNER JOIN projects p ON p.id = r.project_id
+                WHERE p.tenant_id = ?1
+                "#,
+                params![tenant_id.clone()],
+            )
+            .await?;
+        let token_count = self
+            .query_count(
+                "SELECT COUNT(*) FROM api_tokens WHERE tenant_id = ?1",
+                params![tenant_id.clone()],
+            )
+            .await?;
+        let trusted_publisher_count = self
+            .query_count(
+                "SELECT COUNT(*) FROM trusted_publishers WHERE tenant_id = ?1",
+                params![tenant_id.clone()],
+            )
+            .await?;
 
-            let mut statement = connection.prepare(
+        let tenant_slug = tenant.slug.as_str().to_string();
+        let recent_activity = self
+            .query_all(
                 r#"
                 SELECT original_name, source, updated_at
                 FROM projects
@@ -198,70 +271,66 @@ impl RegistryStore for SqliteRegistryStore {
                 ORDER BY updated_at DESC, normalized_name
                 LIMIT 6
                 "#,
-            )?;
-            let recent_activity = collect_rows(statement.query_map(params![tenant_id], |row| {
-                Ok(RecentActivity {
-                    project_name: row.get(0)?,
-                    tenant_slug: tenant.slug.as_str().to_string(),
-                    source: row.get(1)?,
-                    updated_at: parse_datetime(row.get(2)?, 2)?,
-                })
-            })?)?;
+                params![tenant_id],
+                |row| {
+                    Ok(RecentActivity {
+                        project_name: get_string(row, 0)?,
+                        tenant_slug: tenant_slug.clone(),
+                        source: get_string(row, 1)?,
+                        updated_at: parse_datetime(get_string(row, 2)?, 2)?,
+                    })
+                },
+            )
+            .await?;
 
-            Ok(TenantDashboardStats {
-                project_count,
-                release_count,
-                artifact_count,
-                token_count,
-                trusted_publisher_count,
-                recent_activity,
-            })
+        Ok(TenantDashboardStats {
+            project_count,
+            release_count,
+            artifact_count,
+            token_count,
+            trusted_publisher_count,
+            recent_activity,
         })
     }
 
     async fn save_admin_user(&self, user: AdminUser) -> Result<(), ApplicationError> {
-        self.with_connection(|connection| {
-            connection.execute(
-                r#"
-                INSERT INTO admin_users (id, tenant_id, email, password_hash, is_superadmin, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ON CONFLICT(email) DO UPDATE SET
-                    id = excluded.id,
-                    tenant_id = excluded.tenant_id,
-                    password_hash = excluded.password_hash,
-                    is_superadmin = excluded.is_superadmin,
-                    created_at = excluded.created_at
-                "#,
-                params![
-                    uuid_string(user.id.into_inner()),
-                    user.tenant_id.map(|id| uuid_string(id.into_inner())),
-                    user.email,
-                    user.password_hash,
-                    bool_i64(user.is_superadmin),
-                    date_string(user.created_at),
-                ],
-            )?;
-            Ok(())
-        })
+        self.execute(
+            r#"
+            INSERT INTO admin_users (id, tenant_id, email, password_hash, is_superadmin, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(email) DO UPDATE SET
+                id = excluded.id,
+                tenant_id = excluded.tenant_id,
+                password_hash = excluded.password_hash,
+                is_superadmin = excluded.is_superadmin,
+                created_at = excluded.created_at
+            "#,
+            params![
+                uuid_string(user.id.into_inner()),
+                user.tenant_id.map(|id| uuid_string(id.into_inner())),
+                user.email,
+                user.password_hash,
+                bool_i64(user.is_superadmin),
+                date_string(user.created_at),
+            ],
+        )
+        .await
     }
 
     async fn get_admin_user_by_email(
         &self,
         email: &str,
     ) -> Result<Option<AdminUser>, ApplicationError> {
-        self.with_connection(|connection| {
-            connection
-                .query_row(
-                    r#"
-                    SELECT id, tenant_id, email, password_hash, is_superadmin, created_at
-                    FROM admin_users
-                    WHERE email = ?1
-                    "#,
-                    params![email],
-                    map_admin_user,
-                )
-                .optional()
-        })
+        self.query_optional(
+            r#"
+            SELECT id, tenant_id, email, password_hash, is_superadmin, created_at
+            FROM admin_users
+            WHERE email = ?1
+            "#,
+            params![email],
+            map_admin_user,
+        )
+        .await
     }
 
     async fn save_api_token(&self, token: ApiToken) -> Result<(), ApplicationError> {
@@ -285,66 +354,62 @@ impl RegistryStore for SqliteRegistryStore {
                 None => (None, None, None, None, None),
             };
 
-        self.with_connection(|connection| {
-            connection.execute(
-                r#"
-                INSERT INTO api_tokens (
-                    id, tenant_id, label, secret_hash, scopes_json,
-                    identity_issuer, identity_subject, identity_audience, identity_provider,
-                    identity_claims_json, created_at, expires_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                ON CONFLICT(id) DO UPDATE SET
-                    tenant_id = excluded.tenant_id,
-                    label = excluded.label,
-                    secret_hash = excluded.secret_hash,
-                    scopes_json = excluded.scopes_json,
-                    identity_issuer = excluded.identity_issuer,
-                    identity_subject = excluded.identity_subject,
-                    identity_audience = excluded.identity_audience,
-                    identity_provider = excluded.identity_provider,
-                    identity_claims_json = excluded.identity_claims_json,
-                    created_at = excluded.created_at,
-                    expires_at = excluded.expires_at
-                "#,
-                params![
-                    uuid_string(token.id.into_inner()),
-                    uuid_string(token.tenant_id.into_inner()),
-                    token.label,
-                    token.secret_hash,
-                    scopes_json,
-                    identity_issuer,
-                    identity_subject,
-                    identity_audience,
-                    identity_provider,
-                    claims_json,
-                    date_string(token.created_at),
-                    token.expires_at.map(date_string),
-                ],
-            )?;
-            Ok(())
-        })
+        self.execute(
+            r#"
+            INSERT INTO api_tokens (
+                id, tenant_id, label, secret_hash, scopes_json,
+                identity_issuer, identity_subject, identity_audience, identity_provider,
+                identity_claims_json, created_at, expires_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            ON CONFLICT(id) DO UPDATE SET
+                tenant_id = excluded.tenant_id,
+                label = excluded.label,
+                secret_hash = excluded.secret_hash,
+                scopes_json = excluded.scopes_json,
+                identity_issuer = excluded.identity_issuer,
+                identity_subject = excluded.identity_subject,
+                identity_audience = excluded.identity_audience,
+                identity_provider = excluded.identity_provider,
+                identity_claims_json = excluded.identity_claims_json,
+                created_at = excluded.created_at,
+                expires_at = excluded.expires_at
+            "#,
+            params![
+                uuid_string(token.id.into_inner()),
+                uuid_string(token.tenant_id.into_inner()),
+                token.label,
+                token.secret_hash,
+                scopes_json,
+                identity_issuer,
+                identity_subject,
+                identity_audience,
+                identity_provider,
+                claims_json,
+                date_string(token.created_at),
+                token.expires_at.map(date_string),
+            ],
+        )
+        .await
     }
 
     async fn list_api_tokens(
         &self,
         tenant_id: TenantId,
     ) -> Result<Vec<ApiToken>, ApplicationError> {
-        self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                r#"
-                SELECT id, tenant_id, label, secret_hash, scopes_json,
-                       identity_issuer, identity_subject, identity_audience, identity_provider,
-                       identity_claims_json, created_at, expires_at
-                FROM api_tokens
-                WHERE tenant_id = ?1
-                ORDER BY created_at DESC, label
-                "#,
-            )?;
-            collect_rows(
-                statement.query_map(params![uuid_string(tenant_id.into_inner())], map_api_token)?,
-            )
-        })
+        self.query_all(
+            r#"
+            SELECT id, tenant_id, label, secret_hash, scopes_json,
+                   identity_issuer, identity_subject, identity_audience, identity_provider,
+                   identity_claims_json, created_at, expires_at
+            FROM api_tokens
+            WHERE tenant_id = ?1
+            ORDER BY created_at DESC, label
+            "#,
+            params![uuid_string(tenant_id.into_inner())],
+            map_api_token,
+        )
+        .await
     }
 
     async fn revoke_api_token(
@@ -352,65 +417,61 @@ impl RegistryStore for SqliteRegistryStore {
         tenant_id: TenantId,
         token_id: TokenId,
     ) -> Result<(), ApplicationError> {
-        self.with_connection(|connection| {
-            connection.execute(
-                "DELETE FROM api_tokens WHERE id = ?1 AND tenant_id = ?2",
-                params![
-                    uuid_string(token_id.into_inner()),
-                    uuid_string(tenant_id.into_inner())
-                ],
-            )?;
-            Ok(())
-        })
+        self.execute(
+            "DELETE FROM api_tokens WHERE id = ?1 AND tenant_id = ?2",
+            params![
+                uuid_string(token_id.into_inner()),
+                uuid_string(tenant_id.into_inner())
+            ],
+        )
+        .await
     }
 
     async fn save_project(&self, project: Project) -> Result<(), ApplicationError> {
-        self.with_connection(|connection| {
-            connection.execute(
-                r#"
-                INSERT INTO projects (
-                    id, tenant_id, original_name, normalized_name, source,
-                    summary, description, created_at, updated_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                ON CONFLICT(id) DO UPDATE SET
-                    tenant_id = excluded.tenant_id,
-                    original_name = excluded.original_name,
-                    normalized_name = excluded.normalized_name,
-                    source = excluded.source,
-                    summary = excluded.summary,
-                    description = excluded.description,
-                    created_at = excluded.created_at,
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    uuid_string(project.id.into_inner()),
-                    uuid_string(project.tenant_id.into_inner()),
-                    project.name.original(),
-                    project.name.normalized(),
-                    project_source_str(&project.source),
-                    project.summary,
-                    project.description,
-                    date_string(project.created_at),
-                    date_string(project.updated_at),
-                ],
-            )?;
-            Ok(())
-        })
+        self.execute(
+            r#"
+            INSERT INTO projects (
+                id, tenant_id, original_name, normalized_name, source,
+                summary, description, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(id) DO UPDATE SET
+                tenant_id = excluded.tenant_id,
+                original_name = excluded.original_name,
+                normalized_name = excluded.normalized_name,
+                source = excluded.source,
+                summary = excluded.summary,
+                description = excluded.description,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                uuid_string(project.id.into_inner()),
+                uuid_string(project.tenant_id.into_inner()),
+                project.name.original(),
+                project.name.normalized(),
+                project_source_str(&project.source),
+                project.summary,
+                project.description,
+                date_string(project.created_at),
+                date_string(project.updated_at),
+            ],
+        )
+        .await
     }
 
     async fn list_projects(&self, tenant_id: TenantId) -> Result<Vec<Project>, ApplicationError> {
-        self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                r#"
-                SELECT id, tenant_id, original_name, source, summary, description, created_at, updated_at
-                FROM projects
-                WHERE tenant_id = ?1
-                ORDER BY normalized_name
-                "#,
-            )?;
-            collect_rows(statement.query_map(params![uuid_string(tenant_id.into_inner())], map_project)?)
-        })
+        self.query_all(
+            r#"
+            SELECT id, tenant_id, original_name, source, summary, description, created_at, updated_at
+            FROM projects
+            WHERE tenant_id = ?1
+            ORDER BY normalized_name
+            "#,
+            params![uuid_string(tenant_id.into_inner())],
+            map_project,
+        )
+        .await
     }
 
     async fn search_projects(
@@ -421,51 +482,50 @@ impl RegistryStore for SqliteRegistryStore {
         let query = query.trim().to_ascii_lowercase();
         let contains_pattern = format!("%{}%", escape_like_pattern(&query));
         let prefix_pattern = format!("{}%", escape_like_pattern(&query));
-        self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                r#"
-                SELECT t.slug, p.original_name, p.normalized_name, p.source, p.summary,
-                       GROUP_CONCAT(r.version, ',') AS release_versions
-                FROM projects p
-                INNER JOIN tenants t ON t.id = p.tenant_id
-                LEFT JOIN releases r ON r.project_id = p.id
-                WHERE p.tenant_id = ?1
-                  AND (
-                      ?2 = ''
-                      OR p.normalized_name LIKE ?3 ESCAPE '\'
-                      OR lower(p.summary) LIKE ?3 ESCAPE '\'
-                  )
-                GROUP BY p.id, t.slug, p.original_name, p.normalized_name, p.source, p.summary
-                ORDER BY
-                    CASE
-                        WHEN p.normalized_name = ?2 THEN 0
-                        WHEN p.normalized_name LIKE ?4 ESCAPE '\' THEN 1
-                        WHEN lower(p.summary) LIKE ?4 ESCAPE '\' THEN 2
-                        ELSE 3
-                    END,
-                    p.normalized_name
-                "#,
-            )?;
-            let rows = statement.query_map(
-                params![
-                    uuid_string(tenant_id.into_inner()),
-                    query,
-                    contains_pattern,
-                    prefix_pattern
-                ],
-                |row| {
-                    Ok(SearchHit {
-                        tenant_slug: row.get(0)?,
-                        project_name: row.get(1)?,
-                        normalized_name: row.get(2)?,
-                        source: row.get(3)?,
-                        summary: row.get(4)?,
-                        latest_version: latest_release_version_from_joined(row.get(5)?, 5)?,
-                    })
-                },
-            )?;
-            collect_rows(rows)
-        })
+        self.query_all(
+            r#"
+            SELECT t.slug, p.original_name, p.normalized_name, p.source, p.summary,
+                   GROUP_CONCAT(r.version, ',') AS release_versions
+            FROM projects p
+            INNER JOIN tenants t ON t.id = p.tenant_id
+            LEFT JOIN releases r ON r.project_id = p.id
+            WHERE p.tenant_id = ?1
+              AND (
+                  ?2 = ''
+                  OR p.normalized_name LIKE ?3 ESCAPE '\'
+                  OR lower(p.summary) LIKE ?3 ESCAPE '\'
+              )
+            GROUP BY p.id, t.slug, p.original_name, p.normalized_name, p.source, p.summary
+            ORDER BY
+                CASE
+                    WHEN p.normalized_name = ?2 THEN 0
+                    WHEN p.normalized_name LIKE ?4 ESCAPE '\' THEN 1
+                    WHEN lower(p.summary) LIKE ?4 ESCAPE '\' THEN 2
+                    ELSE 3
+                END,
+                p.normalized_name
+            "#,
+            params![
+                uuid_string(tenant_id.into_inner()),
+                query,
+                contains_pattern,
+                prefix_pattern
+            ],
+            |row| {
+                Ok(SearchHit {
+                    tenant_slug: get_string(row, 0)?,
+                    project_name: get_string(row, 1)?,
+                    normalized_name: get_string(row, 2)?,
+                    source: get_string(row, 3)?,
+                    summary: get_string(row, 4)?,
+                    latest_version: latest_release_version_from_joined(
+                        get_optional_string(row, 5)?,
+                        5,
+                    )?,
+                })
+            },
+        )
+        .await
     }
 
     async fn get_project_by_normalized_name(
@@ -473,62 +533,55 @@ impl RegistryStore for SqliteRegistryStore {
         tenant_id: TenantId,
         normalized_name: &str,
     ) -> Result<Option<Project>, ApplicationError> {
-        self.with_connection(|connection| {
-            connection
-                .query_row(
-                    r#"
-                    SELECT id, tenant_id, original_name, source, summary, description, created_at, updated_at
-                    FROM projects
-                    WHERE tenant_id = ?1 AND normalized_name = ?2
-                    "#,
-                    params![uuid_string(tenant_id.into_inner()), normalized_name],
-                    map_project,
-                )
-                .optional()
-        })
+        self.query_optional(
+            r#"
+            SELECT id, tenant_id, original_name, source, summary, description, created_at, updated_at
+            FROM projects
+            WHERE tenant_id = ?1 AND normalized_name = ?2
+            "#,
+            params![uuid_string(tenant_id.into_inner()), normalized_name],
+            map_project,
+        )
+        .await
     }
 
     async fn save_release(&self, release: Release) -> Result<(), ApplicationError> {
-        self.with_connection(|connection| {
-            let (reason, changed_at) = yank_columns(&release.yanked);
-            connection.execute(
-                r#"
-                INSERT INTO releases (id, project_id, version, yanked_reason, yanked_changed_at, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ON CONFLICT(id) DO UPDATE SET
-                    project_id = excluded.project_id,
-                    version = excluded.version,
-                    yanked_reason = excluded.yanked_reason,
-                    yanked_changed_at = excluded.yanked_changed_at,
-                    created_at = excluded.created_at
-                "#,
-                params![
-                    uuid_string(release.id.into_inner()),
-                    uuid_string(release.project_id.into_inner()),
-                    release.version.as_str(),
-                    reason,
-                    changed_at,
-                    date_string(release.created_at),
-                ],
-            )?;
-            Ok(())
-        })
+        let (reason, changed_at) = yank_columns(&release.yanked);
+        self.execute(
+            r#"
+            INSERT INTO releases (id, project_id, version, yanked_reason, yanked_changed_at, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(id) DO UPDATE SET
+                project_id = excluded.project_id,
+                version = excluded.version,
+                yanked_reason = excluded.yanked_reason,
+                yanked_changed_at = excluded.yanked_changed_at,
+                created_at = excluded.created_at
+            "#,
+            params![
+                uuid_string(release.id.into_inner()),
+                uuid_string(release.project_id.into_inner()),
+                release.version.as_str(),
+                reason,
+                changed_at,
+                date_string(release.created_at),
+            ],
+        )
+        .await
     }
 
     async fn list_releases(&self, project_id: ProjectId) -> Result<Vec<Release>, ApplicationError> {
-        self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                r#"
-                SELECT id, project_id, version, yanked_reason, yanked_changed_at, created_at
-                FROM releases
-                WHERE project_id = ?1
-                ORDER BY created_at DESC, version DESC
-                "#,
-            )?;
-            collect_rows(
-                statement.query_map(params![uuid_string(project_id.into_inner())], map_release)?,
-            )
-        })
+        self.query_all(
+            r#"
+            SELECT id, project_id, version, yanked_reason, yanked_changed_at, created_at
+            FROM releases
+            WHERE project_id = ?1
+            ORDER BY created_at DESC, version DESC
+            "#,
+            params![uuid_string(project_id.into_inner())],
+            map_release,
+        )
+        .await
     }
 
     async fn get_release_by_version(
@@ -536,29 +589,38 @@ impl RegistryStore for SqliteRegistryStore {
         project_id: ProjectId,
         version: &ReleaseVersion,
     ) -> Result<Option<Release>, ApplicationError> {
-        self.with_connection(|connection| {
-            connection
-                .query_row(
-                    r#"
-                    SELECT id, project_id, version, yanked_reason, yanked_changed_at, created_at
-                    FROM releases
-                    WHERE project_id = ?1 AND version = ?2
-                    "#,
-                    params![uuid_string(project_id.into_inner()), version.as_str()],
-                    map_release,
-                )
-                .optional()
-        })
+        self.query_optional(
+            r#"
+            SELECT id, project_id, version, yanked_reason, yanked_changed_at, created_at
+            FROM releases
+            WHERE project_id = ?1 AND version = ?2
+            "#,
+            params![uuid_string(project_id.into_inner()), version.as_str()],
+            map_release,
+        )
+        .await
     }
 
     async fn delete_release(&self, release_id: ReleaseId) -> Result<(), ApplicationError> {
-        self.with_connection(|connection| {
-            connection.execute(
-                "DELETE FROM releases WHERE id = ?1",
-                params![uuid_string(release_id.into_inner())],
-            )?;
-            Ok(())
-        })
+        let release_id = uuid_string(release_id.into_inner());
+        let artifact_ids = self
+            .query_all(
+                "SELECT id FROM artifacts WHERE release_id = ?1",
+                params![release_id.clone()],
+                |row| get_string(row, 0),
+            )
+            .await?;
+        for artifact_id in artifact_ids {
+            self.execute(
+                "DELETE FROM attestations WHERE artifact_id = ?1",
+                params![artifact_id.clone()],
+            )
+            .await?;
+            self.execute("DELETE FROM artifacts WHERE id = ?1", params![artifact_id])
+                .await?;
+        }
+        self.execute("DELETE FROM releases WHERE id = ?1", params![release_id])
+            .await
     }
 
     async fn save_artifact(&self, artifact: Artifact) -> Result<(), ApplicationError> {
@@ -568,77 +630,73 @@ impl RegistryStore for SqliteRegistryStore {
                 artifact.filename
             ))
         })?;
-        self.with_connection(|connection| {
-            let (reason, changed_at) = yank_columns(&artifact.yanked);
-            connection.execute(
-                r#"
-                INSERT INTO artifacts (
-                    id, release_id, filename, kind, size_bytes, sha256, blake2b_256,
-                    object_key, upstream_url, provenance_key, yanked_reason, yanked_changed_at,
-                    created_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                ON CONFLICT(id) DO UPDATE SET
-                    release_id = excluded.release_id,
-                    filename = excluded.filename,
-                    kind = excluded.kind,
-                    size_bytes = excluded.size_bytes,
-                    sha256 = excluded.sha256,
-                    blake2b_256 = excluded.blake2b_256,
-                    object_key = excluded.object_key,
-                    upstream_url = excluded.upstream_url,
-                    provenance_key = excluded.provenance_key,
-                    yanked_reason = excluded.yanked_reason,
-                    yanked_changed_at = excluded.yanked_changed_at,
-                    created_at = excluded.created_at
-                "#,
-                params![
-                    uuid_string(artifact.id.into_inner()),
-                    uuid_string(artifact.release_id.into_inner()),
-                    artifact.filename,
-                    artifact_kind_str(&artifact.kind),
-                    size_bytes,
-                    artifact.digests.sha256,
-                    artifact.digests.blake2b_256,
-                    artifact.object_key,
-                    artifact.upstream_url,
-                    artifact.provenance_key,
-                    reason,
-                    changed_at,
-                    date_string(artifact.created_at),
-                ],
-            )?;
-            Ok(())
-        })
+        let (reason, changed_at) = yank_columns(&artifact.yanked);
+        self.execute(
+            r#"
+            INSERT INTO artifacts (
+                id, release_id, filename, kind, size_bytes, sha256, blake2b_256,
+                object_key, upstream_url, provenance_key, yanked_reason, yanked_changed_at,
+                created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(id) DO UPDATE SET
+                release_id = excluded.release_id,
+                filename = excluded.filename,
+                kind = excluded.kind,
+                size_bytes = excluded.size_bytes,
+                sha256 = excluded.sha256,
+                blake2b_256 = excluded.blake2b_256,
+                object_key = excluded.object_key,
+                upstream_url = excluded.upstream_url,
+                provenance_key = excluded.provenance_key,
+                yanked_reason = excluded.yanked_reason,
+                yanked_changed_at = excluded.yanked_changed_at,
+                created_at = excluded.created_at
+            "#,
+            params![
+                uuid_string(artifact.id.into_inner()),
+                uuid_string(artifact.release_id.into_inner()),
+                artifact.filename,
+                artifact_kind_str(&artifact.kind),
+                size_bytes,
+                artifact.digests.sha256,
+                artifact.digests.blake2b_256,
+                artifact.object_key,
+                artifact.upstream_url,
+                artifact.provenance_key,
+                reason,
+                changed_at,
+                date_string(artifact.created_at),
+            ],
+        )
+        .await
     }
 
     async fn list_artifacts(
         &self,
         release_id: ReleaseId,
     ) -> Result<Vec<Artifact>, ApplicationError> {
-        self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                r#"
-                SELECT id, release_id, filename, kind, size_bytes, sha256, blake2b_256,
-                       object_key, upstream_url, provenance_key, yanked_reason, yanked_changed_at,
-                       created_at
-                FROM artifacts
-                WHERE release_id = ?1
-                ORDER BY filename
-                "#,
-            )?;
-            collect_rows(
-                statement.query_map(params![uuid_string(release_id.into_inner())], map_artifact)?,
-            )
-        })
+        self.query_all(
+            r#"
+            SELECT id, release_id, filename, kind, size_bytes, sha256, blake2b_256,
+                   object_key, upstream_url, provenance_key, yanked_reason, yanked_changed_at,
+                   created_at
+            FROM artifacts
+            WHERE release_id = ?1
+            ORDER BY filename
+            "#,
+            params![uuid_string(release_id.into_inner())],
+            map_artifact,
+        )
+        .await
     }
 
     async fn list_release_artifacts(
         &self,
         project_id: ProjectId,
     ) -> Result<Vec<ReleaseArtifacts>, ApplicationError> {
-        self.with_connection(|connection| {
-            let mut statement = connection.prepare(
+        let rows = self
+            .query_all(
                 r#"
                 SELECT r.id, r.project_id, r.version, r.yanked_reason, r.yanked_changed_at, r.created_at,
                        a.id, a.release_id, a.filename, a.kind, a.size_bytes, a.sha256, a.blake2b_256,
@@ -649,40 +707,41 @@ impl RegistryStore for SqliteRegistryStore {
                 WHERE r.project_id = ?1
                 ORDER BY r.created_at DESC, r.version DESC, a.filename
                 "#,
-            )?;
-            let mut rows = statement.query(params![uuid_string(project_id.into_inner())])?;
-            let mut grouped = Vec::<ReleaseArtifacts>::new();
-            let mut release_positions = BTreeMap::<Uuid, usize>::new();
+                params![uuid_string(project_id.into_inner())],
+                |row| {
+                    let release = map_release(row)?;
+                    let artifact = if get_optional_string(row, 6)?.is_some() {
+                        Some(map_artifact_at(row, 6)?)
+                    } else {
+                        None
+                    };
+                    Ok((release, artifact))
+                },
+            )
+            .await?;
+        let mut grouped = Vec::<ReleaseArtifacts>::new();
+        let mut release_positions = BTreeMap::<Uuid, usize>::new();
 
-            while let Some(row) = rows.next()? {
-                let release = map_release(row)?;
-                let release_id = release.id.into_inner();
-                let artifact_id = row.get::<_, Option<String>>(6)?;
-                let artifact = if artifact_id.is_some() {
-                    Some(map_artifact_at(row, 6)?)
-                } else {
-                    None
-                };
-
-                let index = match release_positions.get(&release_id) {
-                    Some(index) => *index,
-                    None => {
-                        grouped.push(ReleaseArtifacts {
-                            release,
-                            artifacts: Vec::new(),
-                        });
-                        let index = grouped.len() - 1;
-                        release_positions.insert(release_id, index);
-                        index
-                    }
-                };
-                if let Some(artifact) = artifact {
-                    grouped[index].artifacts.push(artifact);
+        for (release, artifact) in rows {
+            let release_id = release.id.into_inner();
+            let index = match release_positions.get(&release_id) {
+                Some(index) => *index,
+                None => {
+                    grouped.push(ReleaseArtifacts {
+                        release,
+                        artifacts: Vec::new(),
+                    });
+                    let index = grouped.len() - 1;
+                    release_positions.insert(release_id, index);
+                    index
                 }
+            };
+            if let Some(artifact) = artifact {
+                grouped[index].artifacts.push(artifact);
             }
+        }
 
-            Ok(grouped)
-        })
+        Ok(grouped)
     }
 
     async fn get_artifact_by_filename(
@@ -690,77 +749,70 @@ impl RegistryStore for SqliteRegistryStore {
         release_id: ReleaseId,
         filename: &str,
     ) -> Result<Option<Artifact>, ApplicationError> {
-        self.with_connection(|connection| {
-            connection
-                .query_row(
-                    r#"
-                    SELECT id, release_id, filename, kind, size_bytes, sha256, blake2b_256,
-                           object_key, upstream_url, provenance_key, yanked_reason, yanked_changed_at,
-                           created_at
-                    FROM artifacts
-                    WHERE release_id = ?1 AND filename = ?2
-                    "#,
-                    params![uuid_string(release_id.into_inner()), filename],
-                    map_artifact,
-                )
-                .optional()
-        })
+        self.query_optional(
+            r#"
+            SELECT id, release_id, filename, kind, size_bytes, sha256, blake2b_256,
+                   object_key, upstream_url, provenance_key, yanked_reason, yanked_changed_at,
+                   created_at
+            FROM artifacts
+            WHERE release_id = ?1 AND filename = ?2
+            "#,
+            params![uuid_string(release_id.into_inner()), filename],
+            map_artifact,
+        )
+        .await
     }
 
     async fn delete_artifact(&self, artifact_id: ArtifactId) -> Result<(), ApplicationError> {
-        self.with_connection(|connection| {
-            connection.execute(
-                "DELETE FROM artifacts WHERE id = ?1",
-                params![uuid_string(artifact_id.into_inner())],
-            )?;
-            Ok(())
-        })
+        let artifact_id = uuid_string(artifact_id.into_inner());
+        self.execute(
+            "DELETE FROM attestations WHERE artifact_id = ?1",
+            params![artifact_id.clone()],
+        )
+        .await?;
+        self.execute("DELETE FROM artifacts WHERE id = ?1", params![artifact_id])
+            .await
     }
 
     async fn save_attestation(
         &self,
         attestation: AttestationBundle,
     ) -> Result<(), ApplicationError> {
-        self.with_connection(|connection| {
-            connection.execute(
-                r#"
-                INSERT INTO attestations (artifact_id, media_type, payload, source, recorded_at)
-                VALUES (?1, ?2, ?3, ?4, ?5)
-                ON CONFLICT(artifact_id) DO UPDATE SET
-                    media_type = excluded.media_type,
-                    payload = excluded.payload,
-                    source = excluded.source,
-                    recorded_at = excluded.recorded_at
-                "#,
-                params![
-                    uuid_string(attestation.artifact_id.into_inner()),
-                    attestation.media_type,
-                    attestation.payload,
-                    attestation_source_str(&attestation.source),
-                    date_string(attestation.recorded_at),
-                ],
-            )?;
-            Ok(())
-        })
+        self.execute(
+            r#"
+            INSERT INTO attestations (artifact_id, media_type, payload, source, recorded_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(artifact_id) DO UPDATE SET
+                media_type = excluded.media_type,
+                payload = excluded.payload,
+                source = excluded.source,
+                recorded_at = excluded.recorded_at
+            "#,
+            params![
+                uuid_string(attestation.artifact_id.into_inner()),
+                attestation.media_type,
+                attestation.payload,
+                attestation_source_str(&attestation.source),
+                date_string(attestation.recorded_at),
+            ],
+        )
+        .await
     }
 
     async fn get_attestation_by_artifact(
         &self,
         artifact_id: ArtifactId,
     ) -> Result<Option<AttestationBundle>, ApplicationError> {
-        self.with_connection(|connection| {
-            connection
-                .query_row(
-                    r#"
-                    SELECT artifact_id, media_type, payload, source, recorded_at
-                    FROM attestations
-                    WHERE artifact_id = ?1
-                    "#,
-                    params![uuid_string(artifact_id.into_inner())],
-                    map_attestation,
-                )
-                .optional()
-        })
+        self.query_optional(
+            r#"
+            SELECT artifact_id, media_type, payload, source, recorded_at
+            FROM attestations
+            WHERE artifact_id = ?1
+            "#,
+            params![uuid_string(artifact_id.into_inner())],
+            map_attestation,
+        )
+        .await
     }
 
     async fn save_trusted_publisher(
@@ -768,38 +820,36 @@ impl RegistryStore for SqliteRegistryStore {
         publisher: TrustedPublisher,
     ) -> Result<(), ApplicationError> {
         let claim_rules_json = serde_json::to_string(&publisher.claim_rules).map_err(json_error)?;
-        self.with_connection(|connection| {
-            connection.execute(
-                r#"
-                INSERT INTO trusted_publishers (
-                    id, tenant_id, project_original_name, project_normalized_name,
-                    provider, issuer, audience, claim_rules_json, created_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                ON CONFLICT(id) DO UPDATE SET
-                    tenant_id = excluded.tenant_id,
-                    project_original_name = excluded.project_original_name,
-                    project_normalized_name = excluded.project_normalized_name,
-                    provider = excluded.provider,
-                    issuer = excluded.issuer,
-                    audience = excluded.audience,
-                    claim_rules_json = excluded.claim_rules_json,
-                    created_at = excluded.created_at
-                "#,
-                params![
-                    uuid_string(publisher.id.into_inner()),
-                    uuid_string(publisher.tenant_id.into_inner()),
-                    publisher.project_name.original(),
-                    publisher.project_name.normalized(),
-                    provider_str(&publisher.provider),
-                    publisher.issuer,
-                    publisher.audience,
-                    claim_rules_json,
-                    date_string(publisher.created_at),
-                ],
-            )?;
-            Ok(())
-        })
+        self.execute(
+            r#"
+            INSERT INTO trusted_publishers (
+                id, tenant_id, project_original_name, project_normalized_name,
+                provider, issuer, audience, claim_rules_json, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(id) DO UPDATE SET
+                tenant_id = excluded.tenant_id,
+                project_original_name = excluded.project_original_name,
+                project_normalized_name = excluded.project_normalized_name,
+                provider = excluded.provider,
+                issuer = excluded.issuer,
+                audience = excluded.audience,
+                claim_rules_json = excluded.claim_rules_json,
+                created_at = excluded.created_at
+            "#,
+            params![
+                uuid_string(publisher.id.into_inner()),
+                uuid_string(publisher.tenant_id.into_inner()),
+                publisher.project_name.original(),
+                publisher.project_name.normalized(),
+                provider_str(&publisher.provider),
+                publisher.issuer,
+                publisher.audience,
+                claim_rules_json,
+                date_string(publisher.created_at),
+            ],
+        )
+        .await
     }
 
     async fn list_trusted_publishers(
@@ -807,55 +857,73 @@ impl RegistryStore for SqliteRegistryStore {
         tenant_id: TenantId,
         normalized_project_name: &str,
     ) -> Result<Vec<TrustedPublisher>, ApplicationError> {
-        self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                r#"
-                SELECT id, tenant_id, project_original_name, provider, issuer, audience,
-                       claim_rules_json, created_at
-                FROM trusted_publishers
-                WHERE tenant_id = ?1
-                  AND (?2 = '' OR project_normalized_name = ?2)
-                ORDER BY created_at DESC
-                "#,
-            )?;
-            collect_rows(statement.query_map(
-                params![uuid_string(tenant_id.into_inner()), normalized_project_name],
-                map_trusted_publisher,
-            )?)
-        })
+        self.query_all(
+            r#"
+            SELECT id, tenant_id, project_original_name, provider, issuer, audience,
+                   claim_rules_json, created_at
+            FROM trusted_publishers
+            WHERE tenant_id = ?1
+              AND (?2 = '' OR project_normalized_name = ?2)
+            ORDER BY created_at DESC
+            "#,
+            params![uuid_string(tenant_id.into_inner()), normalized_project_name],
+            map_trusted_publisher,
+        )
+        .await
     }
 
     async fn delete_project(&self, project_id: ProjectId) -> Result<(), ApplicationError> {
-        self.with_connection(|connection| {
-            connection.execute(
-                "DELETE FROM projects WHERE id = ?1",
-                params![uuid_string(project_id.into_inner())],
-            )?;
-            Ok(())
-        })
+        let project_id = uuid_string(project_id.into_inner());
+        let release_ids = self
+            .query_all(
+                "SELECT id FROM releases WHERE project_id = ?1",
+                params![project_id.clone()],
+                |row| get_string(row, 0),
+            )
+            .await?;
+        for release_id in release_ids {
+            let artifact_ids = self
+                .query_all(
+                    "SELECT id FROM artifacts WHERE release_id = ?1",
+                    params![release_id.clone()],
+                    |row| get_string(row, 0),
+                )
+                .await?;
+            for artifact_id in artifact_ids {
+                self.execute(
+                    "DELETE FROM attestations WHERE artifact_id = ?1",
+                    params![artifact_id.clone()],
+                )
+                .await?;
+                self.execute("DELETE FROM artifacts WHERE id = ?1", params![artifact_id])
+                    .await?;
+            }
+            self.execute("DELETE FROM releases WHERE id = ?1", params![release_id])
+                .await?;
+        }
+        self.execute("DELETE FROM projects WHERE id = ?1", params![project_id])
+            .await
     }
 
     async fn save_audit_event(&self, event: AuditEvent) -> Result<(), ApplicationError> {
         let metadata_json = serde_json::to_string(&event.metadata).map_err(json_error)?;
-        self.with_connection(|connection| {
-            connection.execute(
-                r#"
-                INSERT INTO audit_events
-                    (id, occurred_at, actor, action, tenant_slug, target, metadata_json)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                "#,
-                params![
-                    uuid_string(event.id.into_inner()),
-                    date_string(event.occurred_at),
-                    event.actor,
-                    event.action,
-                    event.tenant_slug,
-                    event.target,
-                    metadata_json,
-                ],
-            )?;
-            Ok(())
-        })
+        self.execute(
+            r#"
+            INSERT INTO audit_events
+                (id, occurred_at, actor, action, tenant_slug, target, metadata_json)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                uuid_string(event.id.into_inner()),
+                date_string(event.occurred_at),
+                event.actor,
+                event.action,
+                event.tenant_slug,
+                event.target,
+                metadata_json,
+            ],
+        )
+        .await
     }
 
     async fn list_audit_events(
@@ -864,168 +932,196 @@ impl RegistryStore for SqliteRegistryStore {
         limit: usize,
     ) -> Result<Vec<AuditEvent>, ApplicationError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        self.with_connection(|connection| {
-            if let Some(tenant_slug) = tenant_slug {
-                let mut statement = connection.prepare(
-                    r#"
-                    SELECT id, occurred_at, actor, action, tenant_slug, target, metadata_json
-                    FROM audit_events
-                    WHERE tenant_slug = ?1
-                    ORDER BY occurred_at DESC, id DESC
-                    LIMIT ?2
-                    "#,
-                )?;
-                return collect_rows(
-                    statement.query_map(params![tenant_slug, limit], map_audit_event)?,
-                );
-            }
-
-            let mut statement = connection.prepare(
+        if let Some(tenant_slug) = tenant_slug {
+            let sql = format!(
                 r#"
                 SELECT id, occurred_at, actor, action, tenant_slug, target, metadata_json
                 FROM audit_events
+                WHERE tenant_slug = ?1
                 ORDER BY occurred_at DESC, id DESC
-                LIMIT ?1
-                "#,
-            )?;
-            collect_rows(statement.query_map(params![limit], map_audit_event)?)
-        })
+                LIMIT {limit}
+                "#
+            );
+            return self
+                .query_all(&sql, params![tenant_slug], map_audit_event)
+                .await;
+        }
+
+        let sql = format!(
+            r#"
+            SELECT id, occurred_at, actor, action, tenant_slug, target, metadata_json
+            FROM audit_events
+            ORDER BY occurred_at DESC, id DESC
+            LIMIT {limit}
+            "#
+        );
+        self.query_all(&sql, (), map_audit_event).await
     }
 }
 
-fn migrate(connection: &Connection) -> Result<(), ApplicationError> {
-    connection
-        .execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS tenants (
-                id TEXT PRIMARY KEY,
-                slug TEXT NOT NULL UNIQUE,
-                display_name TEXT NOT NULL,
-                mirroring_enabled INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-            );
+async fn migrate(connection: &Connection) -> Result<(), ApplicationError> {
+    execute_batch(
+        connection,
+        r#"
+        CREATE TABLE IF NOT EXISTS tenants (
+            id TEXT PRIMARY KEY,
+            slug TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            mirroring_enabled INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
 
-            CREATE TABLE IF NOT EXISTS admin_users (
-                id TEXT PRIMARY KEY,
-                tenant_id TEXT REFERENCES tenants(id) ON DELETE SET NULL,
-                email TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                is_superadmin INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-            );
+        CREATE TABLE IF NOT EXISTS admin_users (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT REFERENCES tenants(id) ON DELETE SET NULL,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            is_superadmin INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
 
-            CREATE TABLE IF NOT EXISTS api_tokens (
-                id TEXT PRIMARY KEY,
-                tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-                label TEXT NOT NULL,
-                secret_hash TEXT NOT NULL,
-                scopes_json TEXT NOT NULL,
-                identity_issuer TEXT,
-                identity_subject TEXT,
-                identity_audience TEXT,
-                identity_provider TEXT,
-                identity_claims_json TEXT,
-                created_at TEXT NOT NULL,
-                expires_at TEXT
-            );
+        CREATE TABLE IF NOT EXISTS api_tokens (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            label TEXT NOT NULL,
+            secret_hash TEXT NOT NULL,
+            scopes_json TEXT NOT NULL,
+            identity_issuer TEXT,
+            identity_subject TEXT,
+            identity_audience TEXT,
+            identity_provider TEXT,
+            identity_claims_json TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT
+        );
 
-            CREATE TABLE IF NOT EXISTS projects (
-                id TEXT PRIMARY KEY,
-                tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-                original_name TEXT NOT NULL,
-                normalized_name TEXT NOT NULL,
-                source TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                description TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(tenant_id, normalized_name)
-            );
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            original_name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            description TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(tenant_id, normalized_name)
+        );
 
-            CREATE TABLE IF NOT EXISTS releases (
-                id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                version TEXT NOT NULL,
-                yanked_reason TEXT,
-                yanked_changed_at TEXT,
-                created_at TEXT NOT NULL,
-                UNIQUE(project_id, version)
-            );
+        CREATE TABLE IF NOT EXISTS releases (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            version TEXT NOT NULL,
+            yanked_reason TEXT,
+            yanked_changed_at TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(project_id, version)
+        );
 
-            CREATE TABLE IF NOT EXISTS artifacts (
-                id TEXT PRIMARY KEY,
-                release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
-                filename TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                sha256 TEXT NOT NULL,
-                blake2b_256 TEXT,
-                object_key TEXT NOT NULL,
-                upstream_url TEXT,
-                provenance_key TEXT,
-                yanked_reason TEXT,
-                yanked_changed_at TEXT,
-                created_at TEXT NOT NULL,
-                UNIQUE(release_id, filename)
-            );
+        CREATE TABLE IF NOT EXISTS artifacts (
+            id TEXT PRIMARY KEY,
+            release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+            filename TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            blake2b_256 TEXT,
+            object_key TEXT NOT NULL,
+            upstream_url TEXT,
+            provenance_key TEXT,
+            yanked_reason TEXT,
+            yanked_changed_at TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(release_id, filename)
+        );
 
-            CREATE TABLE IF NOT EXISTS attestations (
-                artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
-                media_type TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                source TEXT NOT NULL,
-                recorded_at TEXT NOT NULL
-            );
+        CREATE TABLE IF NOT EXISTS attestations (
+            artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+            media_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            source TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
 
-            CREATE TABLE IF NOT EXISTS trusted_publishers (
-                id TEXT PRIMARY KEY,
-                tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-                project_original_name TEXT NOT NULL,
-                project_normalized_name TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                issuer TEXT NOT NULL,
-                audience TEXT NOT NULL,
-                claim_rules_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
+        CREATE TABLE IF NOT EXISTS trusted_publishers (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            project_original_name TEXT NOT NULL,
+            project_normalized_name TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            issuer TEXT NOT NULL,
+            audience TEXT NOT NULL,
+            claim_rules_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
 
-            CREATE TABLE IF NOT EXISTS audit_events (
-                id TEXT PRIMARY KEY,
-                occurred_at TEXT NOT NULL,
-                actor TEXT NOT NULL,
-                action TEXT NOT NULL,
-                tenant_slug TEXT,
-                target TEXT,
-                metadata_json TEXT NOT NULL
-            );
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id TEXT PRIMARY KEY,
+            occurred_at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            action TEXT NOT NULL,
+            tenant_slug TEXT,
+            target TEXT,
+            metadata_json TEXT NOT NULL
+        );
 
-            CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant ON api_tokens(tenant_id);
-            CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant_created
-                ON api_tokens(tenant_id, created_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id);
-            CREATE INDEX IF NOT EXISTS idx_projects_tenant_updated
-                ON projects(tenant_id, updated_at DESC, normalized_name);
-            CREATE INDEX IF NOT EXISTS idx_releases_project ON releases(project_id);
-            CREATE INDEX IF NOT EXISTS idx_releases_project_created
-                ON releases(project_id, created_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_artifacts_release ON artifacts(release_id);
-            CREATE INDEX IF NOT EXISTS idx_artifacts_release_filename
-                ON artifacts(release_id, filename);
-            CREATE INDEX IF NOT EXISTS idx_trusted_publishers_tenant_project
-                ON trusted_publishers(tenant_id, project_normalized_name);
-            CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_time
-                ON audit_events(tenant_slug, occurred_at);
-            CREATE INDEX IF NOT EXISTS idx_audit_events_time
-                ON audit_events(occurred_at);
-            "#,
-        )
-        .map_err(sqlite_error)
+        CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant ON api_tokens(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant_created
+            ON api_tokens(tenant_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_projects_tenant_updated
+            ON projects(tenant_id, updated_at DESC, normalized_name);
+        CREATE INDEX IF NOT EXISTS idx_releases_project ON releases(project_id);
+        CREATE INDEX IF NOT EXISTS idx_releases_project_created
+            ON releases(project_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_release ON artifacts(release_id);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_release_filename
+            ON artifacts(release_id, filename);
+        CREATE INDEX IF NOT EXISTS idx_trusted_publishers_tenant_project
+            ON trusted_publishers(tenant_id, project_normalized_name);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_time
+            ON audit_events(tenant_slug, occurred_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_time
+            ON audit_events(occurred_at);
+        "#,
+    )
+    .await
+}
+
+async fn execute_batch(connection: &Connection, sql: &str) -> Result<(), ApplicationError> {
+    for statement in sql.split(';').map(str::trim).filter(|sql| !sql.is_empty()) {
+        if let Err(error) = connection.execute(statement, ()).await {
+            let message = error.to_string();
+            if statement
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("CREATE INDEX IF NOT EXISTS")
+                && message.contains("already exists")
+            {
+                continue;
+            }
+            return Err(sqlite_error(error));
+        }
+    }
+    Ok(())
+}
+
+type SqliteResult<T> = std::result::Result<T, SqliteStoreError>;
+
+#[derive(Debug, Error)]
+enum SqliteStoreError {
+    #[error("{0}")]
+    Database(#[from] limbo::Error),
+    #[error("query returned no rows")]
+    NoRows,
+    #[error("column {column}: {message}")]
+    Column { column: usize, message: String },
 }
 
 fn latest_release_version_from_joined(
     release_versions: Option<String>,
     column: usize,
-) -> rusqlite::Result<Option<String>> {
+) -> SqliteResult<Option<String>> {
     let Some(release_versions) = release_versions else {
         return Ok(None);
     };
@@ -1033,7 +1129,7 @@ fn latest_release_version_from_joined(
         .split(',')
         .filter(|version| !version.is_empty())
         .map(|version| domain_value(ReleaseVersion::new(version.to_string()), column))
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<SqliteResult<Vec<_>>>()?;
     Ok(versions
         .into_iter()
         .max()
@@ -1054,149 +1150,154 @@ fn escape_like_pattern(value: &str) -> String {
     escaped
 }
 
-fn map_tenant(row: &Row<'_>) -> rusqlite::Result<Tenant> {
+fn map_tenant(row: &Row) -> SqliteResult<Tenant> {
     Tenant::new(
-        TenantId::new(parse_uuid(row.get(0)?, 0)?),
-        domain_value(TenantSlug::new(row.get::<_, String>(1)?), 1)?,
-        row.get::<_, String>(2)?,
+        TenantId::new(parse_uuid(get_string(row, 0)?, 0)?),
+        domain_value(TenantSlug::new(get_string(row, 1)?), 1)?,
+        get_string(row, 2)?,
         MirrorRule {
-            enabled: i64_bool(row.get(3)?),
+            enabled: i64_bool(get_i64(row, 3)?),
         },
-        parse_datetime(row.get(4)?, 4)?,
+        parse_datetime(get_string(row, 4)?, 4)?,
     )
-    .map_err(|error| rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error)))
+    .map_err(|error| conversion_error(2, error))
 }
 
-fn map_admin_user(row: &Row<'_>) -> rusqlite::Result<AdminUser> {
+fn map_admin_user(row: &Row) -> SqliteResult<AdminUser> {
     Ok(AdminUser {
-        id: AdminUserId::new(parse_uuid(row.get(0)?, 0)?),
-        tenant_id: row
-            .get::<_, Option<String>>(1)?
+        id: AdminUserId::new(parse_uuid(get_string(row, 0)?, 0)?),
+        tenant_id: get_optional_string(row, 1)?
             .map(|value| parse_uuid(value, 1).map(TenantId::new))
             .transpose()?,
-        email: row.get(2)?,
-        password_hash: row.get(3)?,
-        is_superadmin: i64_bool(row.get(4)?),
-        created_at: parse_datetime(row.get(5)?, 5)?,
+        email: get_string(row, 2)?,
+        password_hash: get_string(row, 3)?,
+        is_superadmin: i64_bool(get_i64(row, 4)?),
+        created_at: parse_datetime(get_string(row, 5)?, 5)?,
     })
 }
 
-fn map_api_token(row: &Row<'_>) -> rusqlite::Result<ApiToken> {
+fn map_api_token(row: &Row) -> SqliteResult<ApiToken> {
     let identity = parse_publish_identity(
-        row.get(5)?,
-        row.get(6)?,
-        row.get(7)?,
-        row.get(8)?,
-        row.get(9)?,
+        get_optional_string(row, 5)?,
+        get_optional_string(row, 6)?,
+        get_optional_string(row, 7)?,
+        get_optional_string(row, 8)?,
+        get_optional_string(row, 9)?,
     )?;
 
     Ok(ApiToken {
-        id: TokenId::new(parse_uuid(row.get(0)?, 0)?),
-        tenant_id: TenantId::new(parse_uuid(row.get(1)?, 1)?),
-        label: row.get(2)?,
-        secret_hash: row.get(3)?,
-        scopes: parse_scopes_json(row.get(4)?, 4)?,
+        id: TokenId::new(parse_uuid(get_string(row, 0)?, 0)?),
+        tenant_id: TenantId::new(parse_uuid(get_string(row, 1)?, 1)?),
+        label: get_string(row, 2)?,
+        secret_hash: get_string(row, 3)?,
+        scopes: parse_scopes_json(get_string(row, 4)?, 4)?,
         publish_identity: identity,
-        created_at: parse_datetime(row.get(10)?, 10)?,
-        expires_at: row
-            .get::<_, Option<String>>(11)?
+        created_at: parse_datetime(get_string(row, 10)?, 10)?,
+        expires_at: get_optional_string(row, 11)?
             .map(|value| parse_datetime(value, 11))
             .transpose()?,
     })
 }
 
-fn map_project(row: &Row<'_>) -> rusqlite::Result<Project> {
+fn map_project(row: &Row) -> SqliteResult<Project> {
     Ok(Project {
-        id: ProjectId::new(parse_uuid(row.get(0)?, 0)?),
-        tenant_id: TenantId::new(parse_uuid(row.get(1)?, 1)?),
-        name: domain_value(ProjectName::new(row.get::<_, String>(2)?), 2)?,
-        source: parse_project_source(row.get::<_, String>(3)?, 3)?,
-        summary: row.get(4)?,
-        description: row.get(5)?,
-        created_at: parse_datetime(row.get(6)?, 6)?,
-        updated_at: parse_datetime(row.get(7)?, 7)?,
+        id: ProjectId::new(parse_uuid(get_string(row, 0)?, 0)?),
+        tenant_id: TenantId::new(parse_uuid(get_string(row, 1)?, 1)?),
+        name: domain_value(ProjectName::new(get_string(row, 2)?), 2)?,
+        source: parse_project_source(get_string(row, 3)?, 3)?,
+        summary: get_string(row, 4)?,
+        description: get_string(row, 5)?,
+        created_at: parse_datetime(get_string(row, 6)?, 6)?,
+        updated_at: parse_datetime(get_string(row, 7)?, 7)?,
     })
 }
 
-fn map_release(row: &Row<'_>) -> rusqlite::Result<Release> {
+fn map_release(row: &Row) -> SqliteResult<Release> {
     Ok(Release {
-        id: ReleaseId::new(parse_uuid(row.get(0)?, 0)?),
-        project_id: ProjectId::new(parse_uuid(row.get(1)?, 1)?),
-        version: domain_value(ReleaseVersion::new(row.get::<_, String>(2)?), 2)?,
-        yanked: parse_yank(row.get(3)?, row.get(4)?, 3)?,
-        created_at: parse_datetime(row.get(5)?, 5)?,
+        id: ReleaseId::new(parse_uuid(get_string(row, 0)?, 0)?),
+        project_id: ProjectId::new(parse_uuid(get_string(row, 1)?, 1)?),
+        version: domain_value(ReleaseVersion::new(get_string(row, 2)?), 2)?,
+        yanked: parse_yank(
+            get_optional_string(row, 3)?,
+            get_optional_string(row, 4)?,
+            3,
+        )?,
+        created_at: parse_datetime(get_string(row, 5)?, 5)?,
     })
 }
 
-fn map_artifact(row: &Row<'_>) -> rusqlite::Result<Artifact> {
+fn map_artifact(row: &Row) -> SqliteResult<Artifact> {
     map_artifact_at(row, 0)
 }
 
-fn map_artifact_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<Artifact> {
-    let size_bytes = row.get::<_, i64>(offset + 4)?;
+fn map_artifact_at(row: &Row, offset: usize) -> SqliteResult<Artifact> {
+    let size_bytes = get_i64(row, offset + 4)?;
     if size_bytes < 0 {
-        return Err(rusqlite::Error::FromSqlConversionFailure(
-            offset + 4,
-            Type::Integer,
-            "artifact size cannot be negative".into(),
-        ));
+        return Err(SqliteStoreError::Column {
+            column: offset + 4,
+            message: "artifact size cannot be negative".into(),
+        });
     }
 
     Ok(Artifact {
-        id: ArtifactId::new(parse_uuid(row.get(offset)?, offset)?),
-        release_id: ReleaseId::new(parse_uuid(row.get(offset + 1)?, offset + 1)?),
-        filename: row.get(offset + 2)?,
-        kind: parse_artifact_kind(row.get(offset + 3)?, offset + 3)?,
+        id: ArtifactId::new(parse_uuid(get_string(row, offset)?, offset)?),
+        release_id: ReleaseId::new(parse_uuid(get_string(row, offset + 1)?, offset + 1)?),
+        filename: get_string(row, offset + 2)?,
+        kind: parse_artifact_kind(get_string(row, offset + 3)?, offset + 3)?,
         size_bytes: size_bytes as u64,
         digests: domain_value(
             DigestSet::new(
-                row.get::<_, String>(offset + 5)?,
-                row.get::<_, Option<String>>(offset + 6)?,
+                get_string(row, offset + 5)?,
+                get_optional_string(row, offset + 6)?,
             ),
             offset + 5,
         )?,
-        object_key: row.get(offset + 7)?,
-        upstream_url: row.get(offset + 8)?,
-        provenance_key: row.get(offset + 9)?,
-        yanked: parse_yank(row.get(offset + 10)?, row.get(offset + 11)?, offset + 10)?,
-        created_at: parse_datetime(row.get(offset + 12)?, offset + 12)?,
+        object_key: get_string(row, offset + 7)?,
+        upstream_url: get_optional_string(row, offset + 8)?,
+        provenance_key: get_optional_string(row, offset + 9)?,
+        yanked: parse_yank(
+            get_optional_string(row, offset + 10)?,
+            get_optional_string(row, offset + 11)?,
+            offset + 10,
+        )?,
+        created_at: parse_datetime(get_string(row, offset + 12)?, offset + 12)?,
     })
 }
 
-fn map_attestation(row: &Row<'_>) -> rusqlite::Result<AttestationBundle> {
+fn map_attestation(row: &Row) -> SqliteResult<AttestationBundle> {
     Ok(AttestationBundle {
-        artifact_id: ArtifactId::new(parse_uuid(row.get(0)?, 0)?),
-        media_type: row.get(1)?,
-        payload: row.get(2)?,
-        source: parse_attestation_source(row.get(3)?, 3)?,
-        recorded_at: parse_datetime(row.get(4)?, 4)?,
+        artifact_id: ArtifactId::new(parse_uuid(get_string(row, 0)?, 0)?),
+        media_type: get_string(row, 1)?,
+        payload: get_string(row, 2)?,
+        source: parse_attestation_source(get_string(row, 3)?, 3)?,
+        recorded_at: parse_datetime(get_string(row, 4)?, 4)?,
     })
 }
 
-fn map_trusted_publisher(row: &Row<'_>) -> rusqlite::Result<TrustedPublisher> {
+fn map_trusted_publisher(row: &Row) -> SqliteResult<TrustedPublisher> {
     Ok(TrustedPublisher {
-        id: TrustedPublisherId::new(parse_uuid(row.get(0)?, 0)?),
-        tenant_id: TenantId::new(parse_uuid(row.get(1)?, 1)?),
-        project_name: domain_value(ProjectName::new(row.get::<_, String>(2)?), 2)?,
-        provider: parse_provider(row.get(3)?, 3)?,
-        issuer: row.get(4)?,
-        audience: row.get(5)?,
-        claim_rules: parse_claims_json(row.get(6)?, 6)?,
-        created_at: parse_datetime(row.get(7)?, 7)?,
+        id: TrustedPublisherId::new(parse_uuid(get_string(row, 0)?, 0)?),
+        tenant_id: TenantId::new(parse_uuid(get_string(row, 1)?, 1)?),
+        project_name: domain_value(ProjectName::new(get_string(row, 2)?), 2)?,
+        provider: parse_provider(get_string(row, 3)?, 3)?,
+        issuer: get_string(row, 4)?,
+        audience: get_string(row, 5)?,
+        claim_rules: parse_claims_json(get_string(row, 6)?, 6)?,
+        created_at: parse_datetime(get_string(row, 7)?, 7)?,
     })
 }
 
-fn map_audit_event(row: &Row<'_>) -> rusqlite::Result<AuditEvent> {
+fn map_audit_event(row: &Row) -> SqliteResult<AuditEvent> {
     AuditEvent::new(
-        AuditEventId::new(parse_uuid(row.get(0)?, 0)?),
-        parse_datetime(row.get(1)?, 1)?,
-        row.get::<_, String>(2)?,
-        row.get::<_, String>(3)?,
-        row.get::<_, Option<String>>(4)?,
-        row.get::<_, Option<String>>(5)?,
-        parse_claims_json(row.get(6)?, 6)?,
+        AuditEventId::new(parse_uuid(get_string(row, 0)?, 0)?),
+        parse_datetime(get_string(row, 1)?, 1)?,
+        get_string(row, 2)?,
+        get_string(row, 3)?,
+        get_optional_string(row, 4)?,
+        get_optional_string(row, 5)?,
+        parse_claims_json(get_string(row, 6)?, 6)?,
     )
-    .map_err(|error| rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error)))
+    .map_err(|error| conversion_error(2, error))
 }
 
 fn parse_publish_identity(
@@ -1205,7 +1306,7 @@ fn parse_publish_identity(
     audience: Option<String>,
     provider: Option<String>,
     claims_json: Option<String>,
-) -> rusqlite::Result<Option<PublishIdentity>> {
+) -> SqliteResult<Option<PublishIdentity>> {
     match (issuer, subject, audience, provider) {
         (Some(issuer), Some(subject), Some(audience), Some(provider)) => {
             Ok(Some(PublishIdentity {
@@ -1217,15 +1318,11 @@ fn parse_publish_identity(
             }))
         }
         (None, None, None, None) => Ok(None),
-        _ => Err(rusqlite::Error::FromSqlConversionFailure(
-            5,
-            Type::Text,
-            "incomplete publish identity columns".into(),
-        )),
+        _ => Err(conversion_error(5, "incomplete publish identity columns")),
     }
 }
 
-fn parse_scopes_json(value: String, column: usize) -> rusqlite::Result<Vec<TokenScope>> {
+fn parse_scopes_json(value: String, column: usize) -> SqliteResult<Vec<TokenScope>> {
     let scopes: Vec<String> = parse_json(value, column)?;
     scopes
         .into_iter()
@@ -1233,44 +1330,36 @@ fn parse_scopes_json(value: String, column: usize) -> rusqlite::Result<Vec<Token
         .collect()
 }
 
-fn parse_claims_json(value: String, column: usize) -> rusqlite::Result<BTreeMap<String, String>> {
+fn parse_claims_json(value: String, column: usize) -> SqliteResult<BTreeMap<String, String>> {
     parse_json(value, column)
 }
 
-fn parse_json<T: serde::de::DeserializeOwned>(value: String, column: usize) -> rusqlite::Result<T> {
-    serde_json::from_str(&value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-    })
+fn parse_json<T: serde::de::DeserializeOwned>(value: String, column: usize) -> SqliteResult<T> {
+    serde_json::from_str(&value).map_err(|error| conversion_error(column, error))
 }
 
-fn parse_uuid(value: String, column: usize) -> rusqlite::Result<Uuid> {
-    Uuid::parse_str(&value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-    })
+fn parse_uuid(value: String, column: usize) -> SqliteResult<Uuid> {
+    Uuid::parse_str(&value).map_err(|error| conversion_error(column, error))
 }
 
-fn parse_datetime(value: String, column: usize) -> rusqlite::Result<DateTime<Utc>> {
+fn parse_datetime(value: String, column: usize) -> SqliteResult<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&value)
         .map(|datetime| datetime.with_timezone(&Utc))
-        .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-        })
+        .map_err(|error| conversion_error(column, error))
 }
 
-fn domain_value<T, E>(value: Result<T, E>, column: usize) -> rusqlite::Result<T>
+fn domain_value<T, E>(value: std::result::Result<T, E>, column: usize) -> SqliteResult<T>
 where
-    E: std::error::Error + Send + Sync + 'static,
+    E: std::fmt::Display,
 {
-    value.map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-    })
+    value.map_err(|error| conversion_error(column, error))
 }
 
 fn parse_yank(
     reason: Option<String>,
     changed_at: Option<String>,
     column: usize,
-) -> rusqlite::Result<Option<YankState>> {
+) -> SqliteResult<Option<YankState>> {
     match (reason, changed_at) {
         (None, None) => Ok(None),
         (reason, Some(changed_at)) => Ok(Some(YankState {
@@ -1284,7 +1373,7 @@ fn parse_yank(
     }
 }
 
-fn parse_project_source(value: String, column: usize) -> rusqlite::Result<ProjectSource> {
+fn parse_project_source(value: String, column: usize) -> SqliteResult<ProjectSource> {
     match value.as_str() {
         "local" => Ok(ProjectSource::Local),
         "mirrored" => Ok(ProjectSource::Mirrored),
@@ -1292,7 +1381,7 @@ fn parse_project_source(value: String, column: usize) -> rusqlite::Result<Projec
     }
 }
 
-fn parse_artifact_kind(value: String, column: usize) -> rusqlite::Result<ArtifactKind> {
+fn parse_artifact_kind(value: String, column: usize) -> SqliteResult<ArtifactKind> {
     match value.as_str() {
         "wheel" => Ok(ArtifactKind::Wheel),
         "sdist" => Ok(ArtifactKind::SourceDistribution),
@@ -1300,7 +1389,7 @@ fn parse_artifact_kind(value: String, column: usize) -> rusqlite::Result<Artifac
     }
 }
 
-fn parse_token_scope(value: String, column: usize) -> rusqlite::Result<TokenScope> {
+fn parse_token_scope(value: String, column: usize) -> SqliteResult<TokenScope> {
     match value.as_str() {
         "read" => Ok(TokenScope::Read),
         "publish" => Ok(TokenScope::Publish),
@@ -1309,7 +1398,7 @@ fn parse_token_scope(value: String, column: usize) -> rusqlite::Result<TokenScop
     }
 }
 
-fn parse_provider(value: String, column: usize) -> rusqlite::Result<TrustedPublisherProvider> {
+fn parse_provider(value: String, column: usize) -> SqliteResult<TrustedPublisherProvider> {
     match value.as_str() {
         "github-actions" => Ok(TrustedPublisherProvider::GitHubActions),
         "gitlab" => Ok(TrustedPublisherProvider::GitLab),
@@ -1317,7 +1406,7 @@ fn parse_provider(value: String, column: usize) -> rusqlite::Result<TrustedPubli
     }
 }
 
-fn parse_attestation_source(value: String, column: usize) -> rusqlite::Result<AttestationSource> {
+fn parse_attestation_source(value: String, column: usize) -> SqliteResult<AttestationSource> {
     match value.as_str() {
         "mirrored" => Ok(AttestationSource::Mirrored),
         "trusted-publish" => Ok(AttestationSource::TrustedPublish),
@@ -1325,16 +1414,72 @@ fn parse_attestation_source(value: String, column: usize) -> rusqlite::Result<At
     }
 }
 
-fn invalid_enum(column: usize, label: &'static str, value: String) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        column,
-        Type::Text,
-        format!("unknown {label} `{value}`").into(),
-    )
+fn invalid_enum(column: usize, label: &'static str, value: String) -> SqliteStoreError {
+    conversion_error(column, format!("unknown {label} `{value}`"))
 }
 
-fn collect_rows<T>(rows: impl Iterator<Item = rusqlite::Result<T>>) -> rusqlite::Result<Vec<T>> {
-    rows.collect()
+fn get_value(row: &Row, column: usize) -> SqliteResult<Value> {
+    if column >= row.column_count() {
+        return Err(SqliteStoreError::Column {
+            column,
+            message: format!("row has {} columns", row.column_count()),
+        });
+    }
+    row.get_value(column).map_err(Into::into)
+}
+
+fn get_string(row: &Row, column: usize) -> SqliteResult<String> {
+    match get_value(row, column)? {
+        Value::Text(value) => Ok(value),
+        value => Err(expected_type(column, "TEXT", value)),
+    }
+}
+
+fn get_optional_string(row: &Row, column: usize) -> SqliteResult<Option<String>> {
+    match get_value(row, column)? {
+        Value::Null => Ok(None),
+        Value::Text(value) => Ok(Some(value)),
+        value => Err(expected_type(column, "TEXT or NULL", value)),
+    }
+}
+
+fn get_i64(row: &Row, column: usize) -> SqliteResult<i64> {
+    match get_value(row, column)? {
+        Value::Integer(value) => Ok(value),
+        value => Err(expected_type(column, "INTEGER", value)),
+    }
+}
+
+fn get_optional_i64(row: &Row, column: usize) -> SqliteResult<Option<i64>> {
+    match get_value(row, column)? {
+        Value::Null => Ok(None),
+        Value::Integer(value) => Ok(Some(value)),
+        value => Err(expected_type(column, "INTEGER or NULL", value)),
+    }
+}
+
+fn expected_type(column: usize, expected: &'static str, value: Value) -> SqliteStoreError {
+    SqliteStoreError::Column {
+        column,
+        message: format!("expected {expected}, got {}", value_type(&value)),
+    }
+}
+
+fn value_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NULL",
+        Value::Integer(_) => "INTEGER",
+        Value::Real(_) => "REAL",
+        Value::Text(_) => "TEXT",
+        Value::Blob(_) => "BLOB",
+    }
+}
+
+fn conversion_error(column: usize, error: impl std::fmt::Display) -> SqliteStoreError {
+    SqliteStoreError::Column {
+        column,
+        message: error.to_string(),
+    }
 }
 
 fn yank_columns(yanked: &Option<YankState>) -> (Option<String>, Option<String>) {
@@ -1396,7 +1541,7 @@ fn attestation_source_str(source: &AttestationSource) -> &'static str {
     }
 }
 
-fn sqlite_error(error: rusqlite::Error) -> ApplicationError {
+fn sqlite_error(error: impl std::fmt::Display) -> ApplicationError {
     ApplicationError::External(format!("sqlite metadata store failure: {error}"))
 }
 
@@ -1419,7 +1564,9 @@ mod tests {
         let now = Utc::now();
 
         {
-            let store = SqliteRegistryStore::open(&path).expect("open sqlite store");
+            let store = SqliteRegistryStore::open(&path)
+                .await
+                .expect("open sqlite store");
             let tenant = Tenant::new(
                 tenant_id,
                 TenantSlug::new("acme").expect("tenant slug"),
@@ -1502,7 +1649,9 @@ mod tests {
                 .expect("save audit event");
         }
 
-        let reopened = SqliteRegistryStore::open(&path).expect("reopen sqlite store");
+        let reopened = SqliteRegistryStore::open(&path)
+            .await
+            .expect("reopen sqlite store");
         let overview = reopened.registry_overview().await.expect("overview");
         assert_eq!(overview.tenant_count, 1);
         assert_eq!(overview.project_count, 1);
@@ -1560,7 +1709,9 @@ mod tests {
     #[tokio::test]
     async fn sqlite_store_round_trips_extended_registry_state() {
         let path = std::env::temp_dir().join(format!("pyregistry-{}.sqlite3", Uuid::new_v4()));
-        let store = SqliteRegistryStore::open(&path).expect("open sqlite store");
+        let store = SqliteRegistryStore::open(&path)
+            .await
+            .expect("open sqlite store");
         let now = Utc::now();
         let tenant = Tenant::new(
             TenantId::new(Uuid::new_v4()),
@@ -1882,7 +2033,9 @@ mod tests {
     #[tokio::test]
     async fn sqlite_store_reports_boundary_conversion_errors() {
         let path = std::env::temp_dir().join(format!("pyregistry-{}.sqlite3", Uuid::new_v4()));
-        let store = SqliteRegistryStore::open(&path).expect("open sqlite store");
+        let store = SqliteRegistryStore::open(&path)
+            .await
+            .expect("open sqlite store");
         let now = Utc::now();
         let tenant = Tenant::new(
             TenantId::new(Uuid::new_v4()),
@@ -1938,8 +2091,7 @@ mod tests {
         assert!(parse_json::<BTreeMap<String, String>>("not json".into(), 7).is_err());
         assert!(parse_uuid("not-a-uuid".into(), 8).is_err());
         assert!(parse_datetime("not-a-date".into(), 9).is_err());
-        let digest_result: rusqlite::Result<DigestSet> =
-            domain_value(DigestSet::new("not-a-digest", None), 10);
+        let digest_result = domain_value(DigestSet::new("not-a-digest", None), 10);
         assert!(digest_result.is_err());
         assert!(
             parse_publish_identity(
@@ -1980,7 +2132,7 @@ mod tests {
             "trusted-publish"
         );
         assert!(
-            sqlite_error(rusqlite::Error::InvalidQuery)
+            sqlite_error("invalid query")
                 .to_string()
                 .contains("sqlite metadata store failure")
         );

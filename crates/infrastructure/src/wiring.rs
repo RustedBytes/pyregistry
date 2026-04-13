@@ -97,6 +97,7 @@ async fn build_registry_store(
                 sqlite.path.display()
             );
             SqliteRegistryStore::open(&sqlite.path)
+                .await
                 .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
                 .map_err(|error| InfrastructureError::MetadataStoreConfiguration(error.to_string()))
         }

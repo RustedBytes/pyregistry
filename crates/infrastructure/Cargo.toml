@@ -21,7 +21,7 @@ pyregistry-application = { path = "../application" }
 pyregistry-domain = { path = "../domain" }
 rand.workspace = true
 reqwest.workspace = true
-rusqlite.workspace = true
+limbo.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
