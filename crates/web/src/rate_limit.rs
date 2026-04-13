@@ -1,4 +1,4 @@
-use crate::{error::WebError, state::AppState};
+use crate::{error::WebError, network_source::client_key, state::AppState};
 use axum::{
     extract::{Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -8,7 +8,6 @@ use axum::{
 use log::{debug, warn};
 use std::{
     collections::HashMap,
-    net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -227,64 +226,6 @@ fn should_rate_limit_path(path: &str) -> bool {
     path.starts_with("/t/") || path.starts_with("/_/oidc/")
 }
 
-fn client_key(request: &Request, trust_proxy_headers: bool) -> String {
-    if trust_proxy_headers && let Some(forwarded) = forwarded_client(request.headers()) {
-        return forwarded;
-    }
-
-    request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<SocketAddr>>()
-        .map(|connect_info| connect_info.0.ip().to_string())
-        .unwrap_or_else(|| "unknown-client".into())
-}
-
-fn forwarded_client(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .and_then(sanitize_forwarded_client)
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|value| value.to_str().ok())
-                .and_then(sanitize_forwarded_client)
-        })
-        .or_else(|| {
-            headers
-                .get("forwarded")
-                .and_then(|value| value.to_str().ok())
-                .and_then(parse_forwarded_header)
-        })
-}
-
-fn parse_forwarded_header(raw: &str) -> Option<String> {
-    raw.split(',').next().and_then(|entry| {
-        entry.split(';').find_map(|part| {
-            let (key, value) = part.split_once('=')?;
-            if key.trim().eq_ignore_ascii_case("for") {
-                sanitize_forwarded_client(value)
-            } else {
-                None
-            }
-        })
-    })
-}
-
-fn sanitize_forwarded_client(raw: &str) -> Option<String> {
-    let client = raw
-        .trim()
-        .trim_matches('"')
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim();
-    if client.is_empty() || client.len() > 128 || client.eq_ignore_ascii_case("unknown") {
-        return None;
-    }
-    Some(client.to_string())
-}
-
 fn too_many_requests(decision: RateLimitDecision) -> Response {
     let mut response = WebError {
         status: StatusCode::TOO_MANY_REQUESTS,
@@ -324,7 +265,7 @@ where
 mod tests {
     use super::*;
     use axum::body::Body;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[tokio::test]
     async fn limits_after_burst_for_same_client() {
@@ -379,17 +320,6 @@ mod tests {
 
         assert_eq!(client_key(&request, true), "203.0.113.5");
         assert_eq!(client_key(&request, false), "unknown-client");
-    }
-
-    #[test]
-    fn parses_forwarded_header_for_client_address() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "forwarded",
-            HeaderValue::from_static("for=\"198.51.100.7\";proto=https"),
-        );
-
-        assert_eq!(forwarded_client(&headers).as_deref(), Some("198.51.100.7"));
     }
 
     #[test]
@@ -572,42 +502,6 @@ mod tests {
             )));
 
         assert_eq!(client_key(&request, true), "192.0.2.11");
-    }
-
-    #[test]
-    fn forwarded_client_prefers_x_forwarded_for_then_real_ip_then_forwarded() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.10"));
-        headers.insert(
-            "forwarded",
-            HeaderValue::from_static("for=\"198.51.100.11\";proto=https"),
-        );
-        assert_eq!(forwarded_client(&headers).as_deref(), Some("198.51.100.10"));
-
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.12, 10.0.0.1"),
-        );
-        assert_eq!(forwarded_client(&headers).as_deref(), Some("203.0.113.12"));
-    }
-
-    #[test]
-    fn forwarded_client_rejects_unknown_empty_and_overlong_values() {
-        assert_eq!(sanitize_forwarded_client("unknown"), None);
-        assert_eq!(sanitize_forwarded_client("   "), None);
-        assert_eq!(sanitize_forwarded_client(&"a".repeat(129)), None);
-        assert_eq!(
-            sanitize_forwarded_client("\"[2001:db8::1]\"").as_deref(),
-            Some("2001:db8::1")
-        );
-    }
-
-    #[test]
-    fn forwarded_header_skips_non_for_parts() {
-        assert_eq!(
-            parse_forwarded_header("proto=https; for=198.51.100.20").as_deref(),
-            Some("198.51.100.20")
-        );
     }
 
     #[test]

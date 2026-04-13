@@ -55,6 +55,18 @@ fn round_trips_settings_through_toml_shape() {
         original.rate_limit.trust_proxy_headers
     );
     assert_eq!(
+        round_trip.network_source.web_ui_allowed_cidrs,
+        original.network_source.web_ui_allowed_cidrs
+    );
+    assert_eq!(
+        round_trip.network_source.api_allowed_cidrs,
+        original.network_source.api_allowed_cidrs
+    );
+    assert_eq!(
+        round_trip.network_source.trust_proxy_headers,
+        original.network_source.trust_proxy_headers
+    );
+    assert_eq!(
         round_trip.validation.distribution_parallelism,
         original.validation.distribution_parallelism
     );
@@ -243,6 +255,7 @@ fn rejects_s3_storage_without_bucket() {
         sql_server: Some(default_sql_server_config().into()),
         security: Some(default_security_config().into()),
         rate_limit: Some(default_rate_limit_config().into()),
+        network_source: Some(default_network_source_config().into()),
         validation: Some(default_validation_config().into()),
         logging: Some(LoggingConfigFile {
             filter: "info".into(),
@@ -353,6 +366,7 @@ fn rejects_pgsql_store_without_postgres_config() {
         sql_server: Some(default_sql_server_config().into()),
         security: Some(default_security_config().into()),
         rate_limit: Some(default_rate_limit_config().into()),
+        network_source: Some(default_network_source_config().into()),
         validation: Some(default_validation_config().into()),
         logging: Some(LoggingConfigFile {
             filter: "info".into(),
@@ -399,6 +413,7 @@ fn rejects_sqlserver_store_without_sql_server_config() {
         sql_server: None,
         security: Some(default_security_config().into()),
         rate_limit: Some(default_rate_limit_config().into()),
+        network_source: Some(default_network_source_config().into()),
         validation: Some(default_validation_config().into()),
         logging: Some(LoggingConfigFile {
             filter: "info".into(),
@@ -580,6 +595,19 @@ fn component_log_summaries_include_operational_knobs() {
         "enabled=true, requests_per_minute=1, burst=2, max_tracked_clients=3, trust_proxy_headers=true"
     );
     assert_eq!(
+        NetworkSourceConfig {
+            web_ui_allowed_cidrs: vec!["10.0.0.0/8".into()],
+            api_allowed_cidrs: vec!["192.0.2.0/24".into(), "2001:db8::/32".into()],
+            trust_proxy_headers: true,
+        }
+        .log_safe_summary(),
+        "web_ui_allowed_cidrs=1, api_allowed_cidrs=2, trust_proxy_headers=true"
+    );
+    assert_eq!(
+        default_network_source_config().log_safe_summary(),
+        "web_ui_allowed_cidrs=all, api_allowed_cidrs=all, trust_proxy_headers=false"
+    );
+    assert_eq!(
         ValidationConfig {
             distribution_parallelism: 7,
         }
@@ -714,6 +742,22 @@ fn rejects_invalid_component_config_files() {
             timestamp: "seconds".into(),
         }),
         Err(SettingsError::InvalidLoggingConfig(_))
+    ));
+    assert!(matches!(
+        NetworkSourceConfig::try_from(NetworkSourceConfigFile {
+            web_ui_allowed_cidrs: vec!["192.0.2.0/33".into()],
+            api_allowed_cidrs: Vec::new(),
+            trust_proxy_headers: false,
+        }),
+        Err(SettingsError::InvalidNetworkSourceConfig(_))
+    ));
+    assert!(matches!(
+        NetworkSourceConfig::try_from(NetworkSourceConfigFile {
+            web_ui_allowed_cidrs: Vec::new(),
+            api_allowed_cidrs: vec!["not-an-ip".into()],
+            trust_proxy_headers: false,
+        }),
+        Err(SettingsError::InvalidNetworkSourceConfig(_))
     ));
 }
 
@@ -910,6 +954,9 @@ fn loads_runtime_settings_from_environment() {
         "RATE_LIMIT_BURST",
         "RATE_LIMIT_MAX_TRACKED_CLIENTS",
         "RATE_LIMIT_TRUST_PROXY_HEADERS",
+        "NETWORK_SOURCE_WEB_UI_ALLOWED_CIDRS",
+        "NETWORK_SOURCE_API_ALLOWED_CIDRS",
+        "NETWORK_SOURCE_TRUST_PROXY_HEADERS",
         "VALIDATION_DISTRIBUTION_PARALLELISM",
     ]);
     env.set("DATABASE_STORE", "in-memory");
@@ -970,6 +1017,15 @@ fn loads_runtime_settings_from_environment() {
     env.set("RATE_LIMIT_BURST", "80");
     env.set("RATE_LIMIT_MAX_TRACKED_CLIENTS", "1234");
     env.set("RATE_LIMIT_TRUST_PROXY_HEADERS", "on");
+    env.set(
+        "NETWORK_SOURCE_WEB_UI_ALLOWED_CIDRS",
+        "10.0.0.0/8,127.0.0.1",
+    );
+    env.set(
+        "NETWORK_SOURCE_API_ALLOWED_CIDRS",
+        "192.0.2.0/24,2001:db8::/32",
+    );
+    env.set("NETWORK_SOURCE_TRUST_PROXY_HEADERS", "yes");
     env.set("VALIDATION_DISTRIBUTION_PARALLELISM", "11");
 
     let settings = Settings::from_env().expect("settings from env");
@@ -1054,6 +1110,15 @@ fn loads_runtime_settings_from_environment() {
     assert_eq!(settings.rate_limit.burst, 80);
     assert_eq!(settings.rate_limit.max_tracked_clients, 1234);
     assert!(settings.rate_limit.trust_proxy_headers);
+    assert_eq!(
+        settings.network_source.web_ui_allowed_cidrs,
+        vec!["10.0.0.0/8", "127.0.0.1"]
+    );
+    assert_eq!(
+        settings.network_source.api_allowed_cidrs,
+        vec!["192.0.2.0/24", "2001:db8::/32"]
+    );
+    assert!(settings.network_source.trust_proxy_headers);
     assert_eq!(settings.validation.distribution_parallelism, 11);
 }
 

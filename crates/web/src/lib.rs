@@ -3,10 +3,12 @@ mod audit;
 mod auth;
 mod error;
 mod models;
+mod network_source;
 mod package_api;
 mod rate_limit;
 mod state;
 
+pub use network_source::{NetworkSourceConfig, NetworkSourcePolicy};
 pub use rate_limit::{RateLimitConfig, RateLimiter};
 pub use state::{AppState, MirrorJobs};
 
@@ -18,6 +20,10 @@ use axum::{
 pub fn router(state: AppState) -> Router {
     let rate_limit_layer =
         middleware::from_fn_with_state(state.clone(), rate_limit::enforce_api_rate_limit);
+    let network_source_layer = middleware::from_fn_with_state(
+        state.clone(),
+        network_source::enforce_network_source_access,
+    );
 
     Router::new()
         .route("/", get(admin::index))
@@ -98,6 +104,7 @@ pub fn router(state: AppState) -> Router {
         .method_not_allowed_fallback(error::method_not_allowed)
         .fallback(error::not_found)
         .layer(rate_limit_layer)
+        .layer(network_source_layer)
         .with_state(state)
 }
 
@@ -399,6 +406,7 @@ mod tests {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             mirror_jobs: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: RateLimiter::disabled(),
+            network_source: NetworkSourcePolicy::allow_all(),
         }
     }
 
@@ -457,6 +465,11 @@ mod tests {
             .await
             .expect("token")
             .secret
+    }
+
+    fn with_network_source(mut state: AppState, config: NetworkSourceConfig) -> AppState {
+        state.network_source = NetworkSourcePolicy::new(config);
+        state
     }
 
     async fn upload_demo_package(app: Router, auth: &str) {
@@ -527,6 +540,85 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         assert!(body_text(response).await.contains("pyregistry"));
+    }
+
+    #[tokio::test]
+    async fn router_rejects_web_ui_requests_from_disallowed_network_sources() {
+        let state = with_network_source(
+            state().await,
+            NetworkSourceConfig {
+                web_ui_allowed_cidrs: vec!["10.0.0.0/8".into()],
+                api_allowed_cidrs: Vec::new(),
+                trust_proxy_headers: true,
+            },
+        );
+        let app = router(state);
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/login")
+                    .header("x-forwarded-for", "192.0.2.10")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("denied response");
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/login")
+                    .header("x-forwarded-for", "10.1.2.3")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("allowed response");
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn router_rejects_api_requests_from_disallowed_network_sources() {
+        let state = state().await;
+        let token = basic_token(&issue_token(&state, vec![TokenScope::Read]).await);
+        let app = router(with_network_source(
+            state,
+            NetworkSourceConfig {
+                web_ui_allowed_cidrs: Vec::new(),
+                api_allowed_cidrs: vec!["198.51.100.0/24".into()],
+                trust_proxy_headers: true,
+            },
+        ));
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/t/acme/simple/")
+                    .header(header::AUTHORIZATION, token.clone())
+                    .header("x-forwarded-for", "203.0.113.10")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("denied response");
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/t/acme/simple/")
+                    .header(header::AUTHORIZATION, token)
+                    .header("x-forwarded-for", "198.51.100.10")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("allowed response");
+        assert_eq!(allowed.status(), StatusCode::OK);
     }
 
     #[tokio::test]

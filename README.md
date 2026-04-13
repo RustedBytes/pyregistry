@@ -241,6 +241,11 @@ burst = 60
 max_tracked_clients = 10000
 trust_proxy_headers = false
 
+[network_source]
+web_ui_allowed_cidrs = []
+api_allowed_cidrs = []
+trust_proxy_headers = false
+
 [validation]
 distribution_parallelism = 4
 
@@ -333,6 +338,9 @@ Useful environment variables:
 - `RATE_LIMIT_BURST`
 - `RATE_LIMIT_MAX_TRACKED_CLIENTS`
 - `RATE_LIMIT_TRUST_PROXY_HEADERS`
+- `NETWORK_SOURCE_WEB_UI_ALLOWED_CIDRS`
+- `NETWORK_SOURCE_API_ALLOWED_CIDRS`
+- `NETWORK_SOURCE_TRUST_PROXY_HEADERS`
 - `VALIDATION_DISTRIBUTION_PARALLELISM`
 - `LOG_FILTER`
 - `LOG_MODULE_PATH`
@@ -344,6 +352,10 @@ Rate limiting applies to package and OIDC API paths (`/t/...` and
 `/_/oidc/...`). By default Pyregistry keys limits by the direct TCP peer IP. If
 the service runs behind a trusted reverse proxy, set `trust_proxy_headers = true`
 so `X-Forwarded-For`, `X-Real-IP`, or `Forwarded` can be used instead.
+
+Network source checks can separately restrict the Web UI (`/` and `/admin...`)
+and package/OIDC API routes. Empty CIDR lists allow every source; set
+`network_source.trust_proxy_headers = true` only behind a trusted reverse proxy.
 
 ## CLI
 

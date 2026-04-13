@@ -17,7 +17,8 @@ use pyregistry_infrastructure::{
     Settings, YaraWheelVirusScanner, ZipWheelArchiveReader, build_application, seed_application,
 };
 use pyregistry_web::{
-    AppState, MirrorJobs, RateLimitConfig as WebRateLimitConfig, RateLimiter, router,
+    AppState, MirrorJobs, NetworkSourceConfig as WebNetworkSourceConfig, NetworkSourcePolicy,
+    RateLimitConfig as WebRateLimitConfig, RateLimiter, router,
 };
 use regex::Regex;
 use std::collections::HashMap;
@@ -337,10 +338,19 @@ async fn serve(settings: Settings, config_source: String) -> anyhow::Result<()> 
             max_tracked_clients: settings.rate_limit.max_tracked_clients,
             trust_proxy_headers: settings.rate_limit.trust_proxy_headers,
         }),
+        network_source: NetworkSourcePolicy::new(WebNetworkSourceConfig {
+            web_ui_allowed_cidrs: settings.network_source.web_ui_allowed_cidrs.clone(),
+            api_allowed_cidrs: settings.network_source.api_allowed_cidrs.clone(),
+            trust_proxy_headers: settings.network_source.trust_proxy_headers,
+        }),
     };
     info!(
         "HTTP API rate limiting: {}",
         state.rate_limiter.log_safe_summary()
+    );
+    info!(
+        "HTTP network source access: {}",
+        state.network_source.log_safe_summary()
     );
     let router = router(state).layer(TraceLayer::new_for_http());
 

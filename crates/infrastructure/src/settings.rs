@@ -3,6 +3,7 @@ use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use url::Url;
@@ -24,6 +25,7 @@ pub struct Settings {
     pub sql_server: Option<SqlServerConfig>,
     pub security: SecurityConfig,
     pub rate_limit: RateLimitConfig,
+    pub network_source: NetworkSourceConfig,
     pub validation: ValidationConfig,
     pub logging: LoggingConfig,
     pub oidc_issuers: Vec<OidcIssuerConfig>,
@@ -155,6 +157,11 @@ impl Settings {
                 ),
                 trust_proxy_headers: read_env_bool("RATE_LIMIT_TRUST_PROXY_HEADERS", false),
             },
+            network_source: NetworkSourceConfig {
+                web_ui_allowed_cidrs: read_csv_env("NETWORK_SOURCE_WEB_UI_ALLOWED_CIDRS"),
+                api_allowed_cidrs: read_csv_env("NETWORK_SOURCE_API_ALLOWED_CIDRS"),
+                trust_proxy_headers: read_env_bool("NETWORK_SOURCE_TRUST_PROXY_HEADERS", false),
+            },
             validation: ValidationConfig {
                 distribution_parallelism: read_env_usize(
                     "VALIDATION_DISTRIBUTION_PARALLELISM",
@@ -184,6 +191,7 @@ impl Settings {
             sql_server: Some(default_sql_server_config()),
             security: default_security_config(),
             rate_limit: default_rate_limit_config(),
+            network_source: default_network_source_config(),
             validation: default_validation_config(),
             logging: default_logging_config(),
             oidc_issuers: default_oidc_issuers(),
@@ -259,7 +267,7 @@ impl Settings {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, sql_server={}, security={}, rate_limit={}, validation={}, logging={}, oidc_issuers={}",
+            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, sql_server={}, security={}, rate_limit={}, network_source={}, validation={}, logging={}, oidc_issuers={}",
             self.bind_address,
             self.blob_root.display(),
             self.superadmin_email,
@@ -277,6 +285,7 @@ impl Settings {
                 .map_or_else(|| "disabled".to_string(), SqlServerConfig::log_safe_summary),
             self.security.log_safe_summary(),
             self.rate_limit.log_safe_summary(),
+            self.network_source.log_safe_summary(),
             self.validation.log_safe_summary(),
             self.logging.log_safe_summary(),
             self.oidc_issuers.len()
@@ -357,6 +366,7 @@ impl Settings {
         }
         self.security.validate()?;
         self.rate_limit.validate()?;
+        self.network_source.validate()?;
         self.validation.validate()?;
 
         Ok(())
@@ -723,6 +733,31 @@ impl RateLimitConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct NetworkSourceConfig {
+    pub web_ui_allowed_cidrs: Vec<String>,
+    pub api_allowed_cidrs: Vec<String>,
+    pub trust_proxy_headers: bool,
+}
+
+impl NetworkSourceConfig {
+    #[must_use]
+    pub fn log_safe_summary(&self) -> String {
+        format!(
+            "web_ui_allowed_cidrs={}, api_allowed_cidrs={}, trust_proxy_headers={}",
+            summarize_network_source_list(&self.web_ui_allowed_cidrs),
+            summarize_network_source_list(&self.api_allowed_cidrs),
+            self.trust_proxy_headers
+        )
+    }
+
+    fn validate(&self) -> Result<(), SettingsError> {
+        validate_network_source_list("web_ui_allowed_cidrs", &self.web_ui_allowed_cidrs)?;
+        validate_network_source_list("api_allowed_cidrs", &self.api_allowed_cidrs)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ValidationConfig {
     pub distribution_parallelism: usize,
 }
@@ -828,6 +863,8 @@ pub enum SettingsError {
     InvalidSecurityConfig(String),
     #[error("invalid rate limit config: {0}")]
     InvalidRateLimitConfig(String),
+    #[error("invalid network source config: {0}")]
+    InvalidNetworkSourceConfig(String),
     #[error("invalid validation config: {0}")]
     InvalidValidationConfig(String),
     #[error("invalid logging config: {0}")]
@@ -853,6 +890,7 @@ struct SettingsFile {
     sql_server: Option<SqlServerConfigFile>,
     security: Option<SecurityConfigFile>,
     rate_limit: Option<RateLimitConfigFile>,
+    network_source: Option<NetworkSourceConfigFile>,
     validation: Option<ValidationConfigFile>,
     logging: Option<LoggingConfigFile>,
     oidc_issuers: Vec<OidcIssuerConfigFile>,
@@ -938,6 +976,16 @@ struct RateLimitConfigFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct NetworkSourceConfigFile {
+    #[serde(default)]
+    web_ui_allowed_cidrs: Vec<String>,
+    #[serde(default)]
+    api_allowed_cidrs: Vec<String>,
+    #[serde(default)]
+    trust_proxy_headers: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ValidationConfigFile {
     distribution_parallelism: usize,
 }
@@ -1007,6 +1055,11 @@ impl TryFrom<SettingsFile> for Settings {
                 .map(RateLimitConfig::try_from)
                 .transpose()?
                 .unwrap_or_else(default_rate_limit_config),
+            network_source: value
+                .network_source
+                .map(NetworkSourceConfig::try_from)
+                .transpose()?
+                .unwrap_or_else(default_network_source_config),
             validation: value
                 .validation
                 .map(ValidationConfig::try_from)
@@ -1044,6 +1097,7 @@ impl From<Settings> for SettingsFile {
             sql_server: value.sql_server.map(Into::into),
             security: Some(value.security.into()),
             rate_limit: Some(value.rate_limit.into()),
+            network_source: Some(value.network_source.into()),
             validation: Some(value.validation.into()),
             logging: Some(value.logging.into()),
             oidc_issuers: value.oidc_issuers.into_iter().map(Into::into).collect(),
@@ -1395,6 +1449,30 @@ impl From<RateLimitConfig> for RateLimitConfigFile {
     }
 }
 
+impl TryFrom<NetworkSourceConfigFile> for NetworkSourceConfig {
+    type Error = SettingsError;
+
+    fn try_from(value: NetworkSourceConfigFile) -> Result<Self, Self::Error> {
+        let config = Self {
+            web_ui_allowed_cidrs: clean_ignore_values(value.web_ui_allowed_cidrs),
+            api_allowed_cidrs: clean_ignore_values(value.api_allowed_cidrs),
+            trust_proxy_headers: value.trust_proxy_headers,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl From<NetworkSourceConfig> for NetworkSourceConfigFile {
+    fn from(value: NetworkSourceConfig) -> Self {
+        Self {
+            web_ui_allowed_cidrs: value.web_ui_allowed_cidrs,
+            api_allowed_cidrs: value.api_allowed_cidrs,
+            trust_proxy_headers: value.trust_proxy_headers,
+        }
+    }
+}
+
 impl TryFrom<ValidationConfigFile> for ValidationConfig {
     type Error = SettingsError;
 
@@ -1617,6 +1695,14 @@ fn default_rate_limit_config() -> RateLimitConfig {
     }
 }
 
+fn default_network_source_config() -> NetworkSourceConfig {
+    NetworkSourceConfig {
+        web_ui_allowed_cidrs: Vec::new(),
+        api_allowed_cidrs: Vec::new(),
+        trust_proxy_headers: false,
+    }
+}
+
 fn default_validation_config() -> ValidationConfig {
     ValidationConfig {
         distribution_parallelism: default_validation_parallelism(),
@@ -1690,6 +1776,54 @@ fn clean_ignore_values(values: Vec<String>) -> Vec<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+fn summarize_network_source_list(values: &[String]) -> String {
+    if values.is_empty() {
+        "all".into()
+    } else {
+        values.len().to_string()
+    }
+}
+
+fn validate_network_source_list(name: &str, values: &[String]) -> Result<(), SettingsError> {
+    for value in values {
+        validate_ip_or_cidr(value).map_err(|message| {
+            SettingsError::InvalidNetworkSourceConfig(format!("{name} contains {message}"))
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_ip_or_cidr(raw: &str) -> Result<(), String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("an empty value".into());
+    }
+    let Some((addr, prefix)) = raw.split_once('/') else {
+        raw.parse::<IpAddr>()
+            .map(|_| ())
+            .map_err(|error| format!("invalid IP address `{raw}`: {error}"))?;
+        return Ok(());
+    };
+    let addr: IpAddr = addr
+        .trim()
+        .parse()
+        .map_err(|error| format!("invalid CIDR address `{raw}`: {error}"))?;
+    let prefix: u8 = prefix
+        .trim()
+        .parse()
+        .map_err(|error| format!("invalid CIDR prefix `{raw}`: {error}"))?;
+    let max_prefix = match addr {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if prefix > max_prefix {
+        return Err(format!(
+            "CIDR prefix `{prefix}` is too large for `{addr}`; max is {max_prefix}"
+        ));
+    }
+    Ok(())
 }
 
 fn vulnerability_webhook_from_env() -> Result<VulnerabilityWebhookConfig, SettingsError> {

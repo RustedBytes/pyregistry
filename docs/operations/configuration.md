@@ -180,6 +180,31 @@ By default limits are keyed by the direct TCP peer IP. Set
 `trust_proxy_headers = true` only behind a trusted reverse proxy that controls
 `X-Forwarded-For`, `X-Real-IP`, or `Forwarded`.
 
+## Network Source Access
+
+```toml
+[network_source]
+web_ui_allowed_cidrs = []
+api_allowed_cidrs = []
+trust_proxy_headers = false
+```
+
+Leave an allowlist empty to allow every source for that surface. Set
+`web_ui_allowed_cidrs` to restrict `/` and `/admin...` Web UI routes, and
+`api_allowed_cidrs` to restrict package and OIDC API routes under `/t/...` and
+`/_/oidc/...`.
+
+Entries may be single IPs or CIDR ranges, for example:
+
+```toml
+web_ui_allowed_cidrs = ["10.0.0.0/8", "127.0.0.1"]
+api_allowed_cidrs = ["192.0.2.0/24", "2001:db8::/32"]
+```
+
+By default checks use the direct TCP peer IP. Set
+`network_source.trust_proxy_headers = true` only behind a trusted reverse proxy
+that controls `X-Forwarded-For`, `X-Real-IP`, or `Forwarded`.
+
 ## Security And Validation
 
 ```toml
@@ -303,6 +328,9 @@ Common environment variables:
 | `RATE_LIMIT_BURST` | Per-client burst capacity. |
 | `RATE_LIMIT_MAX_TRACKED_CLIENTS` | Maximum number of rate-limit client buckets. |
 | `RATE_LIMIT_TRUST_PROXY_HEADERS` | Use trusted proxy headers for client IPs. |
+| `NETWORK_SOURCE_WEB_UI_ALLOWED_CIDRS` | Comma-separated Web UI source IPs or CIDRs; empty allows all. |
+| `NETWORK_SOURCE_API_ALLOWED_CIDRS` | Comma-separated API source IPs or CIDRs; empty allows all. |
+| `NETWORK_SOURCE_TRUST_PROXY_HEADERS` | Use trusted proxy headers for network source checks. |
 | `VALIDATION_DISTRIBUTION_PARALLELISM` | Default artifact validation workers. |
 | `LOG_FILTER` | Log filter string. |
 | `LOG_MODULE_PATH` | Include module paths in logs. |
