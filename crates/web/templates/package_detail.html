@@ -381,8 +381,6 @@
       .file-governance {
         display: grid;
         gap: 8px;
-        flex-basis: 100%;
-        margin-top: 4px;
       }
       .file-governance .yank-form {
         grid-template-columns: minmax(180px, 1fr) auto;
@@ -823,31 +821,47 @@
                   </button>
                   {% endif %}
 
-                  <div class="file-governance">
-                    {% match artifact.yanked_reason %}
-                    {% when Some with (reason) %}
-                    <div class="yank-card yanked">
-                      <strong>File is yanked</strong>
-                      <p>Reason: {{ reason }}</p>
-                      <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/unyank" onsubmit="return confirm('Unyank {{ artifact.filename }} and make this file installable again?');">
-                        <button class="secondary" type="submit">Unyank file</button>
-                      </form>
+                  <button class="secondary manage-file-button" type="button">Manage file</button>
+                  <dialog class="file-governance-modal">
+                    <div class="modal-shell">
+                      <div class="modal-head">
+                        <div>
+                          <h2>Manage file</h2>
+                          <p class="muted">{{ artifact.filename }}</p>
+                        </div>
+                        <form method="dialog">
+                          <button class="modal-close" type="submit">Close</button>
+                        </form>
+                      </div>
+                      <div class="file-governance">
+                        {% match artifact.yanked_reason %}
+                        {% when Some with (reason) %}
+                        <div class="yank-card yanked">
+                          <strong>File is yanked</strong>
+                          <p class="muted">Installers will avoid this file when possible.</p>
+                          <p>Reason: {{ reason }}</p>
+                          <form method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/unyank" onsubmit="return confirm('Unyank {{ artifact.filename }} and make this file installable again?');">
+                            <button class="secondary" type="submit">Unyank file</button>
+                          </form>
+                        </div>
+                        {% when None %}
+                        <div class="yank-card">
+                          <strong>File is active</strong>
+                          <p class="muted">Yank this file to discourage new installs without deleting the artifact.</p>
+                          <form class="yank-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/yank" onsubmit="return confirm('Yank {{ artifact.filename }}? This is reversible.');">
+                            <label>Reason
+                              <input type="text" name="reason" placeholder="for example: bad wheel tag">
+                            </label>
+                            <button class="warning" type="submit">Yank file</button>
+                          </form>
+                        </div>
+                        {% endmatch %}
+                        <form class="danger-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/purge" onsubmit="return confirm('Permanently purge {{ artifact.filename }}? This cannot be undone.');">
+                          <button class="danger" type="submit">Purge artifact</button>
+                        </form>
+                      </div>
                     </div>
-                    {% when None %}
-                    <div class="yank-card">
-                      <strong>File is active</strong>
-                      <form class="yank-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/yank" onsubmit="return confirm('Yank {{ artifact.filename }}? This is reversible.');">
-                        <label>Reason
-                          <input type="text" name="reason" placeholder="for example: bad wheel tag">
-                        </label>
-                        <button class="warning" type="submit">Yank file</button>
-                      </form>
-                    </div>
-                    {% endmatch %}
-                    <form class="danger-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts/{{ artifact.filename }}/purge" onsubmit="return confirm('Permanently purge {{ artifact.filename }}? This cannot be undone.');">
-                      <button class="danger" type="submit">Purge artifact</button>
-                    </form>
-                  </div>
+                  </dialog>
                 </div>
               </div>
               {% endfor %}
@@ -931,6 +945,17 @@
             const modal = button
               .closest(".release-actions")
               ?.querySelector(".release-governance-modal");
+            if (modal instanceof HTMLDialogElement) {
+              modal.showModal();
+            }
+          });
+        });
+
+        document.querySelectorAll(".manage-file-button").forEach((button) => {
+          button.addEventListener("click", () => {
+            const modal = button
+              .closest(".file-actions")
+              ?.querySelector(".file-governance-modal");
             if (modal instanceof HTMLDialogElement) {
               modal.showModal();
             }
