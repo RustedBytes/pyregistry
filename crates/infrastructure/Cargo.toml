@@ -20,37 +20,58 @@ async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 flate2.workspace = true
-foxguard.workspace = true
+foxguard = { workspace = true, optional = true }
 hex.workspace = true
 include_dir.workspace = true
 jsonwebtoken.workspace = true
 log.workspace = true
-magika.workspace = true
-opendal.workspace = true
-ort.workspace = true
-pyregistry-application = { path = "../application", version = "0.1.1" }
+magika = { workspace = true, optional = true }
+opendal = { workspace = true, optional = true }
+ort = { workspace = true, optional = true }
+password-hash.workspace = true
+pyregistry-application = { path = "../application", version = "0.1.1", default-features = false }
 pyregistry-domain = { path = "../domain", version = "0.1.1" }
 rand.workspace = true
 reqwest.workspace = true
-turso.workspace = true
+turso = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
 thiserror.workspace = true
-tiberius.workspace = true
+tiberius = { workspace = true, optional = true }
 tokio.workspace = true
-tokio-postgres.workspace = true
-tokio-util.workspace = true
+tokio-postgres = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 toml.workspace = true
 url.workspace = true
 uuid.workspace = true
-yara-x.workspace = true
+yara-x = { workspace = true, optional = true }
 zip.workspace = true
+
+[features]
+default = [
+    "sqlite",
+    "postgres",
+    "sqlserver",
+    "opendal-fs",
+    "s3",
+    "security-full",
+]
+sqlite = ["dep:turso"]
+postgres = ["dep:tokio-postgres"]
+sqlserver = ["dep:tiberius", "dep:tokio-util"]
+opendal-fs = ["dep:opendal", "opendal/services-fs"]
+s3 = ["opendal-fs", "opendal/services-s3"]
+security-full = ["source-security", "file-type-ml", "vulnerability-db", "virus-yara"]
+source-security = ["dep:foxguard"]
+file-type-ml = ["dep:magika", "dep:ort"]
+vulnerability-db = ["dep:pysentry"]
+virus-yara = ["dep:yara-x", "yara-x/default"]
 
 [dev-dependencies]
 bstr.workspace = true
 
 # pysentry declares an unconditional cdylib target; MinGW cannot link it on Windows.
 [target.'cfg(not(all(windows, target_env = "gnu")))'.dependencies]
-pysentry.workspace = true
+pysentry = { workspace = true, optional = true }

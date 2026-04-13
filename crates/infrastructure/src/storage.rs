@@ -1,9 +1,13 @@
 use async_trait::async_trait;
 use log::debug;
+#[cfg(feature = "opendal-fs")]
 use opendal::{ErrorKind, Operator};
 use pyregistry_application::{ApplicationError, ObjectStorage};
+#[cfg(feature = "opendal-fs")]
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "opendal-fs")]
+use std::path::Path;
+use std::path::PathBuf;
 use tokio::fs;
 
 use crate::OpenDalStorageConfig;
@@ -24,27 +28,43 @@ impl FileSystemObjectStorage {
 }
 
 pub struct OpenDalObjectStorage {
+    #[cfg(feature = "opendal-fs")]
     operator: Operator,
+    #[cfg(feature = "opendal-fs")]
     scheme: String,
 }
 
 impl OpenDalObjectStorage {
     pub fn from_config(config: &OpenDalStorageConfig) -> Result<Self, String> {
-        let mut options = config.options.clone();
-        normalize_opendal_options(&config.scheme, &mut options)?;
-        let operator = Operator::via_iter(&config.scheme, options)
-            .map_err(|error| format!("failed to build OpenDAL operator: {error}"))?;
-        Ok(Self {
-            operator,
-            scheme: config.scheme.clone(),
-        })
+        #[cfg(feature = "opendal-fs")]
+        {
+            if config.scheme.eq_ignore_ascii_case("s3") && !cfg!(feature = "s3") {
+                return Err("OpenDAL s3 storage requires the `s3` feature".into());
+            }
+            let mut options = config.options.clone();
+            normalize_opendal_options(&config.scheme, &mut options)?;
+            let operator = Operator::via_iter(&config.scheme, options)
+                .map_err(|error| format!("failed to build OpenDAL operator: {error}"))?;
+            return Ok(Self {
+                operator,
+                scheme: config.scheme.clone(),
+            });
+        }
+
+        #[cfg(not(feature = "opendal-fs"))]
+        {
+            let _ = config;
+            Err("OpenDAL object storage requires the `opendal-fs` feature".into())
+        }
     }
 
+    #[cfg(feature = "opendal-fs")]
     fn key_for(&self, key: &str) -> String {
         key.trim_start_matches('/').to_string()
     }
 }
 
+#[cfg(feature = "opendal-fs")]
 #[async_trait]
 impl ObjectStorage for OpenDalObjectStorage {
     async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<(), ApplicationError> {
@@ -100,6 +120,29 @@ impl ObjectStorage for OpenDalObjectStorage {
     }
 }
 
+#[cfg(not(feature = "opendal-fs"))]
+#[async_trait]
+impl ObjectStorage for OpenDalObjectStorage {
+    async fn put(&self, _key: &str, _bytes: Vec<u8>) -> Result<(), ApplicationError> {
+        Err(ApplicationError::External(
+            "OpenDAL object storage requires the `opendal-fs` feature".into(),
+        ))
+    }
+
+    async fn get(&self, _key: &str) -> Result<Option<Vec<u8>>, ApplicationError> {
+        Err(ApplicationError::External(
+            "OpenDAL object storage requires the `opendal-fs` feature".into(),
+        ))
+    }
+
+    async fn delete(&self, _key: &str) -> Result<(), ApplicationError> {
+        Err(ApplicationError::External(
+            "OpenDAL object storage requires the `opendal-fs` feature".into(),
+        ))
+    }
+}
+
+#[cfg(feature = "opendal-fs")]
 fn normalize_opendal_options(
     scheme: &str,
     options: &mut BTreeMap<String, String>,
@@ -116,6 +159,7 @@ fn normalize_opendal_options(
     normalize_fs_options(options)
 }
 
+#[cfg(feature = "opendal-fs")]
 fn normalize_fs_options(options: &mut BTreeMap<String, String>) -> Result<(), String> {
     let Some(root) = options.get("root").cloned() else {
         return Err("OpenDAL fs storage requires `root` option".into());
@@ -137,6 +181,7 @@ fn normalize_fs_options(options: &mut BTreeMap<String, String>) -> Result<(), St
     Ok(())
 }
 
+#[cfg(feature = "opendal-fs")]
 fn normalize_s3_options(options: &mut BTreeMap<String, String>) -> Result<(), String> {
     let Some(bucket) = options.get("bucket").cloned() else {
         return Err("OpenDAL s3 storage requires `bucket` option".into());
@@ -179,6 +224,7 @@ fn normalize_s3_options(options: &mut BTreeMap<String, String>) -> Result<(), St
     Ok(())
 }
 
+#[cfg(feature = "opendal-fs")]
 fn is_local_s3_endpoint(endpoint: &str) -> bool {
     let endpoint = endpoint.to_ascii_lowercase();
     endpoint.contains("127.0.0.1")
@@ -187,6 +233,7 @@ fn is_local_s3_endpoint(endpoint: &str) -> bool {
         || endpoint.starts_with("minio")
 }
 
+#[cfg(feature = "opendal-fs")]
 fn opendal_to_application_error(error: opendal::Error) -> ApplicationError {
     ApplicationError::External(format!("OpenDAL object storage error: {error}"))
 }

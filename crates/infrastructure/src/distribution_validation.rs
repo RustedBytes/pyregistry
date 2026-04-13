@@ -8,12 +8,14 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, Cursor, Read, Seek};
 use std::path::Path;
+#[cfg(feature = "file-type-ml")]
 use std::sync::{LazyLock, Mutex};
 use tar::Archive;
 use zip::ZipArchive;
 
 pub struct FilesystemDistributionInspector;
 
+#[cfg(feature = "file-type-ml")]
 static MAGIKA_SESSION: LazyLock<Mutex<Option<magika::Session>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -143,14 +145,33 @@ fn inspect_file_type_from_path(
     kind: DistributionKind,
     path: &Path,
 ) -> Result<FileTypeInspection, ApplicationError> {
-    let file_type = with_magika_session(|session| session.identify_file_sync(path))?;
-    Ok(file_type_inspection(
-        kind,
-        path.extension_label(),
-        file_type,
-    ))
+    #[cfg(feature = "file-type-ml")]
+    {
+        let file_type = with_magika_session(|session| session.identify_file_sync(path))?;
+        return Ok(file_type_inspection(
+            kind,
+            path.extension_label(),
+            file_type,
+        ));
+    }
+
+    #[cfg(not(feature = "file-type-ml"))]
+    {
+        let mut file =
+            File::open(path).map_err(|error| ApplicationError::External(error.to_string()))?;
+        let mut header = [0_u8; 8];
+        let bytes_read = file
+            .read(&mut header)
+            .map_err(|error| ApplicationError::External(error.to_string()))?;
+        Ok(file_type_inspection_from_magic(
+            kind,
+            path.extension_label(),
+            &header[..bytes_read],
+        ))
+    }
 }
 
+#[cfg(feature = "file-type-ml")]
 fn inspect_file_type_from_bytes(
     kind: DistributionKind,
     filename: &str,
@@ -164,6 +185,20 @@ fn inspect_file_type_from_bytes(
     ))
 }
 
+#[cfg(not(feature = "file-type-ml"))]
+fn inspect_file_type_from_bytes(
+    kind: DistributionKind,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<FileTypeInspection, ApplicationError> {
+    Ok(file_type_inspection_from_magic(
+        kind,
+        extension_label_from_filename(filename),
+        &bytes[..bytes.len().min(8)],
+    ))
+}
+
+#[cfg(feature = "file-type-ml")]
 fn with_magika_session<T>(
     inspect: impl FnOnce(&mut magika::Session) -> magika::Result<T>,
 ) -> Result<T, ApplicationError> {
@@ -181,6 +216,7 @@ fn with_magika_session<T>(
     inspect(session).map_err(|error| ApplicationError::External(error.to_string()))
 }
 
+#[cfg(feature = "file-type-ml")]
 fn file_type_inspection(
     kind: DistributionKind,
     actual_extension: Option<String>,
@@ -200,6 +236,51 @@ fn file_type_inspection(
             .map(|extension| (*extension).to_string())
             .collect(),
         matches_extension: expected_magika_labels(kind).contains(&info.label),
+    }
+}
+
+#[cfg(not(feature = "file-type-ml"))]
+fn file_type_inspection_from_magic(
+    kind: DistributionKind,
+    actual_extension: Option<String>,
+    bytes: &[u8],
+) -> FileTypeInspection {
+    let (label, mime_type, group, description, score) = if bytes.starts_with(b"PK\x03\x04")
+        || bytes.starts_with(b"PK\x05\x06")
+        || bytes.starts_with(b"PK\x07\x08")
+    {
+        ("zip", "application/zip", "archive", "ZIP archive", 1.0)
+    } else if bytes.starts_with(&[0x1f, 0x8b]) {
+        (
+            "gzip",
+            "application/gzip",
+            "archive",
+            "gzip compressed data",
+            1.0,
+        )
+    } else {
+        (
+            "unknown",
+            "application/octet-stream",
+            "unknown",
+            "unknown file type",
+            0.0,
+        )
+    };
+
+    FileTypeInspection {
+        detector: "magic-bytes".into(),
+        label: label.into(),
+        mime_type: mime_type.into(),
+        group: group.into(),
+        description: description.into(),
+        score,
+        actual_extension,
+        expected_extensions: expected_distribution_extensions(kind)
+            .iter()
+            .map(|extension| (*extension).to_string())
+            .collect(),
+        matches_extension: expected_magika_labels(kind).contains(&label),
     }
 }
 

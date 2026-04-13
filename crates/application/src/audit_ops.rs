@@ -6,13 +6,15 @@ use crate::{
 };
 use log::{debug, info, warn};
 use pyregistry_domain::ProjectName;
+#[cfg(feature = "python-ast-audit")]
 use rustpython_parser::{Parse, ast};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+#[cfg(feature = "python-ast-audit")]
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
+#[cfg(feature = "python-ast-audit")]
 const MAX_PYTHON_AST_EVIDENCE: usize = 12;
+#[cfg(feature = "python-ast-audit")]
 const MAX_PYTHON_SOURCE_BYTES: usize = 1024 * 1024;
 
 pub struct WheelAuditUseCase {
@@ -319,6 +321,7 @@ fn post_install_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding
     findings
 }
 
+#[cfg(feature = "python-ast-audit")]
 fn python_ast_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding> {
     let mut findings = Vec::new();
 
@@ -376,12 +379,19 @@ fn python_ast_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding> 
     findings
 }
 
+#[cfg(not(feature = "python-ast-audit"))]
+fn python_ast_findings(_entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding> {
+    Vec::new()
+}
+
+#[cfg(feature = "python-ast-audit")]
 #[derive(Default)]
 struct PythonAstAnalyzer {
     import_aliases: BTreeMap<String, String>,
     evidence: BTreeSet<String>,
 }
 
+#[cfg(feature = "python-ast-audit")]
 impl PythonAstAnalyzer {
     fn visit_suite(&mut self, suite: &[ast::Stmt]) {
         for stmt in suite {
@@ -792,6 +802,7 @@ impl PythonAstAnalyzer {
     }
 }
 
+#[cfg(feature = "python-ast-audit")]
 fn call_path(expr: &ast::Expr) -> Option<String> {
     match expr {
         ast::Expr::Name(name) => Some(name.id.to_string()),
@@ -803,6 +814,7 @@ fn call_path(expr: &ast::Expr) -> Option<String> {
     }
 }
 
+#[cfg(feature = "python-ast-audit")]
 fn import_evidence(module: &str) -> Option<String> {
     let module = module.to_ascii_lowercase();
     let root = module.split('.').next().unwrap_or(module.as_str());
@@ -820,6 +832,7 @@ fn import_evidence(module: &str) -> Option<String> {
     }
 }
 
+#[cfg(feature = "python-ast-audit")]
 fn call_evidence(call_path: &str) -> Option<String> {
     let call_path = call_path.to_ascii_lowercase();
 
@@ -892,6 +905,7 @@ fn call_evidence(call_path: &str) -> Option<String> {
     None
 }
 
+#[cfg(feature = "python-ast-audit")]
 fn network_client_call(call_path: &str, module: &str) -> bool {
     let Some(method) = call_path.strip_prefix(&format!("{module}.")) else {
         return false;
@@ -902,6 +916,7 @@ fn network_client_call(call_path: &str, module: &str) -> bool {
     )
 }
 
+#[cfg(feature = "python-ast-audit")]
 fn native_library_loading_call(call_path: &str) -> bool {
     matches!(
         call_path,

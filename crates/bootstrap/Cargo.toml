@@ -20,8 +20,8 @@ chrono.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true
-pyregistry-application = { path = "../application", version = "0.1.1" }
-pyregistry-infrastructure = { path = "../infrastructure", version = "0.1.1" }
+pyregistry-application = { path = "../application", version = "0.1.1", default-features = false }
+pyregistry-infrastructure = { path = "../infrastructure", version = "0.1.1", default-features = false }
 pyregistry-web = { path = "../web", version = "0.1.1" }
 regex.workspace = true
 tokio.workspace = true
@@ -29,3 +29,31 @@ tower-http.workspace = true
 
 [dev-dependencies]
 zip.workspace = true
+
+[features]
+default = [
+    "python-ast-audit",
+    "sqlite",
+    "postgres",
+    "sqlserver",
+    "opendal-fs",
+    "s3",
+    "security-full",
+]
+sqlite = ["pyregistry-infrastructure/sqlite"]
+postgres = ["pyregistry-infrastructure/postgres"]
+sqlserver = ["pyregistry-infrastructure/sqlserver"]
+opendal-fs = ["pyregistry-infrastructure/opendal-fs"]
+s3 = ["pyregistry-infrastructure/s3"]
+security-full = [
+    "source-security",
+    "file-type-ml",
+    "vulnerability-db",
+    "virus-yara",
+]
+source-security = ["pyregistry-infrastructure/source-security"]
+file-type-ml = ["pyregistry-infrastructure/file-type-ml"]
+vulnerability-db = ["pyregistry-infrastructure/vulnerability-db"]
+virus-yara = ["pyregistry-infrastructure/virus-yara"]
+python-ast-audit = ["pyregistry-application/python-ast-audit"]
+minimal-local = ["sqlite"]

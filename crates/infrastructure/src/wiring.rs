@@ -1,10 +1,15 @@
+#[cfg(feature = "postgres")]
+use crate::PostgresRegistryStore;
+#[cfg(feature = "sqlserver")]
+use crate::SqlServerRegistryStore;
+#[cfg(feature = "sqlite")]
+use crate::SqliteRegistryStore;
 use crate::{
     ArgonPasswordHasher, ArtifactDownloadRetryPolicy, ArtifactStorageBackend, DatabaseStoreKind,
     DiscordWebhookVulnerabilityNotifier, FileSystemObjectStorage,
     FoxGuardWheelSourceSecurityScanner, InMemoryRegistryStore, JsonAttestationSigner,
-    OpenDalObjectStorage, PostgresRegistryStore, PySentryVulnerabilityScanner, PypiMirrorClient,
-    Settings, Sha256TokenHasher, SimpleJwksOidcVerifier, SqlServerRegistryStore,
-    SqliteRegistryStore, YaraWheelVirusScanner, ZipWheelArchiveReader,
+    OpenDalObjectStorage, PySentryVulnerabilityScanner, PypiMirrorClient, Settings,
+    Sha256TokenHasher, SimpleJwksOidcVerifier, YaraWheelVirusScanner, ZipWheelArchiveReader,
 };
 use log::{info, warn};
 use pyregistry_application::{
@@ -111,46 +116,73 @@ async fn build_registry_store(
             Ok(Arc::new(InMemoryRegistryStore::default()))
         }
         DatabaseStoreKind::Sqlite => {
-            let sqlite = settings
-                .sqlite
-                .as_ref()
-                .ok_or(InfrastructureError::SqliteConfigurationRequired)?;
-            info!(
-                "building application with SQLite metadata store at {}",
-                sqlite.path.display()
-            );
-            SqliteRegistryStore::open(&sqlite.path)
-                .await
-                .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
-                .map_err(|error| InfrastructureError::MetadataStoreConfiguration(error.to_string()))
+            #[cfg(feature = "sqlite")]
+            {
+                let sqlite = settings
+                    .sqlite
+                    .as_ref()
+                    .ok_or(InfrastructureError::SqliteConfigurationRequired)?;
+                info!(
+                    "building application with SQLite metadata store at {}",
+                    sqlite.path.display()
+                );
+                SqliteRegistryStore::open(&sqlite.path)
+                    .await
+                    .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
+                    .map_err(|error| {
+                        InfrastructureError::MetadataStoreConfiguration(error.to_string())
+                    })
+            }
+            #[cfg(not(feature = "sqlite"))]
+            {
+                Err(InfrastructureError::FeatureDisabled("sqlite"))
+            }
         }
         DatabaseStoreKind::Pgsql => {
-            let postgres = settings
-                .postgres
-                .as_ref()
-                .ok_or(InfrastructureError::PostgresConfigurationRequired)?;
-            info!(
-                "building application with PostgreSQL metadata store: {}",
-                postgres.log_safe_summary()
-            );
-            PostgresRegistryStore::connect(postgres)
-                .await
-                .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
-                .map_err(|error| InfrastructureError::MetadataStoreConfiguration(error.to_string()))
+            #[cfg(feature = "postgres")]
+            {
+                let postgres = settings
+                    .postgres
+                    .as_ref()
+                    .ok_or(InfrastructureError::PostgresConfigurationRequired)?;
+                info!(
+                    "building application with PostgreSQL metadata store: {}",
+                    postgres.log_safe_summary()
+                );
+                PostgresRegistryStore::connect(postgres)
+                    .await
+                    .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
+                    .map_err(|error| {
+                        InfrastructureError::MetadataStoreConfiguration(error.to_string())
+                    })
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                Err(InfrastructureError::FeatureDisabled("postgres"))
+            }
         }
         DatabaseStoreKind::SqlServer => {
-            let sql_server = settings
-                .sql_server
-                .as_ref()
-                .ok_or(InfrastructureError::SqlServerConfigurationRequired)?;
-            info!(
-                "building application with SQL Server metadata store: {}",
-                sql_server.log_safe_summary()
-            );
-            SqlServerRegistryStore::connect(sql_server)
-                .await
-                .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
-                .map_err(|error| InfrastructureError::MetadataStoreConfiguration(error.to_string()))
+            #[cfg(feature = "sqlserver")]
+            {
+                let sql_server = settings
+                    .sql_server
+                    .as_ref()
+                    .ok_or(InfrastructureError::SqlServerConfigurationRequired)?;
+                info!(
+                    "building application with SQL Server metadata store: {}",
+                    sql_server.log_safe_summary()
+                );
+                SqlServerRegistryStore::connect(sql_server)
+                    .await
+                    .map(|store| Arc::new(store) as Arc<dyn RegistryStore>)
+                    .map_err(|error| {
+                        InfrastructureError::MetadataStoreConfiguration(error.to_string())
+                    })
+            }
+            #[cfg(not(feature = "sqlserver"))]
+            {
+                Err(InfrastructureError::FeatureDisabled("sqlserver"))
+            }
         }
     }
 }
@@ -299,6 +331,8 @@ pub enum InfrastructureError {
     ObjectStorageConfiguration(String),
     #[error("vulnerability webhook is not configured correctly: {0}")]
     WebhookConfiguration(String),
+    #[error("feature `{0}` is disabled at compile time")]
+    FeatureDisabled(&'static str),
 }
 
 #[cfg(test)]

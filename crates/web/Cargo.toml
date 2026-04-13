@@ -23,7 +23,7 @@ chrono.workspace = true
 http.workspace = true
 log.workspace = true
 mime.workspace = true
-pyregistry-application = { path = "../application", version = "0.1.1" }
+pyregistry-application = { path = "../application", version = "0.1.1", default-features = false }
 pyregistry-domain = { path = "../domain", version = "0.1.1" }
 serde.workspace = true
 serde_json.workspace = true

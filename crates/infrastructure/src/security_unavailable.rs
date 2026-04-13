@@ -22,6 +22,14 @@ impl PySentryVulnerabilityScanner {
             cache_dir: cache_dir.into(),
         }
     }
+
+    #[must_use]
+    pub fn with_ignored_vulnerability_ids(
+        cache_dir: impl Into<PathBuf>,
+        _ignored_vulnerability_ids: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        Self::new(cache_dir)
+    }
 }
 
 #[async_trait]
