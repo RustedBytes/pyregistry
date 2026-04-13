@@ -547,27 +547,58 @@ impl RegistryStore for SqliteRegistryStore {
 
     async fn save_release(&self, release: Release) -> Result<(), ApplicationError> {
         let (reason, changed_at) = yank_columns(&release.yanked);
-        self.execute(
-            r#"
-            INSERT INTO releases (id, project_id, version, yanked_reason, yanked_changed_at, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ON CONFLICT(id) DO UPDATE SET
-                project_id = excluded.project_id,
-                version = excluded.version,
-                yanked_reason = excluded.yanked_reason,
-                yanked_changed_at = excluded.yanked_changed_at,
-                created_at = excluded.created_at
-            "#,
-            params![
-                uuid_string(release.id.into_inner()),
-                uuid_string(release.project_id.into_inner()),
-                release.version.as_str(),
-                reason,
-                changed_at,
-                date_string(release.created_at),
-            ],
-        )
-        .await
+        let _guard = self.operation_lock.lock().await;
+        let id = uuid_string(release.id.into_inner());
+        let project_id = uuid_string(release.project_id.into_inner());
+        let version = release.version.as_str().to_string();
+        let created_at = date_string(release.created_at);
+
+        let release_exists = {
+            let mut rows = self
+                .connection
+                .query("SELECT 1 FROM releases WHERE id = ?1", params![id.clone()])
+                .await
+                .map_err(sqlite_error)?;
+            rows.next().await.map_err(sqlite_error)?.is_some()
+        };
+
+        if release_exists {
+            self.connection
+                .execute(
+                    r#"
+                UPDATE releases
+                SET project_id = ?2,
+                    version = ?3,
+                    yanked_reason = ?4,
+                    yanked_changed_at = ?5,
+                    created_at = ?6
+                WHERE id = ?1
+                "#,
+                    params![
+                        id.clone(),
+                        project_id.clone(),
+                        version.clone(),
+                        reason.clone(),
+                        changed_at.clone(),
+                        created_at.clone(),
+                    ],
+                )
+                .await
+                .map_err(sqlite_error)?;
+            return Ok(());
+        }
+
+        self.connection
+            .execute(
+                r#"
+                INSERT INTO releases (id, project_id, version, yanked_reason, yanked_changed_at, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+                params![id, project_id, version, reason, changed_at, created_at,],
+            )
+            .await
+            .map(|_| ())
+            .map_err(sqlite_error)
     }
 
     async fn list_releases(&self, project_id: ProjectId) -> Result<Vec<Release>, ApplicationError> {
@@ -1868,10 +1899,23 @@ mod tests {
                 .expect("release lookup"),
             Some(release.clone())
         );
+        let mut updated_release = release.clone();
+        updated_release.unyank();
+        store
+            .save_release(updated_release.clone())
+            .await
+            .expect("idempotent release update");
+        assert_eq!(
+            store
+                .get_release_by_version(project.id, &updated_release.version)
+                .await
+                .expect("updated release lookup"),
+            Some(updated_release.clone())
+        );
 
         let mut artifact = Artifact::new(
             ArtifactId::new(Uuid::new_v4()),
-            release.id,
+            updated_release.id,
             "demo_pkg-1.0.0-py3-none-any.whl",
             42,
             DigestSet::new("a".repeat(64), Some("b".repeat(64))).expect("digests"),
@@ -1887,7 +1931,10 @@ mod tests {
             .await
             .expect("artifact");
         assert_eq!(
-            store.list_artifacts(release.id).await.expect("artifacts"),
+            store
+                .list_artifacts(updated_release.id)
+                .await
+                .expect("artifacts"),
             vec![artifact.clone()]
         );
         let release_artifacts = store
