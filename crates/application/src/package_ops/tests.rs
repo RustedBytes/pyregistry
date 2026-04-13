@@ -3,13 +3,14 @@ use crate::{
     AttestationSigner, CancellationSignal, Clock, CreateTenantCommand, DeletionCommand,
     DistributionFileInspector, DistributionInspection, DistributionKind, IdGenerator,
     IssueApiTokenCommand, MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot,
-    NoopVulnerabilityNotifier, ObjectStorage, OidcVerifier, PackageArtifactDetails,
-    PackageReleaseDetails, PackageVulnerability, PackageVulnerabilityQuery,
+    NoopVulnerabilityNotifier, NoopWheelAuditNotifier, ObjectStorage, OidcVerifier,
+    PackageArtifactDetails, PackageReleaseDetails, PackageVulnerability, PackageVulnerabilityQuery,
     PackageVulnerabilityReport, PasswordHasher, RecordAuditEventCommand,
     RegisterTrustedPublisherCommand, RegistryDistributionValidationStatus, RegistryOverview,
     RegistryStore, SearchHit, TokenHasher, UploadArtifactCommand,
     ValidateRegistryDistributionsCommand, VulnerabilityNotifier, VulnerabilityScanner,
-    VulnerablePackageNotification, WheelArchiveReader, WheelArchiveSnapshot,
+    VulnerablePackageNotification, WheelArchiveEntry, WheelArchiveReader, WheelArchiveSnapshot,
+    WheelAuditFindingKind, WheelAuditFindingNotification, WheelAuditNotifier,
     WheelSourceSecurityScanResult, WheelSourceSecurityScanner, WheelVirusScanResult,
     WheelVirusScanner,
 };
@@ -53,6 +54,57 @@ async fn mirrored_project_caches_artifacts_with_bounded_parallelism() {
         6,
         "all artifact records should be saved before/while payload caching runs"
     );
+}
+
+#[tokio::test]
+async fn mirrored_project_scans_cached_wheels_and_notifies_findings() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_single_artifact_named(
+        "demo-1.0.0-py3-none-any.whl",
+        "1.0.0",
+        "https://files.example.test/demo-1.0.0-py3-none-any.whl",
+        b"wheel bytes".to_vec(),
+        None,
+    ));
+    let notifier = Arc::new(RecordingWheelAuditNotifier::default());
+    let app = PyregistryApp::new(
+        store,
+        storage,
+        mirror,
+        Arc::new(UnusedOidcVerifier),
+        Arc::new(UnusedAttestationSigner),
+        Arc::new(UnusedPasswordHasher),
+        Arc::new(UnusedTokenHasher),
+        Arc::new(UnusedVulnerabilityScanner),
+        Arc::new(NoopVulnerabilityNotifier),
+        notifier.clone(),
+        Arc::new(SuspiciousWheelArchiveReader),
+        Arc::new(UnusedWheelVirusScanner),
+        Arc::new(UnusedWheelSourceSecurityScanner),
+        Arc::new(FixedClock),
+        Arc::new(SequentialIds::default()),
+        1,
+    );
+
+    app.resolve_project_from_mirror("acme", "demo")
+        .await
+        .expect("mirror resolution")
+        .expect("mirrored project");
+
+    let notifications = notifier.notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].tenant_slug, "acme");
+    assert_eq!(notifications[0].project_name, "demo");
+    assert_eq!(notifications[0].version, "1.0.0");
+    assert_eq!(
+        notifications[0].wheel_filename,
+        "demo-1.0.0-py3-none-any.whl"
+    );
+    assert!(notifications[0].findings.iter().any(|finding| {
+        finding.kind == WheelAuditFindingKind::PythonAstSuspiciousBehavior
+            && finding.path.as_deref() == Some("demo/__init__.py")
+    }));
 }
 
 #[tokio::test]
@@ -1282,6 +1334,7 @@ fn test_app_with_ports_and_notifier(
         Arc::new(UnusedTokenHasher),
         vulnerability_scanner,
         vulnerability_notifier,
+        Arc::new(NoopWheelAuditNotifier),
         Arc::new(UnusedWheelArchiveReader),
         Arc::new(UnusedWheelVirusScanner),
         Arc::new(UnusedWheelSourceSecurityScanner),
@@ -1373,6 +1426,31 @@ impl VulnerabilityNotifier for RecordingVulnerabilityNotifier {
     async fn notify_vulnerable_package(
         &self,
         notification: &VulnerablePackageNotification,
+    ) -> Result<(), ApplicationError> {
+        self.notifications
+            .lock()
+            .expect("notifier state")
+            .push(notification.clone());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingWheelAuditNotifier {
+    notifications: Mutex<Vec<WheelAuditFindingNotification>>,
+}
+
+impl RecordingWheelAuditNotifier {
+    fn notifications(&self) -> Vec<WheelAuditFindingNotification> {
+        self.notifications.lock().expect("notifier state").clone()
+    }
+}
+
+#[async_trait]
+impl WheelAuditNotifier for RecordingWheelAuditNotifier {
+    async fn notify_wheel_audit_findings(
+        &self,
+        notification: &WheelAuditFindingNotification,
     ) -> Result<(), ApplicationError> {
         self.notifications
             .lock()
@@ -1932,6 +2010,22 @@ impl FakeMirrorClient {
         bytes: Vec<u8>,
         provenance_payload: Option<String>,
     ) -> Self {
+        Self::with_single_artifact_named(
+            "demo-1.0.0.tar.gz",
+            "1.0.0",
+            download_url,
+            bytes,
+            provenance_payload,
+        )
+    }
+
+    fn with_single_artifact_named(
+        filename: &str,
+        version: &str,
+        download_url: &str,
+        bytes: Vec<u8>,
+        provenance_payload: Option<String>,
+    ) -> Self {
         let sha256 = hex::encode(Sha256::digest(&bytes));
         Self {
             snapshot: MirroredProjectSnapshot {
@@ -1939,8 +2033,8 @@ impl FakeMirrorClient {
                 summary: "Demo package".into(),
                 description: "Demo package".into(),
                 artifacts: vec![MirroredArtifactSnapshot {
-                    filename: "demo-1.0.0.tar.gz".into(),
-                    version: "1.0.0".into(),
+                    filename: filename.into(),
+                    version: version.into(),
                     size_bytes: bytes.len() as u64,
                     sha256,
                     blake2b_256: None,
@@ -2186,6 +2280,30 @@ impl WheelArchiveReader for UnusedWheelArchiveReader {
         _bytes: &[u8],
     ) -> Result<WheelArchiveSnapshot, ApplicationError> {
         Err(ApplicationError::External("unused wheel reader".into()))
+    }
+}
+
+struct SuspiciousWheelArchiveReader;
+
+impl WheelArchiveReader for SuspiciousWheelArchiveReader {
+    fn read_wheel(&self, _path: &Path) -> Result<WheelArchiveSnapshot, ApplicationError> {
+        Err(ApplicationError::External(
+            "path wheel reading is unused".into(),
+        ))
+    }
+
+    fn read_wheel_bytes(
+        &self,
+        wheel_filename: &str,
+        _bytes: &[u8],
+    ) -> Result<WheelArchiveSnapshot, ApplicationError> {
+        Ok(WheelArchiveSnapshot {
+            wheel_filename: wheel_filename.into(),
+            entries: vec![WheelArchiveEntry {
+                path: "demo/__init__.py".into(),
+                contents: b"import subprocess\nsubprocess.run(['python', '--version'])\n".to_vec(),
+            }],
+        })
     }
 }
 

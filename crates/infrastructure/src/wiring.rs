@@ -9,7 +9,7 @@ use crate::{
 use log::{info, warn};
 use pyregistry_application::{
     ApplicationError, NoopVulnerabilityNotifier, ObjectStorage, PyregistryApp, RegistryStore,
-    SystemClock, UuidGenerator, VulnerabilityNotifier,
+    SystemClock, UuidGenerator, VulnerabilityNotifier, WheelAuditNotifier,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,6 +48,9 @@ pub async fn build_application(
             )
         }
     };
+    let vulnerability_notifier = build_vulnerability_notifier(settings)?;
+    let wheel_audit_notifier = build_wheel_audit_notifier(settings)?;
+
     Ok(Arc::new(PyregistryApp::new(
         registry_store,
         object_storage,
@@ -59,7 +62,8 @@ pub async fn build_application(
         Arc::new(PySentryVulnerabilityScanner::new(pysentry_cache_dir(
             settings,
         ))),
-        build_vulnerability_notifier(settings)?,
+        vulnerability_notifier,
+        wheel_audit_notifier,
         Arc::new(ZipWheelArchiveReader),
         Arc::new(YaraWheelVirusScanner::from_rules_dir(
             settings.security.yara_rules_path.clone(),
@@ -133,6 +137,24 @@ fn build_vulnerability_notifier(
     );
     DiscordWebhookVulnerabilityNotifier::new(url, config.username.clone(), config.timeout_seconds)
         .map(|notifier| Arc::new(notifier) as Arc<dyn VulnerabilityNotifier>)
+        .map_err(|error| InfrastructureError::WebhookConfiguration(error.to_string()))
+}
+
+fn build_wheel_audit_notifier(
+    settings: &Settings,
+) -> Result<Arc<dyn WheelAuditNotifier>, InfrastructureError> {
+    let config = &settings.security.vulnerability_webhook;
+    let Some(url) = &config.url else {
+        info!("wheel audit webhook notifications are disabled");
+        return Ok(Arc::new(pyregistry_application::NoopWheelAuditNotifier));
+    };
+
+    info!(
+        "wheel audit webhook notifications are enabled: {}",
+        config.log_safe_summary()
+    );
+    DiscordWebhookVulnerabilityNotifier::new(url, config.username.clone(), config.timeout_seconds)
+        .map(|notifier| Arc::new(notifier) as Arc<dyn WheelAuditNotifier>)
         .map_err(|error| InfrastructureError::WebhookConfiguration(error.to_string()))
 }
 

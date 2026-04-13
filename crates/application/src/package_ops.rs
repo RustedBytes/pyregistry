@@ -1,7 +1,8 @@
 use crate::{
     ApplicationError, CancellationSignal, MirrorRefreshFailure, MirrorRefreshReport,
     MirroredProjectSnapshot, NeverCancelled, ProvenanceDescriptor, PyregistryApp,
-    SimpleArtifactLink, SimpleProject, SimpleProjectPage,
+    SimpleArtifactLink, SimpleProject, SimpleProjectPage, WheelAuditFindingNotification,
+    WheelAuditUseCase,
 };
 use futures_util::{
     FutureExt, StreamExt,
@@ -43,13 +44,14 @@ impl PyregistryApp {
             .store
             .get_project_by_normalized_name(tenant.id, project_name.normalized())
             .await?
-            && matches!(project.source, ProjectSource::Local) {
-                debug!(
-                    "using local project `{}` for tenant `{tenant_slug}` without consulting the mirror",
-                    project.name.original()
-                );
-                return Ok(Some(project));
-            }
+            && matches!(project.source, ProjectSource::Local)
+        {
+            debug!(
+                "using local project `{}` for tenant `{tenant_slug}` without consulting the mirror",
+                project.name.original()
+            );
+            return Ok(Some(project));
+        }
 
         if !tenant.mirror_rule.enabled {
             info!(
@@ -560,7 +562,17 @@ impl PyregistryApp {
             .fetch_artifact_bytes(upstream_url)
             .await?;
         validate_mirrored_artifact_payload(artifact, &bytes)?;
-        self.object_storage.put(&artifact.object_key, bytes).await?;
+        self.object_storage
+            .put(&artifact.object_key, bytes.clone())
+            .await?;
+        self.audit_cached_mirrored_wheel(
+            tenant_slug,
+            normalized_project_name,
+            version,
+            artifact,
+            &bytes,
+        )
+        .await;
         info!(
             "cached mirrored artifact `{}` for tenant `{tenant_slug}` project `{}` version `{}`",
             artifact.filename,
@@ -568,6 +580,89 @@ impl PyregistryApp {
             version.as_str()
         );
         Ok(true)
+    }
+
+    async fn audit_cached_mirrored_wheel(
+        &self,
+        tenant_slug: &str,
+        normalized_project_name: &str,
+        version: &ReleaseVersion,
+        artifact: &Artifact,
+        bytes: &[u8],
+    ) {
+        if !artifact.filename.to_ascii_lowercase().ends_with(".whl") {
+            return;
+        }
+
+        info!(
+            "running wheel security audit for mirrored artifact `{}` in tenant `{tenant_slug}` project `{}` version `{}`",
+            artifact.filename,
+            normalized_project_name,
+            version.as_str()
+        );
+
+        let archive = match self
+            .wheel_archive_reader
+            .read_wheel_bytes(&artifact.filename, bytes)
+        {
+            Ok(archive) => archive,
+            Err(error) => {
+                warn!(
+                    "wheel security audit could not read mirrored artifact `{}` for tenant `{tenant_slug}` project `{}` version `{}`: {error}",
+                    artifact.filename,
+                    normalized_project_name,
+                    version.as_str()
+                );
+                return;
+            }
+        };
+
+        let report = match WheelAuditUseCase::new(
+            self.wheel_archive_reader.clone(),
+            self.wheel_virus_scanner.clone(),
+            self.wheel_source_security_scanner.clone(),
+        )
+        .audit_archive(normalized_project_name.to_string(), archive)
+        {
+            Ok(report) => report,
+            Err(error) => {
+                warn!(
+                    "wheel security audit failed for mirrored artifact `{}` in tenant `{tenant_slug}` project `{}` version `{}`: {error}",
+                    artifact.filename,
+                    normalized_project_name,
+                    version.as_str()
+                );
+                return;
+            }
+        };
+
+        if report.findings.is_empty() {
+            debug!(
+                "wheel security audit found no suspicious findings for mirrored artifact `{}` in tenant `{tenant_slug}` project `{}` version `{}`",
+                artifact.filename,
+                normalized_project_name,
+                version.as_str()
+            );
+            return;
+        }
+
+        let notification = WheelAuditFindingNotification::from_audit_report(
+            tenant_slug,
+            version.as_str(),
+            &report,
+        );
+        if let Err(error) = self
+            .wheel_audit_notifier
+            .notify_wheel_audit_findings(&notification)
+            .await
+        {
+            warn!(
+                "failed to send wheel audit finding notification for tenant `{tenant_slug}` project `{}` version `{}` artifact `{}`: {error}",
+                normalized_project_name,
+                version.as_str(),
+                artifact.filename
+            );
+        }
     }
 }
 

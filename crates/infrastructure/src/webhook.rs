@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use pyregistry_application::{
-    ApplicationError, VulnerabilityNotifier, VulnerablePackageNotification, severity_rank,
+    ApplicationError, VulnerabilityNotifier, VulnerablePackageNotification,
+    WheelAuditFindingNotification, WheelAuditNotifier, severity_rank,
 };
 use reqwest::{Client, Url};
 use serde::Serialize;
@@ -68,6 +69,43 @@ impl VulnerabilityNotifier for DiscordWebhookVulnerabilityNotifier {
     }
 }
 
+#[async_trait]
+impl WheelAuditNotifier for DiscordWebhookVulnerabilityNotifier {
+    async fn notify_wheel_audit_findings(
+        &self,
+        notification: &WheelAuditFindingNotification,
+    ) -> Result<(), ApplicationError> {
+        let payload =
+            DiscordWebhookPayload::for_wheel_audit_findings(notification, self.username.as_deref());
+        post_webhook_payload(&self.client, self.endpoint.clone(), &payload).await
+    }
+}
+
+async fn post_webhook_payload(
+    client: &Client,
+    endpoint: Url,
+    payload: &DiscordWebhookPayload,
+) -> Result<(), ApplicationError> {
+    let response = client
+        .post(endpoint)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|error| {
+            ApplicationError::External(format!("vulnerability webhook POST failed: {error}"))
+        })?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+
+    let body = response.text().await.unwrap_or_default();
+    Err(ApplicationError::External(format!(
+        "vulnerability webhook returned HTTP {status}: {}",
+        truncate_response_body(&body)
+    )))
+}
+
 #[derive(Debug, Serialize)]
 struct DiscordWebhookPayload {
     content: String,
@@ -118,6 +156,70 @@ impl DiscordWebhookPayload {
             allowed_mentions: DiscordAllowedMentions { parse: Vec::new() },
         }
     }
+
+    fn for_wheel_audit_findings(
+        notification: &WheelAuditFindingNotification,
+        username: Option<&str>,
+    ) -> Self {
+        let package = format!(
+            "{}/{} {}",
+            notification.tenant_slug, notification.project_name, notification.version
+        );
+        let mut fields = vec![
+            DiscordEmbedField::inline("Tenant", &notification.tenant_slug),
+            DiscordEmbedField::inline("Package", &notification.project_name),
+            DiscordEmbedField::inline("Version", &notification.version),
+            DiscordEmbedField::inline("Wheel", &notification.wheel_filename),
+            DiscordEmbedField::inline("Scanned files", notification.scanned_file_count.to_string()),
+            DiscordEmbedField::inline("Findings", notification.findings.len().to_string()),
+        ];
+
+        if let Some(error) = &notification.source_security_scan_error {
+            fields.push(DiscordEmbedField::new(
+                "Source scan warning",
+                truncate_field_value(error),
+                false,
+            ));
+        }
+        if let Some(error) = &notification.virus_scan_error {
+            fields.push(DiscordEmbedField::new(
+                "Virus scan warning",
+                truncate_field_value(error),
+                false,
+            ));
+        }
+
+        let finding_summary = notification
+            .findings
+            .iter()
+            .take(8)
+            .map(format_wheel_finding)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !finding_summary.is_empty() {
+            fields.push(DiscordEmbedField::new(
+                "Finding summary",
+                truncate_field_value(&finding_summary),
+                false,
+            ));
+        }
+
+        Self {
+            content: format!(
+                "Wheel security findings detected: `{package}` `{}`",
+                notification.wheel_filename
+            ),
+            username: username.map(ToOwned::to_owned),
+            embeds: vec![DiscordEmbed {
+                title: "Wheel security findings detected".into(),
+                description:
+                    "The mirrored wheel update scan found suspicious install-time signals.".into(),
+                color: 0xe67e22,
+                fields,
+            }],
+            allowed_mentions: DiscordAllowedMentions { parse: Vec::new() },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -136,12 +238,16 @@ struct DiscordEmbedField {
 }
 
 impl DiscordEmbedField {
-    fn inline(name: impl Into<String>, value: impl ToString) -> Self {
+    fn new(name: impl Into<String>, value: impl ToString, inline: bool) -> Self {
         Self {
             name: name.into(),
             value: value.to_string(),
-            inline: true,
+            inline,
         }
+    }
+
+    fn inline(name: impl Into<String>, value: impl ToString) -> Self {
+        Self::new(name, value, true)
     }
 }
 
@@ -172,9 +278,34 @@ fn truncate_response_body(body: &str) -> String {
     truncated
 }
 
+fn truncate_field_value(value: &str) -> String {
+    const MAX_LEN: usize = 1000;
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= MAX_LEN {
+        return trimmed.to_string();
+    }
+    let mut truncated = trimmed.chars().take(MAX_LEN).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn format_wheel_finding(finding: &pyregistry_application::WheelAuditFinding) -> String {
+    let path = finding.path.as_deref().unwrap_or("archive");
+    let evidence = if finding.evidence.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", finding.evidence.join(", "))
+    };
+    format!(
+        "- {:?}: {}: {}{}",
+        finding.kind, path, finding.summary, evidence
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pyregistry_application::{WheelAuditFinding, WheelAuditFindingKind};
     use serde_json::Value;
 
     #[test]
@@ -208,6 +339,56 @@ mod tests {
                     fields
                         .iter()
                         .any(|field| field["name"] == "Advisory matches" && field["value"] == "4")
+                })
+        );
+    }
+
+    #[test]
+    fn discord_payload_contains_wheel_audit_finding_summary() {
+        let notification = WheelAuditFindingNotification {
+            tenant_slug: "acme".into(),
+            project_name: "demo".into(),
+            version: "1.0.0".into(),
+            wheel_filename: "demo-1.0.0-py3-none-any.whl".into(),
+            scanned_file_count: 12,
+            source_security_scan_error: None,
+            virus_scan_error: Some("rules unavailable".into()),
+            findings: vec![WheelAuditFinding {
+                kind: WheelAuditFindingKind::PostInstallClue,
+                path: Some("demo.pth".into()),
+                summary: "package contents include post-install or startup behavior clues".into(),
+                evidence: vec!["`.pth` file executes import-time code".into()],
+            }],
+        };
+
+        let payload =
+            DiscordWebhookPayload::for_wheel_audit_findings(&notification, Some("Pyregistry"));
+        let json = serde_json::to_value(payload).expect("payload json");
+
+        assert_eq!(json["username"], "Pyregistry");
+        assert_eq!(
+            json["content"],
+            "Wheel security findings detected: `acme/demo 1.0.0` `demo-1.0.0-py3-none-any.whl`"
+        );
+        assert_eq!(json["allowed_mentions"]["parse"], Value::Array(Vec::new()));
+        assert_eq!(
+            json["embeds"][0]["title"],
+            "Wheel security findings detected"
+        );
+        assert_eq!(json["embeds"][0]["color"], 0xe67e22);
+        assert!(
+            json["embeds"][0]["fields"]
+                .as_array()
+                .is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .any(|field| field["name"] == "Findings" && field["value"] == "1")
+                        && fields.iter().any(|field| {
+                            field["name"] == "Finding summary"
+                                && field["value"].as_str().is_some_and(|value| {
+                                    value.contains("PostInstallClue") && value.contains("demo.pth")
+                                })
+                        })
                 })
         );
     }

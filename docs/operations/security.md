@@ -89,7 +89,7 @@ scripts/pyregistry-release.sh check-registry --tenant acme
 ```
 
 Configure a Discord-compatible webhook to notify when `check-registry` finds a
-vulnerable package:
+vulnerable package, and when mirrored wheel updates produce wheel-audit findings:
 
 ```toml
 [security.vulnerability_webhook]
@@ -98,9 +98,11 @@ username = "Pyregistry"
 timeout_seconds = 10
 ```
 
-The posted payload includes `content`, `embeds`, and disabled mentions. It
-summarizes the tenant, package, scanned files, vulnerable files, advisory match
-count, and highest severity.
+The posted payload includes `content`, `embeds`, and disabled mentions. For
+known vulnerabilities it summarizes the tenant, package, scanned files,
+vulnerable files, advisory match count, and highest severity. For wheel audit
+findings it summarizes the tenant, package, version, wheel filename, scanned
+files, and finding details.
 
 Treat results as a signal, not a full risk decision. Combine them with company
 policy, dependency ownership, and release criticality.
@@ -122,7 +124,9 @@ Run:
 scripts/pyregistry-release.sh audit-wheel --project example --wheel path/to/file.whl
 ```
 
-The admin UI exposes wheel scans from package pages.
+The admin UI exposes wheel scans from package pages. Background mirror updates
+also scan newly cached wheels and publish webhook notifications when findings
+are present.
 
 ## YARA Rules
 

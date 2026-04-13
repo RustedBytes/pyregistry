@@ -183,8 +183,9 @@ If the configured YARA directory is readable, Pyregistry uses it. Otherwise it
 falls back to bundled supplied rules embedded at compile time.
 
 Set `security.vulnerability_webhook.url` to enable Discord-compatible webhook
-notifications from `check-registry` when vulnerable packages are found. The
-webhook URL is redacted from logs; leave `url` unset to disable notifications.
+notifications from `check-registry` when vulnerable packages are found and from
+mirror updates when cached wheel audits report findings. The webhook URL is
+redacted from logs; leave `url` unset to disable notifications.
 
 ## Logging
 

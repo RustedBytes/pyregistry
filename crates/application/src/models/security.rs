@@ -1,3 +1,4 @@
+use super::{WheelAuditFinding, WheelAuditReport};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -146,6 +147,38 @@ impl VulnerablePackageNotification {
             vulnerable_file_count: report.security.vulnerable_file_count,
             vulnerability_count: report.security.vulnerability_count,
             highest_severity: report.security.highest_severity.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WheelAuditFindingNotification {
+    pub tenant_slug: String,
+    pub project_name: String,
+    pub version: String,
+    pub wheel_filename: String,
+    pub scanned_file_count: usize,
+    pub source_security_scan_error: Option<String>,
+    pub virus_scan_error: Option<String>,
+    pub findings: Vec<WheelAuditFinding>,
+}
+
+impl WheelAuditFindingNotification {
+    #[must_use]
+    pub fn from_audit_report(
+        tenant_slug: impl Into<String>,
+        version: impl Into<String>,
+        report: &WheelAuditReport,
+    ) -> Self {
+        Self {
+            tenant_slug: tenant_slug.into(),
+            project_name: report.project_name.clone(),
+            version: version.into(),
+            wheel_filename: report.wheel_filename.clone(),
+            scanned_file_count: report.scanned_file_count,
+            source_security_scan_error: report.source_security_scan.scan_error.clone(),
+            virus_scan_error: report.virus_scan.scan_error.clone(),
+            findings: report.findings.clone(),
         }
     }
 }

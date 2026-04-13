@@ -2,7 +2,7 @@ use super::{
     DistributionInspection, MirroredProjectSnapshot, PackageVulnerabilityQuery,
     PackageVulnerabilityReport, RecentActivity, RegistryOverview, ReleaseArtifacts, SearchHit,
     TenantDashboardStats, VulnerablePackageNotification, WheelArchiveSnapshot,
-    WheelSourceSecurityScanResult, WheelVirusScanResult,
+    WheelAuditFindingNotification, WheelSourceSecurityScanResult, WheelVirusScanResult,
 };
 use crate::ApplicationError;
 use async_trait::async_trait;
@@ -251,6 +251,26 @@ impl VulnerabilityNotifier for NoopVulnerabilityNotifier {
     async fn notify_vulnerable_package(
         &self,
         _notification: &VulnerablePackageNotification,
+    ) -> Result<(), ApplicationError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+pub trait WheelAuditNotifier: Send + Sync {
+    async fn notify_wheel_audit_findings(
+        &self,
+        notification: &WheelAuditFindingNotification,
+    ) -> Result<(), ApplicationError>;
+}
+
+pub struct NoopWheelAuditNotifier;
+
+#[async_trait]
+impl WheelAuditNotifier for NoopWheelAuditNotifier {
+    async fn notify_wheel_audit_findings(
+        &self,
+        _notification: &WheelAuditFindingNotification,
     ) -> Result<(), ApplicationError> {
         Ok(())
     }

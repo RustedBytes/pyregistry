@@ -1,7 +1,8 @@
 use crate::{
     ApplicationError, AttestationSigner, Clock, IdGenerator, MirrorClient, ObjectStorage,
     OidcVerifier, PasswordHasher, RegistryStore, TokenHasher, VulnerabilityNotifier,
-    VulnerabilityScanner, WheelArchiveReader, WheelSourceSecurityScanner, WheelVirusScanner,
+    VulnerabilityScanner, WheelArchiveReader, WheelAuditNotifier, WheelSourceSecurityScanner,
+    WheelVirusScanner,
 };
 use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
@@ -19,6 +20,7 @@ pub struct PyregistryApp {
     pub(crate) token_hasher: Arc<dyn TokenHasher>,
     pub(crate) vulnerability_scanner: Arc<dyn VulnerabilityScanner>,
     pub(crate) vulnerability_notifier: Arc<dyn VulnerabilityNotifier>,
+    pub(crate) wheel_audit_notifier: Arc<dyn WheelAuditNotifier>,
     pub(crate) wheel_archive_reader: Arc<dyn WheelArchiveReader>,
     pub(crate) wheel_virus_scanner: Arc<dyn WheelVirusScanner>,
     pub(crate) wheel_source_security_scanner: Arc<dyn WheelSourceSecurityScanner>,
@@ -40,6 +42,7 @@ impl PyregistryApp {
         token_hasher: Arc<dyn TokenHasher>,
         vulnerability_scanner: Arc<dyn VulnerabilityScanner>,
         vulnerability_notifier: Arc<dyn VulnerabilityNotifier>,
+        wheel_audit_notifier: Arc<dyn WheelAuditNotifier>,
         wheel_archive_reader: Arc<dyn WheelArchiveReader>,
         wheel_virus_scanner: Arc<dyn WheelVirusScanner>,
         wheel_source_security_scanner: Arc<dyn WheelSourceSecurityScanner>,
@@ -57,6 +60,7 @@ impl PyregistryApp {
             token_hasher,
             vulnerability_scanner,
             vulnerability_notifier,
+            wheel_audit_notifier,
             wheel_archive_reader,
             wheel_virus_scanner,
             wheel_source_security_scanner,
