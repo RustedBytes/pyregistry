@@ -3,11 +3,15 @@ use crate::{
     DependencyVulnerabilityQuery, DependencyVulnerabilityReport, PackageDetails,
     PackageReleaseDetails, PackageSecuritySummary, PackageVulnerabilityQuery, PyregistryApp,
     RegistryPackageSecurityReport, RegistrySecurityReport, VulnerablePackageNotification,
-    WheelArchiveSnapshot, severity_rank,
+    WheelArchiveReader, WheelArchiveSnapshot, severity_rank,
 };
+use futures_channel::oneshot;
+use futures_util::{StreamExt, stream};
 use log::{debug, info, warn};
 use pyregistry_domain::{Project, Tenant};
+use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 impl PyregistryApp {
     pub(crate) async fn attach_package_security(
@@ -85,37 +89,18 @@ impl PyregistryApp {
         };
         let mut per_version_errors = BTreeSet::new();
 
-        for release in releases.iter_mut() {
-            let Some(report) = reports_by_version.get(&release.version) else {
-                let message = "vulnerability scan did not return a result for this version";
-                per_version_errors.insert(format!("{}: {message}", release.version));
-                for artifact in &mut release.artifacts {
-                    artifact.security = ArtifactSecurityDetails::failed(message);
-                }
-                continue;
-            };
+        let release_security_results = releases
+            .par_iter_mut()
+            .map(|release| attach_release_security(release, &reports_by_version))
+            .collect::<Vec<_>>();
 
-            if let Some(error) = &report.scan_error {
-                per_version_errors.insert(format!("{}: {error}", release.version));
-                for artifact in &mut release.artifacts {
-                    artifact.security = ArtifactSecurityDetails::failed(error.clone());
-                }
-                continue;
-            }
-
-            for artifact in &mut release.artifacts {
-                let security = ArtifactSecurityDetails::scanned(report.vulnerabilities.clone());
-                summary.scanned_file_count += 1;
-                summary.vulnerability_count += security.vulnerability_count;
-                if security.vulnerability_count > 0 {
-                    summary.vulnerable_file_count += 1;
-                }
-                summary.highest_severity = max_severity(
-                    summary.highest_severity.take(),
-                    security.highest_severity.clone(),
-                );
-                artifact.security = security;
-            }
+        for result in release_security_results {
+            summary.scanned_file_count += result.scanned_file_count;
+            summary.vulnerable_file_count += result.vulnerable_file_count;
+            summary.vulnerability_count += result.vulnerability_count;
+            summary.highest_severity =
+                max_severity(summary.highest_severity.take(), result.highest_severity);
+            per_version_errors.extend(result.errors);
         }
 
         self.attach_dependency_security(package_name, releases, &mut summary)
@@ -146,60 +131,68 @@ impl PyregistryApp {
         releases: &mut [PackageReleaseDetails],
         summary: &mut PackageSecuritySummary,
     ) {
-        let mut targets = Vec::new();
+        let mut wheel_targets = Vec::new();
         let mut queries = BTreeMap::new();
 
-        for (release_index, release) in releases.iter_mut().enumerate() {
-            for (artifact_index, artifact) in release.artifacts.iter_mut().enumerate() {
+        for (release_index, release) in releases.iter().enumerate() {
+            for (artifact_index, artifact) in release.artifacts.iter().enumerate() {
                 if !artifact.filename.to_ascii_lowercase().ends_with(".whl") {
                     continue;
                 }
 
-                let bytes = match self.object_storage.get(&artifact.object_key).await {
-                    Ok(Some(bytes)) => bytes,
-                    Ok(None) => {
-                        artifact.security.dependency_scan_error =
-                            Some("wheel bytes are not cached, so pinned requirements could not be scanned".into());
-                        continue;
-                    }
-                    Err(error) => {
-                        artifact.security.dependency_scan_error = Some(error.to_string());
-                        continue;
-                    }
-                };
+                wheel_targets.push(WheelDependencyScanTarget {
+                    release_index,
+                    artifact_index,
+                    filename: artifact.filename.clone(),
+                    object_key: artifact.object_key.clone(),
+                });
+            }
+        }
 
-                let archive = match self
-                    .wheel_archive_reader
-                    .read_wheel_bytes(&artifact.filename, &bytes)
-                {
-                    Ok(archive) => archive,
-                    Err(error) => {
-                        artifact.security.dependency_scan_error = Some(error.to_string());
-                        continue;
-                    }
-                };
+        if wheel_targets.is_empty() {
+            return;
+        }
 
-                let requirements = pinned_requirements_from_wheel(&archive);
-                if requirements.is_empty() {
-                    continue;
-                }
+        let parallelism = dependency_scan_parallelism(wheel_targets.len());
+        debug!(
+            "extracting pinned wheel requirements for package `{package_name}` from {} wheel artifact(s) with parallelism={parallelism}",
+            wheel_targets.len()
+        );
+        let extraction_results = stream::iter(wheel_targets.into_iter().map(|target| {
+            extract_dependency_scan_requirements(
+                self.object_storage.clone(),
+                self.wheel_archive_reader.clone(),
+                target,
+            )
+        }))
+        .buffer_unordered(parallelism)
+        .collect::<Vec<_>>()
+        .await;
 
-                for requirement in requirements {
-                    queries
-                        .entry((
-                            requirement.package_name.clone(),
-                            requirement.version.clone(),
-                        ))
-                        .or_insert_with(|| DependencyVulnerabilityQuery {
-                            package_name: requirement.package_name.clone(),
-                            version: requirement.version.clone(),
-                        });
-                    targets.push(DependencyScanTarget {
-                        release_index,
-                        artifact_index,
-                        requirement,
+        let mut targets = Vec::new();
+        for result in extraction_results {
+            if let Some(error) = result.scan_error {
+                releases[result.release_index].artifacts[result.artifact_index]
+                    .security
+                    .dependency_scan_error = Some(error);
+                continue;
+            }
+
+            for requirement in result.requirements {
+                queries
+                    .entry((
+                        requirement.package_name.clone(),
+                        requirement.version.clone(),
+                    ))
+                    .or_insert_with(|| DependencyVulnerabilityQuery {
+                        package_name: requirement.package_name.clone(),
+                        version: requirement.version.clone(),
                     });
-                }
+                targets.push(DependencyScanTarget {
+                    release_index: result.release_index,
+                    artifact_index: result.artifact_index,
+                    requirement,
+                });
             }
         }
 
@@ -422,6 +415,58 @@ fn max_severity(left: Option<String>, right: Option<String>) -> Option<String> {
     }
 }
 
+fn attach_release_security(
+    release: &mut PackageReleaseDetails,
+    reports_by_version: &BTreeMap<String, crate::PackageVulnerabilityReport>,
+) -> PackageReleaseSecurityResult {
+    let Some(report) = reports_by_version.get(&release.version) else {
+        let message = "vulnerability scan did not return a result for this version";
+        for artifact in &mut release.artifacts {
+            artifact.security = ArtifactSecurityDetails::failed(message);
+        }
+        return PackageReleaseSecurityResult {
+            errors: vec![format!("{}: {message}", release.version)],
+            ..PackageReleaseSecurityResult::default()
+        };
+    };
+
+    if let Some(error) = &report.scan_error {
+        for artifact in &mut release.artifacts {
+            artifact.security = ArtifactSecurityDetails::failed(error.clone());
+        }
+        return PackageReleaseSecurityResult {
+            errors: vec![format!("{}: {error}", release.version)],
+            ..PackageReleaseSecurityResult::default()
+        };
+    }
+
+    let mut result = PackageReleaseSecurityResult::default();
+    for artifact in &mut release.artifacts {
+        let security = ArtifactSecurityDetails::scanned(report.vulnerabilities.clone());
+        result.scanned_file_count += 1;
+        result.vulnerability_count += security.vulnerability_count;
+        if security.vulnerability_count > 0 {
+            result.vulnerable_file_count += 1;
+        }
+        result.highest_severity = max_severity(
+            result.highest_severity.take(),
+            security.highest_severity.clone(),
+        );
+        artifact.security = security;
+    }
+
+    result
+}
+
+#[derive(Debug, Default)]
+struct PackageReleaseSecurityResult {
+    scanned_file_count: usize,
+    vulnerable_file_count: usize,
+    vulnerability_count: usize,
+    highest_severity: Option<String>,
+    errors: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct DependencyScanTarget {
     release_index: usize,
@@ -429,11 +474,104 @@ struct DependencyScanTarget {
     requirement: PinnedRequirement,
 }
 
+#[derive(Debug, Clone)]
+struct WheelDependencyScanTarget {
+    release_index: usize,
+    artifact_index: usize,
+    filename: String,
+    object_key: String,
+}
+
+#[derive(Debug, Clone)]
+struct WheelDependencyScanResult {
+    release_index: usize,
+    artifact_index: usize,
+    requirements: Vec<PinnedRequirement>,
+    scan_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PinnedRequirement {
     requirement: String,
     package_name: String,
     version: String,
+}
+
+async fn extract_dependency_scan_requirements(
+    object_storage: Arc<dyn crate::ObjectStorage>,
+    wheel_archive_reader: Arc<dyn WheelArchiveReader>,
+    target: WheelDependencyScanTarget,
+) -> WheelDependencyScanResult {
+    let bytes = match object_storage.get(&target.object_key).await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            return WheelDependencyScanResult {
+                release_index: target.release_index,
+                artifact_index: target.artifact_index,
+                requirements: Vec::new(),
+                scan_error: Some(
+                    "wheel bytes are not cached, so pinned requirements could not be scanned"
+                        .into(),
+                ),
+            };
+        }
+        Err(error) => {
+            return WheelDependencyScanResult {
+                release_index: target.release_index,
+                artifact_index: target.artifact_index,
+                requirements: Vec::new(),
+                scan_error: Some(error.to_string()),
+            };
+        }
+    };
+
+    match pinned_requirements_from_wheel_bytes_on_rayon(
+        wheel_archive_reader,
+        target.filename.clone(),
+        bytes,
+    )
+    .await
+    {
+        Ok(requirements) => WheelDependencyScanResult {
+            release_index: target.release_index,
+            artifact_index: target.artifact_index,
+            requirements,
+            scan_error: None,
+        },
+        Err(error) => WheelDependencyScanResult {
+            release_index: target.release_index,
+            artifact_index: target.artifact_index,
+            requirements: Vec::new(),
+            scan_error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn pinned_requirements_from_wheel_bytes_on_rayon(
+    wheel_archive_reader: Arc<dyn WheelArchiveReader>,
+    filename: String,
+    bytes: Vec<u8>,
+) -> Result<Vec<PinnedRequirement>, ApplicationError> {
+    let (sender, receiver) = oneshot::channel();
+    rayon::spawn(move || {
+        let result = wheel_archive_reader
+            .read_wheel_bytes(&filename, &bytes)
+            .map(|archive| pinned_requirements_from_wheel(&archive));
+        let _ = sender.send(result);
+    });
+    receiver.await.map_err(|_| {
+        ApplicationError::External(
+            "wheel dependency scan worker stopped before sending a result".to_string(),
+        )
+    })?
+}
+
+fn dependency_scan_parallelism(target_count: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(target_count)
+        .max(1)
 }
 
 fn pinned_requirements_from_wheel(archive: &WheelArchiveSnapshot) -> Vec<PinnedRequirement> {
@@ -525,6 +663,7 @@ fn pinned_requirement(requirement: &str) -> Option<PinnedRequirement> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn registry_security_report_aggregates_package_summaries() {
@@ -589,6 +728,48 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn extracts_pinned_wheel_requirements_on_rayon_worker() {
+        let requirements = pinned_requirements_from_wheel_bytes_on_rayon(
+            Arc::new(MetadataWheelArchiveReader),
+            "demo-1.0.0-py3-none-any.whl".into(),
+            b"zip bytes".to_vec(),
+        )
+        .await
+        .expect("requirements");
+
+        assert_eq!(
+            requirements,
+            vec![PinnedRequirement {
+                requirement: "requests==2.31.0".into(),
+                package_name: "requests".into(),
+                version: "2.31.0".into(),
+            }]
+        );
+    }
+
+    struct MetadataWheelArchiveReader;
+
+    impl WheelArchiveReader for MetadataWheelArchiveReader {
+        fn read_wheel(&self, _path: &Path) -> Result<WheelArchiveSnapshot, ApplicationError> {
+            Err(ApplicationError::External("path reader is unused".into()))
+        }
+
+        fn read_wheel_bytes(
+            &self,
+            wheel_filename: &str,
+            _bytes: &[u8],
+        ) -> Result<WheelArchiveSnapshot, ApplicationError> {
+            Ok(WheelArchiveSnapshot {
+                wheel_filename: wheel_filename.into(),
+                entries: vec![crate::WheelArchiveEntry {
+                    path: "demo-1.0.0.dist-info/METADATA".into(),
+                    contents: b"Name: demo\nRequires-Dist: requests==2.31.0\n".to_vec(),
+                }],
+            })
+        }
     }
 
     fn package_report(
