@@ -38,13 +38,17 @@ default = [
     "sqlserver",
     "opendal-fs",
     "s3",
-    "security-full",
+    "security-default",
 ]
 sqlite = ["pyregistry-infrastructure/sqlite"]
 postgres = ["pyregistry-infrastructure/postgres"]
 sqlserver = ["pyregistry-infrastructure/sqlserver"]
 opendal-fs = ["pyregistry-infrastructure/opendal-fs"]
 s3 = ["pyregistry-infrastructure/s3"]
+security-default = [
+    "source-security",
+    "vulnerability-db",
+]
 security-full = [
     "source-security",
     "file-type-ml",

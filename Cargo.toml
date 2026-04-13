@@ -47,7 +47,7 @@ log = "0.4"
 magika = "1.0.1"
 mime = "0.3"
 opendal = { version = "0.55", default-features = false }
-ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std"] }
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "download-binaries", "tls-rustls", "copy-dylibs"] }
 password-hash = { version = "0.6", features = ["getrandom"] }
 pep440 = "0.2"
 pysentry = "0.4.4"
