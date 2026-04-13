@@ -8,15 +8,24 @@ permissions:
 
 jobs:
   test:
-    name: Test ${{ matrix.os }}
+    name: Test ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
+        include:
+          - name: ubuntu
+            os: ubuntu-latest
+            rustflags: ""
+          - name: windows
+            os: windows-latest
+            rustflags: ""
+          - name: macos-x86_64
+            os: macos-15-intel
+            rustflags: ""
+          - name: macos-aarch64
+            os: macos-15
+            rustflags: -Ctarget-feature=-sha3
 
     steps:
       - name: Checkout code
@@ -30,7 +39,9 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          key: stable-${{ matrix.os }}
+          key: stable-${{ matrix.name }}
 
       - name: Run tests
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo test --workspace --all-targets --locked
