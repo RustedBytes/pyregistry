@@ -67,6 +67,10 @@ fn round_trips_settings_through_toml_shape() {
         original.network_source.trust_proxy_headers
     );
     assert_eq!(
+        round_trip.web_ui.show_index_stats,
+        original.web_ui.show_index_stats
+    );
+    assert_eq!(
         round_trip.validation.distribution_parallelism,
         original.validation.distribution_parallelism
     );
@@ -256,6 +260,7 @@ fn rejects_s3_storage_without_bucket() {
         security: Some(default_security_config().into()),
         rate_limit: Some(default_rate_limit_config().into()),
         network_source: Some(default_network_source_config().into()),
+        web_ui: Some(default_web_ui_config().into()),
         validation: Some(default_validation_config().into()),
         logging: Some(LoggingConfigFile {
             filter: "info".into(),
@@ -367,6 +372,7 @@ fn rejects_pgsql_store_without_postgres_config() {
         security: Some(default_security_config().into()),
         rate_limit: Some(default_rate_limit_config().into()),
         network_source: Some(default_network_source_config().into()),
+        web_ui: Some(default_web_ui_config().into()),
         validation: Some(default_validation_config().into()),
         logging: Some(LoggingConfigFile {
             filter: "info".into(),
@@ -414,6 +420,7 @@ fn rejects_sqlserver_store_without_sql_server_config() {
         security: Some(default_security_config().into()),
         rate_limit: Some(default_rate_limit_config().into()),
         network_source: Some(default_network_source_config().into()),
+        web_ui: Some(default_web_ui_config().into()),
         validation: Some(default_validation_config().into()),
         logging: Some(LoggingConfigFile {
             filter: "info".into(),

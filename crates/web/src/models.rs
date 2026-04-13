@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct IndexTemplate {
     pub(crate) overview: RegistryOverview,
     pub(crate) total_storage_human: String,
+    pub(crate) show_stats: bool,
 }
 
 #[derive(Template)]

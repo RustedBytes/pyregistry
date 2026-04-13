@@ -40,6 +40,7 @@ pub(crate) async fn index(State(state): State<AppState>) -> Result<Html<String>,
     render_html(IndexTemplate {
         total_storage_human: human_bytes(overview.total_storage_bytes),
         overview,
+        show_stats: state.show_index_stats,
     })
 }
 

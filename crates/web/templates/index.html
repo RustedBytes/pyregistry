@@ -258,38 +258,42 @@
           <h1>Trusted packages for teams that ship in private.</h1>
           <p class="lede">Mirror public dependencies, publish internal releases, and keep tenant governance close to the registry data your teams rely on.</p>
         </div>
-        <aside class="status-panel" aria-label="Registry status">
-          <h2>Registry snapshot</h2>
-          <p>{{ overview.project_count }} projects, {{ overview.release_count }} releases, and {{ total_storage_human }} of stored package data are available across active tenants.</p>
-        </aside>
+        {% if show_stats %}
+          <aside class="status-panel" aria-label="Registry status">
+            <h2>Registry snapshot</h2>
+            <p>{{ overview.project_count }} projects, {{ overview.release_count }} releases, and {{ total_storage_human }} of stored package data are available across active tenants.</p>
+          </aside>
+        {% endif %}
       </section>
 
-      <section class="metric-grid" aria-label="Registry metrics">
-        <div class="metric">
-          <strong>{{ overview.tenant_count }}</strong>
-          <span>Tenants</span>
-        </div>
-        <div class="metric highlight">
-          <strong>{{ overview.project_count }}</strong>
-          <span>Projects</span>
-        </div>
-        <div class="metric">
-          <strong>{{ overview.release_count }}</strong>
-          <span>Releases</span>
-        </div>
-        <div class="metric">
-          <strong>{{ overview.artifact_count }}</strong>
-          <span>Artifacts</span>
-        </div>
-        <div class="metric">
-          <strong>{{ total_storage_human }}</strong>
-          <span>Stored data</span>
-        </div>
-        <div class="metric">
-          <strong>{{ overview.mirrored_project_count }}</strong>
-          <span>Mirrored projects</span>
-        </div>
-      </section>
+      {% if show_stats %}
+        <section class="metric-grid" aria-label="Registry metrics">
+          <div class="metric">
+            <strong>{{ overview.tenant_count }}</strong>
+            <span>Tenants</span>
+          </div>
+          <div class="metric highlight">
+            <strong>{{ overview.project_count }}</strong>
+            <span>Projects</span>
+          </div>
+          <div class="metric">
+            <strong>{{ overview.release_count }}</strong>
+            <span>Releases</span>
+          </div>
+          <div class="metric">
+            <strong>{{ overview.artifact_count }}</strong>
+            <span>Artifacts</span>
+          </div>
+          <div class="metric">
+            <strong>{{ total_storage_human }}</strong>
+            <span>Stored data</span>
+          </div>
+          <div class="metric">
+            <strong>{{ overview.mirrored_project_count }}</strong>
+            <span>Mirrored projects</span>
+          </div>
+        </section>
+      {% endif %}
 
       <p class="footer-note">Use the admin console for tenant controls, package governance, trusted publishers, mirroring, and audit history.</p>
     </main>

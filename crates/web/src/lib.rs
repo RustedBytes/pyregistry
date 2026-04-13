@@ -408,6 +408,7 @@ mod tests {
             mirror_jobs: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: RateLimiter::disabled(),
             network_source: NetworkSourcePolicy::allow_all(),
+            show_index_stats: true,
         }
     }
 
@@ -470,6 +471,11 @@ mod tests {
 
     fn with_network_source(mut state: AppState, config: NetworkSourceConfig) -> AppState {
         state.network_source = NetworkSourcePolicy::new(config);
+        state
+    }
+
+    fn without_index_stats(mut state: AppState) -> AppState {
+        state.show_index_stats = false;
         state
     }
 
@@ -541,6 +547,27 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         assert!(body_text(response).await.contains("pyregistry"));
+    }
+
+    #[tokio::test]
+    async fn router_can_hide_public_index_stats() {
+        let app = router(without_index_stats(state().await));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("Pyregistry"));
+        assert!(!body.contains("Registry snapshot"));
+        assert!(!body.contains("Registry metrics"));
     }
 
     #[tokio::test]

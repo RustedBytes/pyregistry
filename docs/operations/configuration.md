@@ -205,6 +205,16 @@ By default checks use the direct TCP peer IP. Set
 `network_source.trust_proxy_headers = true` only behind a trusted reverse proxy
 that controls `X-Forwarded-For`, `X-Real-IP`, or `Forwarded`.
 
+## Web UI
+
+```toml
+[web_ui]
+show_index_stats = true
+```
+
+Set `show_index_stats = false` to hide the public index page registry snapshot
+and metric grid.
+
 ## Security And Validation
 
 ```toml
@@ -343,6 +353,7 @@ Common environment variables:
 | `NETWORK_SOURCE_WEB_UI_ALLOWED_CIDRS` | Comma-separated Web UI source IPs or CIDRs; empty allows all. |
 | `NETWORK_SOURCE_API_ALLOWED_CIDRS` | Comma-separated API source IPs or CIDRs; empty allows all. |
 | `NETWORK_SOURCE_TRUST_PROXY_HEADERS` | Use trusted proxy headers for network source checks. |
+| `WEB_UI_SHOW_INDEX_STATS` | Show public index page registry snapshot and metrics. |
 | `VALIDATION_DISTRIBUTION_PARALLELISM` | Default artifact validation workers. |
 | `LOG_FILTER` | Log filter string. |
 | `LOG_MODULE_PATH` | Include module paths in logs. |

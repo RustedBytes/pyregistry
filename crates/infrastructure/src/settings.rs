@@ -26,6 +26,7 @@ pub struct Settings {
     pub security: SecurityConfig,
     pub rate_limit: RateLimitConfig,
     pub network_source: NetworkSourceConfig,
+    pub web_ui: WebUiConfig,
     pub validation: ValidationConfig,
     pub logging: LoggingConfig,
     pub oidc_issuers: Vec<OidcIssuerConfig>,
@@ -163,6 +164,9 @@ impl Settings {
                 api_allowed_cidrs: read_csv_env("NETWORK_SOURCE_API_ALLOWED_CIDRS"),
                 trust_proxy_headers: read_env_bool("NETWORK_SOURCE_TRUST_PROXY_HEADERS", false),
             },
+            web_ui: WebUiConfig {
+                show_index_stats: read_env_bool("WEB_UI_SHOW_INDEX_STATS", true),
+            },
             validation: ValidationConfig {
                 distribution_parallelism: read_env_usize(
                     "VALIDATION_DISTRIBUTION_PARALLELISM",
@@ -193,6 +197,7 @@ impl Settings {
             security: default_security_config(),
             rate_limit: default_rate_limit_config(),
             network_source: default_network_source_config(),
+            web_ui: default_web_ui_config(),
             validation: default_validation_config(),
             logging: default_logging_config(),
             oidc_issuers: default_oidc_issuers(),
@@ -268,7 +273,7 @@ impl Settings {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, sql_server={}, security={}, rate_limit={}, network_source={}, validation={}, logging={}, oidc_issuers={}",
+            "bind_address={}, blob_root={}, superadmin_email={}, database_store={}, artifact_storage={}, pypi={}, sqlite={}, postgres={}, sql_server={}, security={}, rate_limit={}, network_source={}, web_ui={}, validation={}, logging={}, oidc_issuers={}",
             self.bind_address,
             self.blob_root.display(),
             self.superadmin_email,
@@ -287,6 +292,7 @@ impl Settings {
             self.security.log_safe_summary(),
             self.rate_limit.log_safe_summary(),
             self.network_source.log_safe_summary(),
+            self.web_ui.log_safe_summary(),
             self.validation.log_safe_summary(),
             self.logging.log_safe_summary(),
             self.oidc_issuers.len()
@@ -832,6 +838,18 @@ impl NetworkSourceConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct WebUiConfig {
+    pub show_index_stats: bool,
+}
+
+impl WebUiConfig {
+    #[must_use]
+    pub fn log_safe_summary(&self) -> String {
+        format!("show_index_stats={}", self.show_index_stats)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ValidationConfig {
     pub distribution_parallelism: usize,
 }
@@ -965,6 +983,7 @@ struct SettingsFile {
     security: Option<SecurityConfigFile>,
     rate_limit: Option<RateLimitConfigFile>,
     network_source: Option<NetworkSourceConfigFile>,
+    web_ui: Option<WebUiConfigFile>,
     validation: Option<ValidationConfigFile>,
     logging: Option<LoggingConfigFile>,
     oidc_issuers: Vec<OidcIssuerConfigFile>,
@@ -1068,6 +1087,11 @@ struct NetworkSourceConfigFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct WebUiConfigFile {
+    show_index_stats: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ValidationConfigFile {
     distribution_parallelism: usize,
 }
@@ -1142,6 +1166,10 @@ impl TryFrom<SettingsFile> for Settings {
                 .map(NetworkSourceConfig::try_from)
                 .transpose()?
                 .unwrap_or_else(default_network_source_config),
+            web_ui: value
+                .web_ui
+                .map(WebUiConfig::from)
+                .unwrap_or_else(default_web_ui_config),
             validation: value
                 .validation
                 .map(ValidationConfig::try_from)
@@ -1180,6 +1208,7 @@ impl From<Settings> for SettingsFile {
             security: Some(value.security.into()),
             rate_limit: Some(value.rate_limit.into()),
             network_source: Some(value.network_source.into()),
+            web_ui: Some(value.web_ui.into()),
             validation: Some(value.validation.into()),
             logging: Some(value.logging.into()),
             oidc_issuers: value.oidc_issuers.into_iter().map(Into::into).collect(),
@@ -1593,6 +1622,22 @@ impl From<NetworkSourceConfig> for NetworkSourceConfigFile {
     }
 }
 
+impl From<WebUiConfigFile> for WebUiConfig {
+    fn from(value: WebUiConfigFile) -> Self {
+        Self {
+            show_index_stats: value.show_index_stats,
+        }
+    }
+}
+
+impl From<WebUiConfig> for WebUiConfigFile {
+    fn from(value: WebUiConfig) -> Self {
+        Self {
+            show_index_stats: value.show_index_stats,
+        }
+    }
+}
+
 impl TryFrom<ValidationConfigFile> for ValidationConfig {
     type Error = SettingsError;
 
@@ -1833,6 +1878,12 @@ fn default_network_source_config() -> NetworkSourceConfig {
         web_ui_allowed_cidrs: Vec::new(),
         api_allowed_cidrs: Vec::new(),
         trust_proxy_headers: false,
+    }
+}
+
+fn default_web_ui_config() -> WebUiConfig {
+    WebUiConfig {
+        show_index_stats: true,
     }
 }
 

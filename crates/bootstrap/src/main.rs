@@ -343,6 +343,7 @@ async fn serve(settings: Settings, config_source: String) -> anyhow::Result<()> 
             api_allowed_cidrs: settings.network_source.api_allowed_cidrs.clone(),
             trust_proxy_headers: settings.network_source.trust_proxy_headers,
         }),
+        show_index_stats: settings.web_ui.show_index_stats,
     };
     info!(
         "HTTP API rate limiting: {}",

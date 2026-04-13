@@ -251,6 +251,9 @@ web_ui_allowed_cidrs = []
 api_allowed_cidrs = []
 trust_proxy_headers = false
 
+[web_ui]
+show_index_stats = true
+
 [validation]
 distribution_parallelism = 4
 
@@ -349,6 +352,7 @@ Useful environment variables:
 - `NETWORK_SOURCE_WEB_UI_ALLOWED_CIDRS`
 - `NETWORK_SOURCE_API_ALLOWED_CIDRS`
 - `NETWORK_SOURCE_TRUST_PROXY_HEADERS`
+- `WEB_UI_SHOW_INDEX_STATS`
 - `VALIDATION_DISTRIBUTION_PARALLELISM`
 - `LOG_FILTER`
 - `LOG_MODULE_PATH`
@@ -364,6 +368,7 @@ so `X-Forwarded-For`, `X-Real-IP`, or `Forwarded` can be used instead.
 Network source checks can separately restrict the Web UI (`/` and `/admin...`)
 and package/OIDC API routes. Empty CIDR lists allow every source; set
 `network_source.trust_proxy_headers = true` only behind a trusted reverse proxy.
+Set `web_ui.show_index_stats = false` to hide public index page registry counts.
 
 ## CLI
 

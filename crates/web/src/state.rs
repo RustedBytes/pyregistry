@@ -85,6 +85,7 @@ pub struct AppState {
     pub mirror_jobs: MirrorJobs,
     pub rate_limiter: RateLimiter,
     pub network_source: NetworkSourcePolicy,
+    pub show_index_stats: bool,
 }
 
 #[cfg(test)]
