@@ -1,7 +1,19 @@
 name: Fuzz
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/fuzz.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "fuzz/**"
   workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "Seconds to run each fuzz target"
+        required: false
+        default: "60"
 
 permissions:
   contents: read
@@ -17,6 +29,7 @@ jobs:
           - domain_inputs
           - wheel_archive
           - distribution_validation
+          - wheel_audit
 
     steps:
       - name: Checkout code
@@ -39,4 +52,6 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Run fuzz target
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -rss_limit_mb=4096
+        env:
+          MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '60' }}
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=${MAX_TOTAL_TIME} -rss_limit_mb=4096

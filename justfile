@@ -45,6 +45,17 @@ qa: fmt check test coverage
 # Run read-only handoff checks.
 qa-check: fmt-check check test coverage
 
+# Run one cargo-fuzz target. Usage: just fuzz wheel_audit 60
+fuzz target seconds="60":
+    cargo +nightly fuzz run {{target}} -- -max_total_time={{seconds}} -rss_limit_mb=4096
+
+# Run every maintained cargo-fuzz target briefly.
+fuzz-smoke seconds="10":
+    cargo +nightly fuzz run domain_inputs -- -max_total_time={{seconds}} -rss_limit_mb=4096
+    cargo +nightly fuzz run wheel_archive -- -max_total_time={{seconds}} -rss_limit_mb=4096
+    cargo +nightly fuzz run distribution_validation -- -max_total_time={{seconds}} -rss_limit_mb=4096
+    cargo +nightly fuzz run wheel_audit -- -max_total_time={{seconds}} -rss_limit_mb=4096
+
 # Build the workspace.
 build:
     cargo build --workspace

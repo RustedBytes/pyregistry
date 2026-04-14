@@ -10,12 +10,15 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+arbitrary = { version = "1.4", features = ["derive"] }
+chrono = "0.4"
 libfuzzer-sys = "0.4"
 password-hash = { version = "0.6", features = ["getrandom"] }
 password-hash-05 = { package = "password-hash", version = "0.5", features = ["getrandom"] }
 pyregistry-application = { path = "../crates/application" }
 pyregistry-domain = { path = "../crates/domain" }
 pyregistry-infrastructure = { path = "../crates/infrastructure", default-features = false }
+uuid = "1.18"
 
 [[bin]]
 name = "domain_inputs"
@@ -32,5 +35,11 @@ doc = false
 [[bin]]
 name = "distribution_validation"
 path = "fuzz_targets/distribution_validation.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wheel_audit"
+path = "fuzz_targets/wheel_audit.rs"
 test = false
 doc = false
