@@ -1110,20 +1110,29 @@ async fn admin_and_publish_use_cases_report_missing_expired_and_oidc_edges() {
             .is_empty()
     );
 
-    let expired = app
-        .issue_api_token(IssueApiTokenCommand {
+    assert!(matches!(
+        app.issue_api_token(IssueApiTokenCommand {
             tenant_slug: "acme".into(),
             label: "expired".into(),
             scopes: vec![TokenScope::Read],
             ttl_hours: Some(-1),
         })
-        .await
-        .expect("expired token");
-    assert!(matches!(
-        app.authenticate_tenant_token("acme", &expired.secret, TokenScope::Read)
-            .await,
-        Err(ApplicationError::Unauthorized(_))
+        .await,
+        Err(ApplicationError::Conflict(_))
     ));
+
+    let read_token = app
+        .issue_api_token(IssueApiTokenCommand {
+            tenant_slug: "acme".into(),
+            label: "read".into(),
+            scopes: vec![TokenScope::Read],
+            ttl_hours: Some(1),
+        })
+        .await
+        .expect("read token");
+    app.authenticate_tenant_token("acme", &read_token.secret, TokenScope::Read)
+        .await
+        .expect("read token authenticates");
     app.revoke_api_token("acme", "does-not-exist")
         .await
         .expect("missing token revocation is idempotent");

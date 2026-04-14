@@ -7,22 +7,48 @@ use pyregistry_application::{ApplicationError, OidcVerifier};
 use pyregistry_domain::PublishIdentity;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::RwLock;
+
+const DEFAULT_JWKS_TIMEOUT: Duration = Duration::from_secs(5);
+const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+const MAX_JWKS_BYTES: u64 = 1024 * 1024;
+const MAX_JWT_PAYLOAD_BASE64_CHARS: usize = 96 * 1024;
 
 #[derive(Clone)]
 pub struct SimpleJwksOidcVerifier {
     client: reqwest::Client,
     issuers: Vec<OidcIssuerConfig>,
+    jwks_cache: Arc<RwLock<HashMap<String, CachedJwks>>>,
 }
 
 impl SimpleJwksOidcVerifier {
     #[must_use]
     pub fn new(issuers: Vec<OidcIssuerConfig>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(DEFAULT_JWKS_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .build()
+            .unwrap_or_else(|error| {
+                warn!("failed to build timeout-bound OIDC HTTP client: {error}");
+                reqwest::Client::new()
+            });
         Self {
-            client: reqwest::Client::new(),
+            client,
             issuers,
+            jwks_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct CachedJwks {
+    fetched_at: Instant,
+    keys: Vec<JsonWebKey>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,7 +65,7 @@ struct JsonWebKeySet {
     keys: Vec<JsonWebKey>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct JsonWebKey {
     kid: Option<String>,
     kty: String,
@@ -89,21 +115,7 @@ impl OidcVerifier for SimpleJwksOidcVerifier {
                 ApplicationError::Unauthorized("JWT header missing kid".into())
             })?;
 
-        debug!(
-            "fetching JWKS from `{}` for issuer `{}` and kid `{kid}`",
-            issuer.jwks_url, issuer.issuer
-        );
-        let jwks = self
-            .client
-            .get(&issuer.jwks_url)
-            .send()
-            .await
-            .map_err(|error| ApplicationError::External(error.to_string()))?
-            .error_for_status()
-            .map_err(|error| ApplicationError::External(error.to_string()))?
-            .json::<JsonWebKeySet>()
-            .await
-            .map_err(|error| ApplicationError::External(error.to_string()))?;
+        let jwks = self.fetch_jwks(issuer).await?;
 
         let key = jwks
             .keys
@@ -161,11 +173,83 @@ impl OidcVerifier for SimpleJwksOidcVerifier {
     }
 }
 
+impl SimpleJwksOidcVerifier {
+    async fn fetch_jwks(
+        &self,
+        issuer: &OidcIssuerConfig,
+    ) -> Result<JsonWebKeySet, ApplicationError> {
+        let cache_key = issuer.jwks_url.clone();
+        let now = Instant::now();
+        if let Some(cached) = self.jwks_cache.read().await.get(&cache_key).cloned()
+            && now.saturating_duration_since(cached.fetched_at) <= JWKS_CACHE_TTL
+        {
+            debug!(
+                "using cached JWKS for issuer `{}` from `{}`",
+                issuer.issuer, issuer.jwks_url
+            );
+            return Ok(JsonWebKeySet { keys: cached.keys });
+        }
+
+        debug!(
+            "fetching JWKS from `{}` for issuer `{}`",
+            issuer.jwks_url, issuer.issuer
+        );
+        let mut response = self
+            .client
+            .get(&issuer.jwks_url)
+            .send()
+            .await
+            .map_err(|error| ApplicationError::External(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| ApplicationError::External(error.to_string()))?;
+        if let Some(content_length) = response.content_length()
+            && content_length > MAX_JWKS_BYTES
+        {
+            return Err(ApplicationError::External(format!(
+                "OIDC JWKS response from `{}` exceeds {} bytes",
+                issuer.jwks_url, MAX_JWKS_BYTES
+            )));
+        }
+
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| ApplicationError::External(error.to_string()))?
+        {
+            let next_len = body.len().saturating_add(chunk.len());
+            if next_len as u64 > MAX_JWKS_BYTES {
+                return Err(ApplicationError::External(format!(
+                    "OIDC JWKS response from `{}` exceeded {} bytes",
+                    issuer.jwks_url, MAX_JWKS_BYTES
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        let jwks: JsonWebKeySet = serde_json::from_slice(&body)
+            .map_err(|error| ApplicationError::External(error.to_string()))?;
+        self.jwks_cache.write().await.insert(
+            cache_key,
+            CachedJwks {
+                fetched_at: now,
+                keys: jwks.keys.clone(),
+            },
+        );
+        Ok(jwks)
+    }
+}
+
 fn parse_claims_unverified(token: &str) -> Result<JwtClaims, ApplicationError> {
     let payload = token
         .split('.')
         .nth(1)
         .ok_or_else(|| ApplicationError::Unauthorized("malformed JWT".into()))?;
+    if payload.len() > MAX_JWT_PAYLOAD_BASE64_CHARS {
+        return Err(ApplicationError::Unauthorized(
+            "JWT payload is too large".into(),
+        ));
+    }
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
         .map_err(|error| ApplicationError::Unauthorized(error.to_string()))?;

@@ -392,6 +392,7 @@ Commands:
 ```bash
 scripts/pyregistry-release.sh serve
 cargo run -p pyregistry -- init-config --path pyregistry.toml --force
+scripts/pyregistry-release.sh --config pyregistry.toml create-tenant --slug acme --display-name "Acme Corp" --admin-email tenant-admin@acme.local --admin-password '<change-me>' --enable-mirroring
 scripts/pyregistry-release.sh audit-wheel --project rsloop --wheel rsloop-0.1.14-cp314-cp314t-win_arm64.whl
 scripts/pyregistry-release.sh validate-dist --file dist/demo-0.1.0-py3-none-any.whl --sha256 <expected-sha256>
 scripts/pyregistry-release.sh validate-dist --file dist/demo-0.1.0.tar.gz

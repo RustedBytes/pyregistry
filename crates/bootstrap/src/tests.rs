@@ -1,8 +1,9 @@
 use crate::cli::{
-    Cli, Command, InitStorageTemplate, apply_cli_overrides, describe_settings_source, init_config,
+    Cli, Command, InitStorageTemplate, apply_cli_overrides, cli_debug_summary,
+    describe_settings_source, init_config,
 };
 use crate::commands::{
-    check_registry, ensure_wheel_is_available, validate_distribution,
+    check_registry, create_tenant, ensure_wheel_is_available, validate_distribution,
     validate_registry_distributions,
 };
 use crate::logging::{log_build_mode, redact_log_message};
@@ -118,6 +119,31 @@ fn cli_parses_subcommands_and_global_config() {
     .expect("audit-wheel");
     assert!(cli.redact_logs);
     assert!(matches!(cli.command, Some(Command::AuditWheel { .. })));
+
+    let cli = Cli::try_parse_from([
+        "pyregistry",
+        "create-tenant",
+        "--slug",
+        "acme",
+        "--display-name",
+        "Acme Corp",
+        "--admin-email",
+        "tenant-admin@acme.test",
+        "--admin-password",
+        "tenant-secret",
+        "--enable-mirroring",
+    ])
+    .expect("create-tenant");
+    assert!(matches!(
+        cli.command,
+        Some(Command::CreateTenant {
+            enable_mirroring: true,
+            ..
+        })
+    ));
+    let summary = cli_debug_summary(&cli);
+    assert!(summary.contains("admin_password: <redacted>"));
+    assert!(!summary.contains("tenant-secret"));
 
     let cli = Cli::try_parse_from([
         "pyregistry",
@@ -324,6 +350,45 @@ async fn registry_commands_succeed_for_empty_in_memory_registry() {
     .await
     .expect("empty registry distribution validation");
 
+    let _ = std::fs::remove_dir_all(settings.blob_root);
+}
+
+#[tokio::test]
+async fn create_tenant_command_creates_tenant_and_admin() {
+    let mut settings = in_memory_settings();
+    let sqlite_path =
+        std::env::temp_dir().join(format!("pyregistry-cli-{}.sqlite3", unique_suffix()));
+    settings.database_store = DatabaseStoreKind::Sqlite;
+    settings.sqlite = Some(pyregistry_infrastructure::SqliteConfig {
+        path: sqlite_path.clone(),
+    });
+
+    create_tenant(
+        settings.clone(),
+        "test settings".into(),
+        "acme".into(),
+        "Acme Corp".into(),
+        "tenant-admin@acme.test".into(),
+        "tenant-secret".into(),
+        true,
+    )
+    .await
+    .expect("create tenant");
+
+    let app = build_application(&settings)
+        .await
+        .expect("build application");
+    let tenants = app.list_tenants().await.expect("tenants");
+    assert_eq!(tenants.len(), 1);
+    assert_eq!(tenants[0].slug.as_str(), "acme");
+    assert!(tenants[0].mirror_rule.enabled);
+    assert!(
+        app.login_admin("tenant-admin@acme.test", "tenant-secret")
+            .await
+            .is_ok()
+    );
+
+    let _ = std::fs::remove_file(sqlite_path);
     let _ = std::fs::remove_dir_all(settings.blob_root);
 }
 

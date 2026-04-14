@@ -1,8 +1,9 @@
 use anyhow::Context;
 use log::info;
 use pyregistry_application::{
-    AuditWheelCommand, DistributionFileInspector, DistributionValidationUseCase,
-    ValidateDistributionCommand, ValidateRegistryDistributionsCommand, WheelAuditUseCase,
+    AuditWheelCommand, CreateTenantCommand, DistributionFileInspector,
+    DistributionValidationUseCase, ValidateDistributionCommand,
+    ValidateRegistryDistributionsCommand, WheelAuditUseCase,
 };
 use pyregistry_infrastructure::{
     ArtifactDownloadRetryPolicy, FilesystemDistributionInspector,
@@ -67,6 +68,41 @@ pub(crate) async fn check_registry(
         .await
         .context("registry security check failed")?;
     print_registry_security_report(&report);
+    Ok(())
+}
+
+pub(crate) async fn create_tenant(
+    settings: Settings,
+    config_source: String,
+    slug: String,
+    display_name: String,
+    admin_email: String,
+    admin_password: String,
+    mirroring_enabled: bool,
+) -> anyhow::Result<()> {
+    info!("creating tenant `{slug}` using settings from {config_source}");
+    let app = build_application(&settings)
+        .await
+        .context("failed to build application services")?;
+    seed_application(&app, &settings)
+        .await
+        .context("failed to seed application")?;
+    let tenant = app
+        .create_tenant(CreateTenantCommand {
+            slug,
+            display_name,
+            mirroring_enabled,
+            admin_email: admin_email.clone(),
+            admin_password,
+        })
+        .await
+        .context("failed to create tenant")?;
+
+    println!(
+        "created tenant `{}` with admin `{}`",
+        tenant.slug.as_str(),
+        admin_email.trim().to_ascii_lowercase()
+    );
     Ok(())
 }
 

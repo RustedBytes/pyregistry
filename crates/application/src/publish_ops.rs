@@ -15,6 +15,8 @@ use pyregistry_domain::{
 use rand::distr::{Alphanumeric, SampleString};
 use sha2::{Digest, Sha256};
 
+const MAX_TOKEN_TTL_HOURS: i64 = 24 * 365;
+
 impl PyregistryApp {
     pub async fn issue_api_token(
         &self,
@@ -26,6 +28,22 @@ impl PyregistryApp {
         );
         let tenant = self.require_tenant(&command.tenant_slug).await?;
         let secret = format!("pyr_{}", Alphanumeric.sample_string(&mut rand::rng(), 40));
+        let expires_at = match command.ttl_hours {
+            Some(ttl) if !(1..=MAX_TOKEN_TTL_HOURS).contains(&ttl) => {
+                return Err(ApplicationError::Conflict(format!(
+                    "token TTL must be between 1 and {MAX_TOKEN_TTL_HOURS} hours"
+                )));
+            }
+            Some(ttl) => {
+                let delta = Duration::try_hours(ttl).ok_or_else(|| {
+                    ApplicationError::Conflict("token TTL is out of range".into())
+                })?;
+                Some(self.clock.now().checked_add_signed(delta).ok_or_else(|| {
+                    ApplicationError::Conflict("token expiry is out of range".into())
+                })?)
+            }
+            None => None,
+        };
         let token = ApiToken {
             id: TokenId::new(self.ids.next()),
             tenant_id: tenant.id,
@@ -34,9 +52,7 @@ impl PyregistryApp {
             scopes: command.scopes,
             publish_identity: None,
             created_at: self.clock.now(),
-            expires_at: command
-                .ttl_hours
-                .map(|ttl| self.clock.now() + Duration::hours(ttl)),
+            expires_at,
         };
         self.store.save_api_token(token.clone()).await?;
 

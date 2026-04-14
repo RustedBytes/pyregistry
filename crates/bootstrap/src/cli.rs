@@ -5,7 +5,8 @@ use pyregistry_infrastructure::Settings;
 use std::path::{Path, PathBuf};
 
 use crate::commands::{
-    audit_wheel, check_registry, validate_distribution, validate_registry_distributions,
+    audit_wheel, check_registry, create_tenant, validate_distribution,
+    validate_registry_distributions,
 };
 use crate::logging::{init_logging, log_build_mode};
 use crate::server::serve;
@@ -73,6 +74,37 @@ pub(crate) enum Command {
         project: String,
         #[arg(long, value_name = "PATH", help = "Path to the wheel file")]
         wheel: PathBuf,
+    },
+    #[command(
+        name = "create-tenant",
+        about = "Create a tenant and its first tenant admin account"
+    )]
+    CreateTenant {
+        #[arg(long, value_name = "SLUG", help = "Tenant slug, for example `acme`")]
+        slug: String,
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Tenant display name shown in the admin UI"
+        )]
+        display_name: String,
+        #[arg(
+            long,
+            value_name = "EMAIL",
+            help = "Email address for the tenant admin account"
+        )]
+        admin_email: String,
+        #[arg(
+            long,
+            value_name = "PASSWORD",
+            help = "Initial password for the tenant admin account"
+        )]
+        admin_password: String,
+        #[arg(
+            long,
+            help = "Allow read-through mirroring from the configured PyPI upstream"
+        )]
+        enable_mirroring: bool,
     },
     #[command(
         name = "validate-dist",
@@ -143,7 +175,7 @@ pub(crate) async fn execute(cli: Cli) -> anyhow::Result<()> {
     let config_path = cli.config.clone();
     let redact_logs = cli.redact_logs;
     let yara_rules_path = cli.yara_rules_path.clone();
-    let cli_debug = format!("{cli:?}");
+    let cli_debug = cli_debug_summary(&cli);
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
@@ -178,6 +210,31 @@ pub(crate) async fn execute(cli: Cli) -> anyhow::Result<()> {
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             audit_wheel(project, wheel, &settings).await
+        }
+        Command::CreateTenant {
+            slug,
+            display_name,
+            admin_email,
+            admin_password,
+            enable_mirroring,
+        } => {
+            let config_source = describe_settings_source(config_path.as_deref());
+            let mut settings =
+                Settings::load_for_cli(config_path.clone()).context("failed to load settings")?;
+            apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
+            init_logging(&settings.logging, redact_logs);
+            log_build_mode();
+            debug!("parsed CLI arguments: {cli_debug}");
+            create_tenant(
+                settings,
+                config_source,
+                slug,
+                display_name,
+                admin_email,
+                admin_password,
+                enable_mirroring,
+            )
+            .await
         }
         Command::ValidateDist { file, sha256 } => {
             let mut settings =
@@ -227,6 +284,28 @@ pub(crate) fn apply_cli_overrides(
         settings.security.yara_rules_path = path.to_path_buf();
     }
     Ok(())
+}
+
+pub(crate) fn cli_debug_summary(cli: &Cli) -> String {
+    match &cli.command {
+        Some(Command::CreateTenant {
+            slug,
+            display_name,
+            admin_email,
+            enable_mirroring,
+            ..
+        }) => format!(
+            "Cli {{ config: {:?}, redact_logs: {}, yara_rules_path: {:?}, command: CreateTenant {{ slug: {:?}, display_name: {:?}, admin_email: {:?}, admin_password: <redacted>, enable_mirroring: {} }} }}",
+            cli.config,
+            cli.redact_logs,
+            cli.yara_rules_path,
+            slug,
+            display_name,
+            admin_email,
+            enable_mirroring,
+        ),
+        _ => format!("{cli:?}"),
+    }
 }
 
 pub(crate) fn init_config(

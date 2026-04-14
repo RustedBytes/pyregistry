@@ -306,29 +306,7 @@ pub async fn seed_application(
         .await?;
 
     if app.list_tenants().await?.is_empty() {
-        info!("no tenants found; creating bootstrap tenant `acme`");
-        let _tenant = app
-            .create_tenant(pyregistry_application::CreateTenantCommand {
-                slug: "acme".into(),
-                display_name: "Acme Corp".into(),
-                mirroring_enabled: true,
-                admin_email: "tenant-admin@acme.local".into(),
-                admin_password: "change-me-now".into(),
-            })
-            .await?;
-        let _ = app
-            .issue_api_token(pyregistry_application::IssueApiTokenCommand {
-                tenant_slug: "acme".into(),
-                label: "bootstrap-readwrite".into(),
-                scopes: vec![
-                    pyregistry_domain::TokenScope::Read,
-                    pyregistry_domain::TokenScope::Publish,
-                    pyregistry_domain::TokenScope::Admin,
-                ],
-                ttl_hours: None,
-            })
-            .await?;
-        info!("bootstrap tenant `acme` seeded with an initial API token");
+        info!("tenant store is empty; create tenants explicitly from the admin UI");
     } else {
         info!("tenant store already populated; skipping bootstrap tenant creation");
     }
@@ -418,7 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_application_creates_superadmin_and_bootstrap_tenant_once() {
+    async fn seed_application_creates_only_superadmin_once() {
         init_test_logger();
         let settings = in_memory_settings();
         let app = build_application(&settings).await.expect("application");
@@ -428,7 +406,7 @@ mod tests {
             .await
             .expect("second seed");
 
-        assert_eq!(app.list_tenants().await.expect("tenants").len(), 1);
+        assert_eq!(app.list_tenants().await.expect("tenants").len(), 0);
         assert!(
             app.login_admin(&settings.superadmin_email, &settings.superadmin_password)
                 .await

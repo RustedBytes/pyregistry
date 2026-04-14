@@ -32,6 +32,9 @@ use pyregistry_domain::{DeletionMode, TokenScope, TrustedPublisherProvider};
 use std::collections::HashMap;
 use std::fmt::Write;
 
+const MAX_TOKEN_TTL_HOURS: i64 = 24 * 365;
+const MAX_ADMIN_SESSIONS: usize = 10_000;
+
 pub(crate) async fn enforce_admin_origin(request: Request, next: Next) -> Response {
     if request.method() != Method::GET && request.uri().path().starts_with("/admin") {
         let headers = request.headers();
@@ -119,13 +122,27 @@ pub(crate) async fn login_submit(
                 "admin session established for `{}` (superadmin={}, tenant={:?})",
                 session.email, session.is_superadmin, session.tenant_slug
             );
-            state.sessions.write().await.insert(
-                session_id.clone(),
-                StoredAdminSession {
-                    session: session.clone(),
-                    expires_at: chrono::Utc::now() + chrono::Duration::hours(8),
-                },
-            );
+            let expires_at = chrono::Utc::now() + chrono::Duration::hours(8);
+            {
+                let mut sessions = state.sessions.write().await;
+                prune_expired_admin_sessions(&mut sessions);
+                if sessions.len() >= MAX_ADMIN_SESSIONS {
+                    warn!(
+                        "admin session creation rejected because the session table is full ({MAX_ADMIN_SESSIONS})"
+                    );
+                    return Err(WebError {
+                        status: StatusCode::SERVICE_UNAVAILABLE,
+                        message: "Too many active admin sessions; please try again later.".into(),
+                    });
+                }
+                sessions.insert(
+                    session_id.clone(),
+                    StoredAdminSession {
+                        session: session.clone(),
+                        expires_at,
+                    },
+                );
+            }
             record_audit_event(
                 &state,
                 session.email.clone(),
@@ -1030,6 +1047,12 @@ fn parse_optional_ttl_hours(raw: Option<&str>) -> Result<Option<i64>, WebError> 
         status: StatusCode::BAD_REQUEST,
         message: "TTL hours must be a whole number".into(),
     })?;
+    if !(1..=MAX_TOKEN_TTL_HOURS).contains(&ttl_hours) {
+        return Err(WebError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("TTL hours must be between 1 and {MAX_TOKEN_TTL_HOURS}"),
+        });
+    }
     Ok(Some(ttl_hours))
 }
 
@@ -1306,19 +1329,20 @@ fn registry_base_url(
     if let Some(base_url) = external_base_url
         .map(str::trim)
         .filter(|base_url| !base_url.is_empty())
+        .and_then(normalize_external_base_url)
     {
-        return base_url.trim_end_matches('/').to_string();
+        return base_url;
     }
 
     let host = if trust_forwarded {
-        forwarded_value(headers, "x-forwarded-host")
-            .or_else(|| forwarded_value(headers, header::HOST.as_str()))
+        forwarded_authority(headers, "x-forwarded-host")
+            .or_else(|| forwarded_authority(headers, header::HOST.as_str()))
     } else {
-        forwarded_value(headers, header::HOST.as_str())
+        forwarded_authority(headers, header::HOST.as_str())
     }
     .unwrap_or("<registry-host>");
     let scheme = if trust_forwarded {
-        forwarded_value(headers, "x-forwarded-proto").unwrap_or_else(|| default_scheme_for(host))
+        forwarded_scheme(headers, "x-forwarded-proto").unwrap_or_else(|| default_scheme_for(host))
     } else {
         default_scheme_for(host)
     };
@@ -1481,6 +1505,32 @@ fn forwarded_value<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
+fn forwarded_authority<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
+    let value = forwarded_value(headers, key)?;
+    value.parse::<http::uri::Authority>().ok().map(|_| value)
+}
+
+fn forwarded_scheme<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
+    match forwarded_value(headers, key)?.to_ascii_lowercase().as_str() {
+        "http" => Some("http"),
+        "https" => Some("https"),
+        _ => None,
+    }
+}
+
+fn normalize_external_base_url(base_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(base_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    Some(base_url.trim_end_matches('/').to_string())
+}
+
+fn prune_expired_admin_sessions(sessions: &mut HashMap<String, StoredAdminSession>) {
+    let now = chrono::Utc::now();
+    sessions.retain(|_, stored| stored.expires_at > now);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1509,6 +1559,15 @@ mod tests {
     #[test]
     fn numeric_ttl_hours_parses() {
         assert_eq!(parse_optional_ttl_hours(Some("24")).expect("ttl"), Some(24));
+    }
+
+    #[test]
+    fn ttl_hours_must_be_positive_and_bounded() {
+        for raw in ["0", "-1", "8761", "9223372036854775807"] {
+            let error = parse_optional_ttl_hours(Some(raw)).expect_err("invalid ttl");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert!(error.message.contains("between 1 and 8760"));
+        }
     }
 
     #[test]
@@ -2000,12 +2059,28 @@ mod tests {
             registry_base_url(&headers, false, Some("https://configured.example/")),
             "https://configured.example"
         );
+        assert_eq!(
+            registry_base_url(&headers, false, Some("javascript:alert(1)")),
+            "http://127.0.0.1:3000",
+            "invalid configured base URLs should not be reflected"
+        );
 
         headers.insert("x-forwarded-host", HeaderValue::from_static("   "));
         assert_eq!(
             forwarded_value(&headers, "x-forwarded-host"),
             None,
             "blank forwarded values should be ignored"
+        );
+
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("registry.example\"; touch /tmp/pwned #"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("javascript"));
+        assert_eq!(
+            registry_base_url(&headers, true, None),
+            "http://127.0.0.1:3000",
+            "unsafe forwarded authority and scheme should be ignored"
         );
     }
 
