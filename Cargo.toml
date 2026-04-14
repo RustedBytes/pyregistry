@@ -19,7 +19,7 @@ license = "GPL-3.0-or-later"
 keywords = ["python", "registry", "pypi", "packages", "security"]
 categories = ["command-line-utilities", "development-tools", "web-programming::http-server"]
 rust-version = "1.85"
-version = "0.2.0"
+version = "0.3.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
