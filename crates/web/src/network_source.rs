@@ -323,6 +323,10 @@ mod tests {
         let allow_all = NetworkSourcePolicy::allow_all();
         assert!(allow_all.allows_web_ui(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))));
         assert!(allow_all.allows_api(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))));
+        assert_eq!(
+            allow_all.log_safe_summary(),
+            "web_ui_allowed_cidrs=all, api_allowed_cidrs=all, trust_proxy_headers=false"
+        );
 
         let policy = NetworkSourcePolicy::new(NetworkSourceConfig {
             web_ui_allowed_cidrs: vec!["10.0.0.0/8".into()],
@@ -334,13 +338,23 @@ mod tests {
         assert!(!policy.allows_web_ui(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))));
         assert!(policy.allows_api(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))));
         assert!(!policy.allows_api(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))));
+        assert_eq!(
+            policy.log_safe_summary(),
+            "web_ui_allowed_cidrs=1, api_allowed_cidrs=1, trust_proxy_headers=false"
+        );
     }
 
     #[test]
     fn cidr_matching_supports_v4_v6_and_single_ip_entries() {
+        let v4_all: IpNetwork = "0.0.0.0/0".parse().expect("v4 all cidr");
+        assert!(v4_all.contains(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 55))));
+
         let v4: IpNetwork = "192.0.2.0/24".parse().expect("v4 cidr");
         assert!(v4.contains(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 55))));
         assert!(!v4.contains(IpAddr::V4(Ipv4Addr::new(192, 0, 3, 55))));
+
+        let v6_all: IpNetwork = "::/0".parse().expect("v6 all cidr");
+        assert!(v6_all.contains(IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().expect("v6"))));
 
         let v6: IpNetwork = "2001:db8::/32".parse().expect("v6 cidr");
         assert!(v6.contains(IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().expect("v6"))));
@@ -349,6 +363,7 @@ mod tests {
         let single: IpNetwork = "203.0.113.8".parse().expect("single ip");
         assert!(single.contains(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8))));
         assert!(!single.contains(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))));
+        assert!(!single.contains(IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().expect("v6"))));
     }
 
     #[test]
@@ -406,10 +421,52 @@ mod tests {
     }
 
     #[test]
+    fn forwarded_header_parser_handles_case_and_ignores_other_parameters() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static("proto=https;By=203.0.113.8;For=\"[2001:db8::5]\""),
+        );
+        assert_eq!(
+            forwarded_client_ip(&headers),
+            Some(IpAddr::V6("2001:db8::5".parse::<Ipv6Addr>().expect("v6")))
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static("proto=https;by=proxy"),
+        );
+        assert_eq!(forwarded_client_ip(&headers), None);
+    }
+
+    #[test]
+    fn access_surface_classifies_protected_routes() {
+        assert_eq!(
+            AccessSurface::from_path("/t/acme/simple/demo").map(AccessSurface::as_str),
+            Some("api")
+        );
+        assert_eq!(
+            AccessSurface::from_path("/_/oidc/callback").map(AccessSurface::as_str),
+            Some("api")
+        );
+        assert_eq!(
+            AccessSurface::from_path("/").map(AccessSurface::as_str),
+            Some("web-ui")
+        );
+        assert_eq!(
+            AccessSurface::from_path("/admin/packages").map(AccessSurface::as_str),
+            Some("web-ui")
+        );
+        assert!(AccessSurface::from_path("/health").is_none());
+    }
+
+    #[test]
     fn forwarded_client_rejects_unknown_empty_and_non_ip_values() {
         assert_eq!(sanitize_forwarded_client_ip("unknown"), None);
         assert_eq!(sanitize_forwarded_client_ip("   "), None);
         assert_eq!(sanitize_forwarded_client_ip("example.test"), None);
+        assert_eq!(sanitize_forwarded_client_ip(&"1".repeat(129)), None);
         assert_eq!(
             sanitize_forwarded_client_ip("\"[2001:db8::1]\""),
             Some(IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().expect("v6")))

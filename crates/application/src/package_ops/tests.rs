@@ -81,6 +81,20 @@ async fn mirrored_project_eagerly_caches_only_newest_release_percent() {
     assert_eq!(storage.object_count(), 1);
 }
 
+#[test]
+fn eager_cache_candidate_selection_handles_empty_zero_and_full_percentages() {
+    assert!(select_eager_cache_candidates(Vec::new(), 50).is_empty());
+
+    let none = select_eager_cache_candidates(vec![cache_candidate("1.0.0")], 0);
+    assert!(none.is_empty());
+
+    let all = select_eager_cache_candidates(
+        vec![cache_candidate("1.0.0"), cache_candidate("2.0.0")],
+        100,
+    );
+    assert_eq!(all.len(), 2);
+}
+
 #[tokio::test]
 async fn mirrored_project_scans_cached_wheels_and_notifies_findings() {
     let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
@@ -256,6 +270,20 @@ async fn mirror_resolution_reports_local_disabled_missing_and_failed_paths() {
     assert_eq!(report.failed_project_count, 1);
     assert_eq!(report.failures[0].project_name, "demo");
     assert!(report.failures[0].error.contains("upstream offline"));
+
+    let missing_refresh_app = test_app_with_mirror(
+        Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true)),
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(MissingMirrorClient),
+        1,
+    );
+    let report = missing_refresh_app
+        .refresh_mirrored_projects()
+        .await
+        .expect("missing upstream refresh report");
+    assert_eq!(report.failed_project_count, 1);
+    assert_eq!(report.failures[0].project_name, "demo");
+    assert_eq!(report.failures[0].error, "upstream project was not found");
 }
 
 #[tokio::test]
@@ -2362,6 +2390,26 @@ fn fixed_now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 4, 11, 12, 0, 0)
         .single()
         .expect("fixed timestamp")
+}
+
+fn cache_candidate(version: &str) -> MirroredArtifactCacheCandidate {
+    let digest: String = Sha256::digest(b"demo")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    MirroredArtifactCacheCandidate {
+        version: ReleaseVersion::new(version).expect("version"),
+        artifact: Artifact::new(
+            ArtifactId::new(Uuid::from_u128(42)),
+            ReleaseId::new(Uuid::from_u128(43)),
+            format!("demo-{version}.tar.gz"),
+            4,
+            DigestSet::new(digest, None).expect("digest"),
+            format!("objects/demo-{version}.tar.gz"),
+            fixed_now(),
+        )
+        .expect("artifact"),
+    }
 }
 
 #[derive(Default)]
