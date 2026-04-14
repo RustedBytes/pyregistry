@@ -1,10 +1,14 @@
 use crate::{
-    AdminSession, ApplicationError, CreateTenantCommand, DashboardMetrics, PackageArtifactDetails,
-    PackageDetails, PackageReleaseDetails, PyregistryApp, RegistryOverview, SearchHit,
-    TrustedPublisherDescriptor,
+    AdminSession, ApplicationError, CreatePackageCommand, CreateReleaseCommand,
+    CreateTenantCommand, DashboardMetrics, PackageArtifactDetails, PackageDetails,
+    PackageReleaseDetails, PyregistryApp, RegistryOverview, SearchHit, TrustedPublisherDescriptor,
+    UpdatePackageCommand, UpdateReleaseCommand,
 };
 use log::{debug, info, warn};
-use pyregistry_domain::{AdminUser, AdminUserId, MirrorRule, Tenant, TenantId, TenantSlug};
+use pyregistry_domain::{
+    AdminUser, AdminUserId, MirrorRule, Project, ProjectId, ProjectName, ProjectSource, Release,
+    ReleaseId, ReleaseVersion, Tenant, TenantId, TenantSlug, YankState,
+};
 
 impl PyregistryApp {
     pub async fn bootstrap_superadmin(
@@ -214,6 +218,157 @@ impl PyregistryApp {
         tenant_slug: &str,
     ) -> Result<Vec<SearchHit>, ApplicationError> {
         self.search_packages(tenant_slug, "").await
+    }
+
+    pub async fn create_package(
+        &self,
+        command: CreatePackageCommand,
+    ) -> Result<Project, ApplicationError> {
+        info!(
+            "creating package `{}` for tenant `{}`",
+            command.project_name, command.tenant_slug
+        );
+        let tenant = self.require_tenant(&command.tenant_slug).await?;
+        let project_name = ProjectName::new(command.project_name)?;
+        if self
+            .store
+            .get_project_by_normalized_name(tenant.id, project_name.normalized())
+            .await?
+            .is_some()
+        {
+            return Err(ApplicationError::Conflict(format!(
+                "package `{}` already exists",
+                project_name.normalized()
+            )));
+        }
+
+        let project = Project::new(
+            ProjectId::new(self.ids.next()),
+            tenant.id,
+            project_name,
+            ProjectSource::Local,
+            command.summary,
+            command.description,
+            self.clock.now(),
+        );
+        self.store.save_project(project.clone()).await?;
+        Ok(project)
+    }
+
+    pub async fn update_package(
+        &self,
+        command: UpdatePackageCommand,
+    ) -> Result<Project, ApplicationError> {
+        info!(
+            "updating package `{}` for tenant `{}`",
+            command.current_project_name, command.tenant_slug
+        );
+        let tenant = self.require_tenant(&command.tenant_slug).await?;
+        let current_name = ProjectName::new(command.current_project_name)?;
+        let mut project = self
+            .store
+            .get_project_by_normalized_name(tenant.id, current_name.normalized())
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("package".into()))?;
+        let next_name = ProjectName::new(command.project_name)?;
+        if next_name.normalized() != project.name.normalized()
+            && self
+                .store
+                .get_project_by_normalized_name(tenant.id, next_name.normalized())
+                .await?
+                .is_some()
+        {
+            return Err(ApplicationError::Conflict(format!(
+                "package `{}` already exists",
+                next_name.normalized()
+            )));
+        }
+
+        project.name = next_name;
+        project.summary = command.summary;
+        project.description = command.description;
+        project.updated_at = self.clock.now();
+        self.store.save_project(project.clone()).await?;
+        Ok(project)
+    }
+
+    pub async fn create_release(
+        &self,
+        command: CreateReleaseCommand,
+    ) -> Result<Release, ApplicationError> {
+        info!(
+            "creating release `{}` for tenant `{}` package `{}`",
+            command.version, command.tenant_slug, command.project_name
+        );
+        let project = self
+            .ensure_project_available(&command.tenant_slug, &command.project_name)
+            .await?;
+        let version = ReleaseVersion::new(command.version)?;
+        if self
+            .store
+            .get_release_by_version(project.id, &version)
+            .await?
+            .is_some()
+        {
+            return Err(ApplicationError::Conflict(format!(
+                "release `{}` already exists",
+                version.as_str()
+            )));
+        }
+
+        let release = Release {
+            id: ReleaseId::new(self.ids.next()),
+            project_id: project.id,
+            version,
+            yanked: None,
+            created_at: self.clock.now(),
+        };
+        self.store.save_release(release.clone()).await?;
+        Ok(release)
+    }
+
+    pub async fn update_release(
+        &self,
+        command: UpdateReleaseCommand,
+    ) -> Result<Release, ApplicationError> {
+        info!(
+            "updating release `{}` for tenant `{}` package `{}`",
+            command.current_version, command.tenant_slug, command.project_name
+        );
+        let project = self
+            .ensure_project_available(&command.tenant_slug, &command.project_name)
+            .await?;
+        let current_version = ReleaseVersion::new(command.current_version)?;
+        let mut release = self
+            .store
+            .get_release_by_version(project.id, &current_version)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("release".into()))?;
+        let next_version = ReleaseVersion::new(command.version)?;
+        if next_version != release.version
+            && self
+                .store
+                .get_release_by_version(project.id, &next_version)
+                .await?
+                .is_some()
+        {
+            return Err(ApplicationError::Conflict(format!(
+                "release `{}` already exists",
+                next_version.as_str()
+            )));
+        }
+
+        release.version = next_version;
+        release.yanked = command
+            .yanked_reason
+            .map(|reason| reason.trim().to_string())
+            .filter(|reason| !reason.is_empty())
+            .map(|reason| YankState {
+                reason: Some(reason),
+                changed_at: self.clock.now(),
+            });
+        self.store.save_release(release.clone()).await?;
+        Ok(release)
     }
 
     pub async fn get_package_details(

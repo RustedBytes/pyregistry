@@ -33,6 +33,39 @@ pub struct CreateTenantCommand {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreatePackageCommand {
+    pub tenant_slug: String,
+    pub project_name: String,
+    pub summary: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdatePackageCommand {
+    pub tenant_slug: String,
+    pub current_project_name: String,
+    pub project_name: String,
+    pub summary: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateReleaseCommand {
+    pub tenant_slug: String,
+    pub project_name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateReleaseCommand {
+    pub tenant_slug: String,
+    pub project_name: String,
+    pub current_version: String,
+    pub version: String,
+    pub yanked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct IssueApiTokenCommand {
     pub tenant_slug: String,
     pub label: String,

@@ -242,6 +242,19 @@ pub(crate) struct CreateTenantFormData {
     pub(crate) mirroring_enabled: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct PackageFormData {
+    pub(crate) project_name: String,
+    pub(crate) summary: String,
+    pub(crate) description: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ReleaseFormData {
+    pub(crate) version: String,
+    pub(crate) yanked_reason: Option<String>,
+}
+
 pub(crate) struct IssueTokenFormData {
     pub(crate) label: String,
     pub(crate) ttl_hours: Option<String>,

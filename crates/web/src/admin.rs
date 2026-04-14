@@ -1,22 +1,23 @@
 use crate::{
     audit::{audit_metadata, record_audit_event},
     auth::{ensure_tenant_access, human_bytes, parse_scopes, require_session},
-    error::{WebError, render_html},
+    error::{WebError, bad_request, render_html, to_bad_request},
     models::{
         ArtifactSecurityView, AuditTrailEntryView, AuditTrailMetadataView, CreateTenantFormData,
         DashboardTemplate, DashboardView, DependencyVulnerabilityFindingView,
         DependencyVulnerabilityView, IndexTemplate, IssueTokenFormData, LoginFormData,
         LoginTemplate, MessageTemplate, MirrorFormData, MirrorJobView, PackageArtifactView,
-        PackageDetailTemplate, PackageDetailView, PackageReleaseView, PackageSecuritySummaryView,
-        PackageVulnerabilityView, PaginationView, PublisherFormData, RevokeTokenFormData,
-        SearchQuery, TenantView, WheelAuditResponse, YankFormData,
+        PackageDetailTemplate, PackageDetailView, PackageFormData, PackageReleaseView,
+        PackageSecuritySummaryView, PackageVulnerabilityView, PaginationView, PublisherFormData,
+        ReleaseFormData, RevokeTokenFormData, SearchQuery, TenantView, WheelAuditResponse,
+        YankFormData,
     },
     state::{AppState, MirrorJobPhase, MirrorJobStatus, StoredAdminSession, mirror_job_key},
 };
 use axum::{
     Form, Json,
     body::{Body, Bytes},
-    extract::{Path, Query, Request, State},
+    extract::{Multipart, Path, Query, Request, State},
     http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
@@ -24,8 +25,9 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use log::{debug, info, warn};
 use pyregistry_application::{
-    AdminSession, ApplicationError, AuditStoredWheelCommand, CreateTenantCommand, DeletionCommand,
-    IssueApiTokenCommand, RegisterTrustedPublisherCommand, WheelAuditFinding,
+    AdminSession, ApplicationError, AuditStoredWheelCommand, CreatePackageCommand,
+    CreateReleaseCommand, CreateTenantCommand, DeletionCommand, IssueApiTokenCommand,
+    RegisterTrustedPublisherCommand, UpdatePackageCommand, UpdateReleaseCommand, WheelAuditFinding,
     WheelAuditFindingKind, WheelAuditReport,
 };
 use pyregistry_domain::{DeletionMode, TokenScope, TrustedPublisherProvider};
@@ -606,6 +608,193 @@ pub(crate) async fn package_detail(
         &install_base_url,
     );
     render_html(PackageDetailTemplate { details })
+}
+
+pub(crate) async fn create_package(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(tenant): Path<String>,
+    Form(form): Form<PackageFormData>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    let project = state
+        .app
+        .create_package(CreatePackageCommand {
+            tenant_slug: tenant.clone(),
+            project_name: form.project_name.clone(),
+            summary: form.summary.clone(),
+            description: form.description.clone(),
+        })
+        .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "package.create",
+        Some(tenant.clone()),
+        Some(project.name.normalized().to_string()),
+        audit_metadata([
+            ("project", project.name.original().to_string()),
+            ("summary", form.summary),
+        ]),
+    )
+    .await;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{}",
+        project.name.normalized()
+    )))
+}
+
+pub(crate) async fn update_package(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project)): Path<(String, String)>,
+    Form(form): Form<PackageFormData>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    let updated = state
+        .app
+        .update_package(UpdatePackageCommand {
+            tenant_slug: tenant.clone(),
+            current_project_name: project.clone(),
+            project_name: form.project_name.clone(),
+            summary: form.summary.clone(),
+            description: form.description.clone(),
+        })
+        .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "package.update",
+        Some(tenant.clone()),
+        Some(updated.name.normalized().to_string()),
+        audit_metadata([
+            ("previous_project", project),
+            ("project", updated.name.original().to_string()),
+            ("summary", form.summary),
+        ]),
+    )
+    .await;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{}",
+        updated.name.normalized()
+    )))
+}
+
+pub(crate) async fn create_release(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project)): Path<(String, String)>,
+    Form(form): Form<ReleaseFormData>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    let release = state
+        .app
+        .create_release(CreateReleaseCommand {
+            tenant_slug: tenant.clone(),
+            project_name: project.clone(),
+            version: form.version.clone(),
+        })
+        .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "release.create",
+        Some(tenant.clone()),
+        Some(format!("{project}/{}", release.version.as_str())),
+        audit_metadata([("version", release.version.as_str().to_string())]),
+    )
+    .await;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{project}"
+    )))
+}
+
+pub(crate) async fn update_release(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project, version)): Path<(String, String, String)>,
+    Form(form): Form<ReleaseFormData>,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+    let updated = state
+        .app
+        .update_release(UpdateReleaseCommand {
+            tenant_slug: tenant.clone(),
+            project_name: project.clone(),
+            current_version: version.clone(),
+            version: form.version.clone(),
+            yanked_reason: form.yanked_reason.clone(),
+        })
+        .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "release.update",
+        Some(tenant.clone()),
+        Some(format!("{project}/{}", updated.version.as_str())),
+        audit_metadata([
+            ("previous_version", version),
+            ("version", updated.version.as_str().to_string()),
+            ("yanked_reason", form.yanked_reason.unwrap_or_default()),
+        ]),
+    )
+    .await;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{project}"
+    )))
+}
+
+pub(crate) async fn upload_release_artifact(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((tenant, project, version)): Path<(String, String, String)>,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, WebError> {
+    let session = require_session(&state, &jar).await?;
+    ensure_tenant_access(&session, &tenant)?;
+
+    let mut filename = None;
+    let mut content = None;
+    while let Some(field) = multipart.next_field().await.map_err(to_bad_request)? {
+        if field.name().unwrap_or_default() == "content" {
+            filename = field.file_name().map(ToString::to_string);
+            content = Some(field.bytes().await.map_err(to_bad_request)?.to_vec());
+        }
+    }
+
+    let filename = filename.ok_or_else(|| bad_request("missing upload file in `content` field"))?;
+    let content = content.ok_or_else(|| bad_request("empty upload file"))?;
+    if content.is_empty() {
+        return Err(bad_request("empty upload file"));
+    }
+    info!(
+        "admin `{}` is uploading artifact `{}` for package `{}` version `{}` in tenant `{}`",
+        session.email, filename, project, version, tenant
+    );
+    state
+        .app
+        .upload_release_artifact_as_admin(&tenant, &project, &version, filename.clone(), content)
+        .await?;
+    record_audit_event(
+        &state,
+        session.email,
+        "artifact.upload",
+        Some(tenant.clone()),
+        Some(format!("{project}/{version}/{filename}")),
+        audit_metadata([
+            ("project", project.clone()),
+            ("version", version.clone()),
+            ("filename", filename),
+        ]),
+    )
+    .await;
+    Ok(Redirect::to(&format!(
+        "/admin/t/{tenant}/packages/{project}"
+    )))
 }
 
 pub(crate) async fn remove_package(

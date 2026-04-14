@@ -50,10 +50,25 @@ pub fn router(state: AppState) -> Router {
             "/admin/t/{tenant}/publishers",
             post(admin::register_publisher),
         )
-        .route("/admin/t/{tenant}/packages", get(admin::package_list))
+        .route(
+            "/admin/t/{tenant}/packages",
+            get(admin::package_list).post(admin::create_package),
+        )
         .route(
             "/admin/t/{tenant}/packages/{project}",
-            get(admin::package_detail),
+            get(admin::package_detail).post(admin::update_package),
+        )
+        .route(
+            "/admin/t/{tenant}/packages/{project}/releases",
+            post(admin::create_release),
+        )
+        .route(
+            "/admin/t/{tenant}/packages/{project}/releases/{version}",
+            post(admin::update_release),
+        )
+        .route(
+            "/admin/t/{tenant}/packages/{project}/releases/{version}/artifacts",
+            post(admin::upload_release_artifact),
         )
         .route(
             "/admin/t/{tenant}/packages/{project}/remove",
@@ -1781,5 +1796,133 @@ mod tests {
             .await
             .expect("removed detail");
         assert_eq!(removed_detail.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_can_create_and_update_packages_and_releases() {
+        let app = router(state().await);
+        let cookie = login_cookie(app.clone()).await;
+
+        let create_package = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "project_name=Admin_Pkg&summary=Admin+package&description=Created+from+UI",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("create package");
+        assert_eq!(create_package.status(), StatusCode::SEE_OTHER);
+
+        let update_package = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/admin-pkg")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "project_name=Admin_Pkg_Renamed&summary=Renamed+package&description=Updated+from+UI",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("update package");
+        assert_eq!(update_package.status(), StatusCode::SEE_OTHER);
+
+        let create_release = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/admin-pkg-renamed/releases")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("version=1.0.0"))
+                    .expect("request"),
+            )
+            .await
+            .expect("create release");
+        assert_eq!(create_release.status(), StatusCode::SEE_OTHER);
+
+        let update_release = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/admin-pkg-renamed/releases/1.0.0")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("version=1.0.1&yanked_reason=metadata+fix"))
+                    .expect("request"),
+            )
+            .await
+            .expect("update release");
+        assert_eq!(update_release.status(), StatusCode::SEE_OTHER);
+
+        let boundary = "PYREGISTRY_ADMIN_UPLOAD_BOUNDARY";
+        let upload_body = concat!(
+            "--PYREGISTRY_ADMIN_UPLOAD_BOUNDARY\r\n",
+            "Content-Disposition: form-data; name=\"content\"; filename=\"admin_pkg_renamed-1.0.1-py3-none-any.whl\"\r\n",
+            "Content-Type: application/octet-stream\r\n\r\n",
+            "admin wheel bytes",
+            "\r\n--PYREGISTRY_ADMIN_UPLOAD_BOUNDARY--\r\n"
+        );
+        let upload_file = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/admin-pkg-renamed/releases/1.0.1/artifacts")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(upload_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("upload file");
+        assert_eq!(upload_file.status(), StatusCode::SEE_OTHER);
+
+        let detail = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/t/acme/packages/admin-pkg-renamed")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("detail");
+        assert_eq!(detail.status(), StatusCode::OK);
+        let body = body_text(detail).await;
+        assert!(body.contains("Admin_Pkg_Renamed"));
+        assert!(body.contains("Renamed package"));
+        assert!(body.contains("1.0.1"));
+        assert!(body.contains("Yanked: metadata fix"));
+        assert!(body.contains("admin_pkg_renamed-1.0.1-py3-none-any.whl"));
+
+        let remove_package = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/t/acme/packages/admin-pkg-renamed/remove")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("remove package");
+        assert_eq!(remove_package.status(), StatusCode::SEE_OTHER);
     }
 }

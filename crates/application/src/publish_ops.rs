@@ -9,8 +9,8 @@ use chrono::Duration;
 use log::{debug, info, warn};
 use pyregistry_domain::{
     ApiToken, Artifact, ArtifactId, AttestationBundle, AttestationSource, DigestSet, Project,
-    ProjectId, ProjectName, ProjectSource, Release, ReleaseId, ReleaseVersion, TokenId, TokenScope,
-    TrustedPublisher, TrustedPublisherId, ensure_unique_filenames,
+    ProjectId, ProjectName, ProjectSource, PublishIdentity, Release, ReleaseId, ReleaseVersion,
+    Tenant, TokenId, TokenScope, TrustedPublisher, TrustedPublisherId, ensure_unique_filenames,
 };
 use rand::distr::{Alphanumeric, SampleString};
 use sha2::{Digest, Sha256};
@@ -153,6 +153,69 @@ impl PyregistryApp {
             ));
         }
 
+        self.upload_artifact_for_tenant(
+            &access.tenant,
+            access.token.publish_identity.as_ref(),
+            command,
+        )
+        .await
+    }
+
+    pub async fn upload_artifact_as_admin(
+        &self,
+        tenant_slug: &str,
+        command: UploadArtifactCommand,
+    ) -> Result<(), ApplicationError> {
+        if tenant_slug != command.tenant_slug {
+            return Err(ApplicationError::Conflict(
+                "route tenant does not match upload tenant".into(),
+            ));
+        }
+        let tenant = self.require_tenant(tenant_slug).await?;
+        self.upload_artifact_for_tenant(&tenant, None, command)
+            .await
+    }
+
+    pub async fn upload_release_artifact_as_admin(
+        &self,
+        tenant_slug: &str,
+        project_name: &str,
+        version: &str,
+        filename: String,
+        content: Vec<u8>,
+    ) -> Result<(), ApplicationError> {
+        let tenant = self.require_tenant(tenant_slug).await?;
+        let project = self
+            .ensure_project_available(tenant_slug, project_name)
+            .await?;
+        let release_version = ReleaseVersion::new(version)?;
+        self.store
+            .get_release_by_version(project.id, &release_version)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound("release".into()))?;
+
+        self.upload_artifact_for_tenant(
+            &tenant,
+            None,
+            UploadArtifactCommand {
+                tenant_slug: tenant_slug.to_string(),
+                project_name: project.name.original().to_string(),
+                version: release_version.as_str().to_string(),
+                filename,
+                summary: project.summary.clone(),
+                description: project.description.clone(),
+                content,
+            },
+        )
+        .await
+    }
+
+    async fn upload_artifact_for_tenant(
+        &self,
+        tenant: &Tenant,
+        publish_identity: Option<&PublishIdentity>,
+        command: UploadArtifactCommand,
+    ) -> Result<(), ApplicationError> {
         let now = self.clock.now();
         let project_name = ProjectName::new(command.project_name)?;
         let version = ReleaseVersion::new(command.version)?;
@@ -171,13 +234,13 @@ impl PyregistryApp {
         }
         let existing_project = self
             .store
-            .get_project_by_normalized_name(access.tenant.id, project_name.normalized())
+            .get_project_by_normalized_name(tenant.id, project_name.normalized())
             .await?;
         let is_new_project = existing_project.is_none();
         let mut project = existing_project.unwrap_or_else(|| {
             Project::new(
                 ProjectId::new(self.ids.next()),
-                access.tenant.id,
+                tenant.id,
                 project_name.clone(),
                 ProjectSource::Local,
                 command.summary.clone(),
@@ -221,7 +284,7 @@ impl PyregistryApp {
             warn!(
                 "upload rejected because artifact `{}` already exists for tenant `{}` project `{}` version `{}`",
                 command.filename,
-                access.tenant.slug.as_str(),
+                tenant.slug.as_str(),
                 project.name.normalized(),
                 version.as_str()
             );
@@ -234,7 +297,7 @@ impl PyregistryApp {
         let sha256 = hex::encode(Sha256::digest(&command.content));
         let object_key = format!(
             "{}/{}/{}/{}",
-            access.tenant.slug.as_str(),
+            tenant.slug.as_str(),
             project.name.normalized(),
             version.as_str(),
             command.filename
@@ -244,7 +307,7 @@ impl PyregistryApp {
             .await?;
         debug!(
             "stored artifact bytes for tenant `{}` at object key `{}`",
-            access.tenant.slug.as_str(),
+            tenant.slug.as_str(),
             object_key
         );
         let mut artifact = Artifact::new(
@@ -256,7 +319,7 @@ impl PyregistryApp {
             object_key,
             now,
         )?;
-        if let Some(identity) = &access.token.publish_identity {
+        if let Some(identity) = publish_identity {
             let attestation_payload = self
                 .attestation_signer
                 .build_attestation(&project.name, &version, &artifact, identity)
@@ -277,7 +340,7 @@ impl PyregistryApp {
                 .await?;
             info!(
                 "generated trusted publishing attestation for tenant `{}` project `{}` version `{}` filename `{}`",
-                access.tenant.slug.as_str(),
+                tenant.slug.as_str(),
                 project.name.original(),
                 version.as_str(),
                 artifact.filename
@@ -291,7 +354,7 @@ impl PyregistryApp {
                 } else {
                     PackagePublishEventKind::NewVersion
                 },
-                tenant_slug: access.tenant.slug.as_str().to_string(),
+                tenant_slug: tenant.slug.as_str().to_string(),
                 project_name: project.name.original().to_string(),
                 normalized_name: project.name.normalized().to_string(),
                 version: version.as_str().to_string(),
@@ -322,7 +385,7 @@ impl PyregistryApp {
         }
         info!(
             "upload completed for tenant `{}` project `{}` version `{}` filename `{}`",
-            access.tenant.slug.as_str(),
+            tenant.slug.as_str(),
             project.name.original(),
             version.as_str(),
             filename

@@ -298,6 +298,7 @@
         gap: 11px;
       }
       input,
+      textarea,
       select {
         width: 100%;
         min-height: 42px;
@@ -307,6 +308,10 @@
         background: var(--field);
         color: var(--ink);
         font: inherit;
+      }
+      textarea {
+        min-height: 92px;
+        resize: vertical;
       }
       label {
         color: var(--text-soft);
@@ -699,6 +704,21 @@
       </section>
 
       <div class="workspace">
+        <section class="control-card">
+          <h2>Create package</h2>
+          {% match selected_tenant %}
+          {% when Some with (tenant_slug) %}
+          <form method="post" action="/admin/t/{{ tenant_slug }}/packages">
+            <input type="text" name="project_name" placeholder="package name" required>
+            <input type="text" name="summary" placeholder="short summary">
+            <textarea name="description" placeholder="package description"></textarea>
+            <button type="submit">Create package</button>
+          </form>
+          {% when None %}
+          <p class="muted">Select a tenant before creating a package.</p>
+          {% endmatch %}
+        </section>
+
         <section class="control-card">
           <h2>Issue API token</h2>
           <form method="post" action="/admin/t/{{ tenant_metrics.tenant_slug }}/tokens">

@@ -244,6 +244,17 @@
         color: var(--ink);
         font: inherit;
       }
+      textarea {
+        width: 100%;
+        min-height: 110px;
+        border-radius: 8px;
+        border: 1px solid var(--field-line);
+        padding: 10px 12px;
+        resize: vertical;
+        background: var(--field);
+        color: var(--ink);
+        font: inherit;
+      }
       label {
         display: grid;
         gap: 6px;
@@ -373,6 +384,16 @@
       .modal-actions {
         display: grid;
         gap: 12px;
+      }
+      .edit-form {
+        display: grid;
+        gap: 12px;
+        max-width: 720px;
+      }
+      .form-grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       }
       .modal-actions .danger-form {
         margin-top: 2px;
@@ -643,6 +664,24 @@
       {% endif %}
 
       <section class="section-block">
+        <h2>Package metadata</h2>
+        <form class="edit-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}">
+          <div class="form-grid">
+            <label>Package name
+              <input type="text" name="project_name" value="{{ details.project_name }}" required>
+            </label>
+            <label>Summary
+              <input type="text" name="summary" value="{{ details.summary }}">
+            </label>
+          </div>
+          <label>Description
+            <textarea name="description">{{ details.description }}</textarea>
+          </label>
+          <button type="submit">Update package</button>
+        </form>
+      </section>
+
+      <section class="section-block">
         <details class="install-panel">
           <summary>
             <span>Install</span>
@@ -687,6 +726,14 @@
       <section class="section-block">
         <h2>Releases</h2>
         <p class="muted">Yanking is reversible and tells installers to avoid a release or file when possible. Purge is irreversible and removes local artifacts.</p>
+        <form class="edit-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases">
+          <div class="form-grid">
+            <label>New release version
+              <input type="text" name="version" placeholder="1.0.0" required>
+            </label>
+          </div>
+          <button type="submit">Create release</button>
+        </form>
         {% for release in details.releases %}
         <div class="release">
           <div class="release-head">
@@ -717,6 +764,31 @@
                     </form>
                   </div>
                   <div class="modal-actions">
+                    <form class="edit-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}">
+                      <div class="form-grid">
+                        <label>Version
+                          <input type="text" name="version" value="{{ release.version }}" required>
+                        </label>
+                        <label>Yanked reason
+                          <input
+                            type="text"
+                            name="yanked_reason"
+                            {% match release.yanked_reason %}
+                            {% when Some with (reason) %}value="{{ reason }}"
+                            {% when None %}
+                            {% endmatch %}
+                            placeholder="leave blank for active"
+                          >
+                        </label>
+                      </div>
+                      <button type="submit">Update release</button>
+                    </form>
+                    <form class="edit-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases/{{ release.version }}/artifacts" enctype="multipart/form-data">
+                      <label>Distribution file
+                        <input type="file" name="content" accept=".whl,.tar.gz,.tar.bz2,.tar.xz,.tgz,.zip" required>
+                      </label>
+                      <button type="submit">Upload file</button>
+                    </form>
                     {% match release.yanked_reason %}
                     {% when Some with (reason) %}
                     <div class="yank-card yanked">
