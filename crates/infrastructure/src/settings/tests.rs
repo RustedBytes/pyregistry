@@ -83,6 +83,10 @@ fn round_trips_settings_through_toml_shape() {
         original.web_ui.show_index_stats
     );
     assert_eq!(
+        round_trip.web_ui.allow_insecure,
+        original.web_ui.allow_insecure
+    );
+    assert_eq!(
         round_trip.validation.distribution_parallelism,
         original.validation.distribution_parallelism
     );
@@ -1145,6 +1149,7 @@ fn loads_runtime_settings_from_environment() {
         "NETWORK_SOURCE_WEB_UI_ALLOWED_CIDRS",
         "NETWORK_SOURCE_API_ALLOWED_CIDRS",
         "NETWORK_SOURCE_TRUST_PROXY_HEADERS",
+        "WEB_UI_ALLOW_INSECURE",
         "VALIDATION_DISTRIBUTION_PARALLELISM",
     ]);
     env.set("DATABASE_STORE", "in-memory");
@@ -1220,6 +1225,7 @@ fn loads_runtime_settings_from_environment() {
         "192.0.2.0/24,2001:db8::/32",
     );
     env.set("NETWORK_SOURCE_TRUST_PROXY_HEADERS", "yes");
+    env.set("WEB_UI_ALLOW_INSECURE", "true");
     env.set("VALIDATION_DISTRIBUTION_PARALLELISM", "11");
 
     let settings = Settings::from_env().expect("settings from env");
@@ -1322,6 +1328,7 @@ fn loads_runtime_settings_from_environment() {
         vec!["192.0.2.0/24", "2001:db8::/32"]
     );
     assert!(settings.network_source.trust_proxy_headers);
+    assert!(settings.web_ui.allow_insecure);
     assert_eq!(settings.validation.distribution_parallelism, 11);
 }
 

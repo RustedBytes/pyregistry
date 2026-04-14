@@ -189,6 +189,7 @@ impl Settings {
             },
             web_ui: WebUiConfig {
                 show_index_stats: read_env_bool("WEB_UI_SHOW_INDEX_STATS", false),
+                allow_insecure: read_env_bool("WEB_UI_ALLOW_INSECURE", false),
             },
             validation: ValidationConfig {
                 distribution_parallelism: read_env_usize(
@@ -914,12 +915,16 @@ impl NetworkSourceConfig {
 #[derive(Debug, Clone)]
 pub struct WebUiConfig {
     pub show_index_stats: bool,
+    pub allow_insecure: bool,
 }
 
 impl WebUiConfig {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
-        format!("show_index_stats={}", self.show_index_stats)
+        format!(
+            "show_index_stats={}, allow_insecure={}",
+            self.show_index_stats, self.allow_insecure
+        )
     }
 }
 
@@ -1209,6 +1214,8 @@ struct NetworkSourceConfigFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WebUiConfigFile {
     show_index_stats: bool,
+    #[serde(default)]
+    allow_insecure: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1790,6 +1797,7 @@ impl From<WebUiConfigFile> for WebUiConfig {
     fn from(value: WebUiConfigFile) -> Self {
         Self {
             show_index_stats: value.show_index_stats,
+            allow_insecure: value.allow_insecure,
         }
     }
 }
@@ -1798,6 +1806,7 @@ impl From<WebUiConfig> for WebUiConfigFile {
     fn from(value: WebUiConfig) -> Self {
         Self {
             show_index_stats: value.show_index_stats,
+            allow_insecure: value.allow_insecure,
         }
     }
 }
@@ -2072,6 +2081,7 @@ fn default_network_source_config() -> NetworkSourceConfig {
 fn default_web_ui_config() -> WebUiConfig {
     WebUiConfig {
         show_index_stats: false,
+        allow_insecure: false,
     }
 }
 

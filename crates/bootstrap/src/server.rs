@@ -20,7 +20,11 @@ use tower_http::trace::TraceLayer;
 
 const FORCED_HTTP_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const MIRROR_UPDATER_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
-pub(crate) async fn serve(settings: Settings, config_source: String) -> anyhow::Result<()> {
+pub(crate) async fn serve(
+    settings: Settings,
+    config_source: String,
+    allow_insecure: bool,
+) -> anyhow::Result<()> {
     info!("starting pyregistry server");
     info!("loading settings from {config_source}");
     info!("runtime settings: {}", settings.log_safe_summary());
@@ -58,6 +62,14 @@ pub(crate) async fn serve(settings: Settings, config_source: String) -> anyhow::
     let listener = TcpListener::bind(&settings.bind_address)
         .await
         .with_context(|| format!("failed to bind {}", settings.bind_address))?;
+    let allow_insecure_admin_cookies = allow_insecure || settings.web_ui.allow_insecure;
+    let secure_admin_cookies =
+        !allow_insecure_admin_cookies && bind_address_is_public(&settings.bind_address);
+    if allow_insecure_admin_cookies {
+        warn!(
+            "insecure admin cookies are enabled; admin session cookies will be sent over plain HTTP. Use only on trusted private networks."
+        );
+    }
     let state = AppState {
         app,
         sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -76,7 +88,7 @@ pub(crate) async fn serve(settings: Settings, config_source: String) -> anyhow::
         }),
         show_index_stats: settings.web_ui.show_index_stats,
         build_features: enabled_build_features(),
-        secure_admin_cookies: bind_address_is_public(&settings.bind_address),
+        secure_admin_cookies,
         external_base_url: None,
     };
     info!(

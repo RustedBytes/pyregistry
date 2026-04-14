@@ -221,10 +221,23 @@ that controls `X-Forwarded-For`, `X-Real-IP`, or `Forwarded`.
 ```toml
 [web_ui]
 show_index_stats = true
+allow_insecure = false
 ```
 
 Set `show_index_stats = false` to hide the public index page registry snapshot
 and metric grid.
+
+When the service binds to a non-local address, admin session cookies are marked
+`Secure` by default and browsers only send them over HTTPS. For trusted private
+HTTP deployments, such as a temporary tailnet-only setup, set
+`allow_insecure = true` or start the server with `--allow-insecure` to permit
+admin login over plain HTTP:
+
+```bash
+pyregistry --config pyregistry.toml --allow-insecure serve
+```
+
+Do not enable `allow_insecure` or use `--allow-insecure` on public networks.
 
 ## Security And Validation
 
@@ -372,6 +385,7 @@ Common environment variables:
 | `NETWORK_SOURCE_API_ALLOWED_CIDRS` | Comma-separated API source IPs or CIDRs; empty allows all. |
 | `NETWORK_SOURCE_TRUST_PROXY_HEADERS` | Use trusted proxy headers for network source checks. |
 | `WEB_UI_SHOW_INDEX_STATS` | Show public index page registry snapshot and metrics. |
+| `WEB_UI_ALLOW_INSECURE` | Permit admin session cookies over plain HTTP; use only on trusted private networks. |
 | `VALIDATION_DISTRIBUTION_PARALLELISM` | Default artifact validation workers. |
 | `LOG_FILTER` | Log filter string. Defaults to `info,turso_core::connection=off`. |
 | `LOG_MODULE_PATH` | Include module paths in logs. |

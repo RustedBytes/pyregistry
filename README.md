@@ -261,6 +261,7 @@ trust_proxy_headers = false
 
 [web_ui]
 show_index_stats = true
+allow_insecure = false
 
 [validation]
 distribution_parallelism = 4
@@ -366,6 +367,7 @@ Useful environment variables:
 - `NETWORK_SOURCE_API_ALLOWED_CIDRS`
 - `NETWORK_SOURCE_TRUST_PROXY_HEADERS`
 - `WEB_UI_SHOW_INDEX_STATS`
+- `WEB_UI_ALLOW_INSECURE`
 - `VALIDATION_DISTRIBUTION_PARALLELISM`
 - `LOG_FILTER`
 - `LOG_MODULE_PATH`
@@ -384,6 +386,8 @@ Network source checks can separately restrict the Web UI (`/` and `/admin...`)
 and package/OIDC API routes. Empty CIDR lists allow every source; set
 `network_source.trust_proxy_headers = true` only behind a trusted reverse proxy.
 Set `web_ui.show_index_stats = false` to hide public index page registry counts.
+Set `web_ui.allow_insecure = true` only for trusted private HTTP deployments
+that need admin login without HTTPS.
 
 ## CLI
 

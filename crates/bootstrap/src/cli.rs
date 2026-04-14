@@ -42,6 +42,13 @@ pub(crate) struct Cli {
     )]
     pub(crate) yara_rules_path: Option<PathBuf>,
 
+    #[arg(
+        long,
+        global = true,
+        help = "Allow admin session cookies over plain HTTP; use only on trusted private networks"
+    )]
+    pub(crate) allow_insecure: bool,
+
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
@@ -186,7 +193,7 @@ pub(crate) async fn execute(cli: Cli) -> anyhow::Result<()> {
             init_logging(&settings.logging, redact_logs)?;
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
-            serve(settings, config_source).await
+            serve(settings, config_source, cli.allow_insecure).await
         }
         Command::InitConfig {
             path,
@@ -295,10 +302,11 @@ pub(crate) fn cli_debug_summary(cli: &Cli) -> String {
             enable_mirroring,
             ..
         }) => format!(
-            "Cli {{ config: {:?}, redact_logs: {}, yara_rules_path: {:?}, command: CreateTenant {{ slug: {:?}, display_name: {:?}, admin_email: {:?}, admin_password: <redacted>, enable_mirroring: {} }} }}",
+            "Cli {{ config: {:?}, redact_logs: {}, yara_rules_path: {:?}, allow_insecure: {}, command: CreateTenant {{ slug: {:?}, display_name: {:?}, admin_email: {:?}, admin_password: <redacted>, enable_mirroring: {} }} }}",
             cli.config,
             cli.redact_logs,
             cli.yara_rules_path,
+            cli.allow_insecure,
             slug,
             display_name,
             admin_email,

@@ -86,6 +86,7 @@ fn cli_help_and_version_are_renderable() {
     assert!(help.contains("Internal Python package registry service"));
     assert!(help.contains("--redact-logs"));
     assert!(help.contains("--yara-rules-path"));
+    assert!(help.contains("--allow-insecure"));
     assert!(help.contains("validate-dist-all"));
 
     let version = Cli::try_parse_from(["pyregistry", "--version"]).expect_err("version exits");
@@ -186,6 +187,16 @@ fn cli_parses_subcommands_and_global_config() {
             ..
         })
     ));
+
+    let cli = Cli::try_parse_from(["pyregistry", "--allow-insecure", "serve"])
+        .expect("allow insecure before serve");
+    assert!(cli.allow_insecure);
+    assert!(matches!(cli.command, Some(Command::Serve)));
+
+    let cli = Cli::try_parse_from(["pyregistry", "serve", "--allow-insecure"])
+        .expect("allow insecure after serve");
+    assert!(cli.allow_insecure);
+    assert!(matches!(cli.command, Some(Command::Serve)));
 }
 
 #[test]
