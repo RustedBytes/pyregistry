@@ -13,6 +13,7 @@ use thiserror::Error;
 use url::Url;
 
 const DEFAULT_CONFIG_PATH: &str = "pyregistry.toml";
+const DEFAULT_LOG_FILTER: &str = "info,turso_core::connection=off";
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -72,10 +73,12 @@ impl Settings {
                 .unwrap_or_else(|_| default_sqlite_config().path),
         });
         let logging = LoggingConfig {
-            filter: std::env::var("LOG_FILTER").unwrap_or_else(|_| "info".into()),
+            filter: std::env::var("LOG_FILTER").unwrap_or_else(|_| DEFAULT_LOG_FILTER.into()),
             module_path: read_env_bool("LOG_MODULE_PATH", true),
             target: read_env_bool("LOG_TARGET", false),
             timestamp: read_env_timestamp("LOG_TIMESTAMP", LoggingTimestamp::Seconds),
+            file_path: read_env_path("LOG_FILE"),
+            file_format: read_env_logging_file_format("LOG_FILE_FORMAT", LoggingFileFormat::Plain),
         };
         let oidc_issuers = std::env::var("OIDC_ISSUERS")
             .ok()
@@ -424,6 +427,7 @@ impl Settings {
                 "security.yara_rules_path must not be empty".into(),
             ));
         }
+        self.logging.validate()?;
         self.security.validate()?;
         self.rate_limit.validate()?;
         self.network_source.validate()?;
@@ -946,18 +950,60 @@ pub struct LoggingConfig {
     pub module_path: bool,
     pub target: bool,
     pub timestamp: LoggingTimestamp,
+    pub file_path: Option<PathBuf>,
+    pub file_format: LoggingFileFormat,
 }
 
 impl LoggingConfig {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
+        let file_path = self
+            .file_path
+            .as_ref()
+            .map_or_else(|| "disabled".to_string(), |path| path.display().to_string());
         format!(
-            "filter={}, module_path={}, target={}, timestamp={}",
+            "filter={}, module_path={}, target={}, timestamp={}, file_path={}, file_format={}",
             self.filter,
             self.module_path,
             self.target,
-            self.timestamp.as_str()
+            self.timestamp.as_str(),
+            file_path,
+            self.file_format.as_str()
         )
+    }
+
+    fn validate(&self) -> Result<(), SettingsError> {
+        if self.filter.trim().is_empty() {
+            return Err(SettingsError::InvalidLoggingConfig(
+                "filter must not be empty".into(),
+            ));
+        }
+        if self
+            .file_path
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(SettingsError::InvalidLoggingConfig(
+                "file_path must not be empty when configured".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LoggingFileFormat {
+    Plain,
+    Json,
+}
+
+impl LoggingFileFormat {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::Json => "json",
+        }
     }
 }
 
@@ -1176,6 +1222,10 @@ struct LoggingConfigFile {
     module_path: bool,
     target: bool,
     timestamp: String,
+    #[serde(default)]
+    file_path: Option<PathBuf>,
+    #[serde(default)]
+    file_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1776,19 +1826,21 @@ impl TryFrom<LoggingConfigFile> for LoggingConfig {
     type Error = SettingsError;
 
     fn try_from(value: LoggingConfigFile) -> Result<Self, Self::Error> {
-        let filter = value.filter.trim().to_string();
-        if filter.is_empty() {
-            return Err(SettingsError::InvalidLoggingConfig(
-                "filter must not be empty".into(),
-            ));
-        }
-
-        Ok(Self {
-            filter,
+        let config = Self {
+            filter: value.filter.trim().to_string(),
             module_path: value.module_path,
             target: value.target,
             timestamp: parse_logging_timestamp(&value.timestamp)?,
-        })
+            file_path: value.file_path,
+            file_format: value
+                .file_format
+                .as_deref()
+                .map(parse_logging_file_format)
+                .transpose()?
+                .unwrap_or(LoggingFileFormat::Plain),
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 
@@ -1799,6 +1851,8 @@ impl From<LoggingConfig> for LoggingConfigFile {
             module_path: value.module_path,
             target: value.target,
             timestamp: value.timestamp.as_str().into(),
+            file_path: value.file_path,
+            file_format: Some(value.file_format.as_str().into()),
         }
     }
 }
@@ -2035,10 +2089,12 @@ fn default_validation_parallelism() -> usize {
 
 fn default_logging_config() -> LoggingConfig {
     LoggingConfig {
-        filter: "info".into(),
+        filter: DEFAULT_LOG_FILTER.into(),
         module_path: true,
         target: false,
         timestamp: LoggingTimestamp::Seconds,
+        file_path: None,
+        file_format: LoggingFileFormat::Plain,
     }
 }
 
@@ -2080,6 +2136,14 @@ fn read_env_bool(name: &str, default: bool) -> bool {
             _ => None,
         })
         .unwrap_or(default)
+}
+
+fn read_env_path(name: &str) -> Option<PathBuf> {
+    std::env::var(name)
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
 }
 
 fn read_csv_env(name: &str) -> Vec<String> {
@@ -2327,6 +2391,23 @@ fn read_env_timestamp(name: &str, default: LoggingTimestamp) -> LoggingTimestamp
         .ok()
         .and_then(|raw| parse_logging_timestamp(&raw).ok())
         .unwrap_or(default)
+}
+
+fn read_env_logging_file_format(name: &str, default: LoggingFileFormat) -> LoggingFileFormat {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| parse_logging_file_format(&raw).ok())
+        .unwrap_or(default)
+}
+
+fn parse_logging_file_format(raw: &str) -> Result<LoggingFileFormat, SettingsError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "plain" | "text" => Ok(LoggingFileFormat::Plain),
+        "json" | "jsonl" | "ndjson" => Ok(LoggingFileFormat::Json),
+        other => Err(SettingsError::InvalidLoggingConfig(format!(
+            "unsupported file_format value `{other}`"
+        ))),
+    }
 }
 
 fn parse_logging_timestamp(raw: &str) -> Result<LoggingTimestamp, SettingsError> {

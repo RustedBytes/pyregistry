@@ -117,6 +117,11 @@ fn round_trips_settings_through_toml_shape() {
         round_trip.logging.timestamp.as_str(),
         original.logging.timestamp.as_str()
     );
+    assert_eq!(round_trip.logging.file_path, original.logging.file_path);
+    assert_eq!(
+        round_trip.logging.file_format.as_str(),
+        original.logging.file_format.as_str()
+    );
     assert_eq!(round_trip.oidc_issuers.len(), original.oidc_issuers.len());
 }
 
@@ -377,6 +382,8 @@ fn rejects_s3_storage_without_bucket() {
             module_path: true,
             target: false,
             timestamp: "seconds".into(),
+            file_path: None,
+            file_format: None,
         }),
         oidc_issuers: default_oidc_issuers().into_iter().map(Into::into).collect(),
     };
@@ -401,6 +408,7 @@ fn write_local_config_includes_minio_s3_help() {
     assert!(raw.contains("MinIO/S3 artifact storage example"));
     assert!(raw.contains("# scheme = \"s3\""));
     assert!(raw.contains("# bucket = \"pyregistry\""));
+    assert!(raw.contains("filter = \"info,turso_core::connection=off\""));
 
     let _ = fs::remove_file(target);
 }
@@ -493,6 +501,8 @@ fn rejects_pgsql_store_without_postgres_config() {
             module_path: true,
             target: false,
             timestamp: "seconds".into(),
+            file_path: None,
+            file_format: None,
         }),
         oidc_issuers: default_oidc_issuers().into_iter().map(Into::into).collect(),
     };
@@ -545,6 +555,8 @@ fn rejects_sqlserver_store_without_sql_server_config() {
             module_path: true,
             target: false,
             timestamp: "seconds".into(),
+            file_path: None,
+            file_format: None,
         }),
         oidc_issuers: default_oidc_issuers().into_iter().map(Into::into).collect(),
     };
@@ -754,9 +766,15 @@ fn component_log_summaries_include_operational_knobs() {
             module_path: false,
             target: true,
             timestamp: LoggingTimestamp::Micros,
+            file_path: Some(PathBuf::from("/tmp/pyregistry.log")),
+            file_format: LoggingFileFormat::Json,
         }
         .log_safe_summary(),
-        "filter=debug, module_path=false, target=true, timestamp=micros"
+        "filter=debug, module_path=false, target=true, timestamp=micros, file_path=/tmp/pyregistry.log, file_format=json"
+    );
+    assert_eq!(
+        default_logging_config().filter,
+        "info,turso_core::connection=off"
     );
 }
 
@@ -883,6 +901,8 @@ fn rejects_invalid_component_config_files() {
             module_path: true,
             target: false,
             timestamp: "seconds".into(),
+            file_path: None,
+            file_format: None,
         }),
         Err(SettingsError::InvalidLoggingConfig(_))
     ));
@@ -960,6 +980,25 @@ fn parses_logging_timestamp_aliases_and_rejects_unknown_values() {
 
     assert!(matches!(
         parse_logging_timestamp("minutes"),
+        Err(SettingsError::InvalidLoggingConfig(_))
+    ));
+}
+
+#[test]
+fn parses_logging_file_format_aliases_and_rejects_unknown_values() {
+    for (raw, expected) in [
+        ("plain", LoggingFileFormat::Plain),
+        ("text", LoggingFileFormat::Plain),
+        ("json", LoggingFileFormat::Json),
+        ("jsonl", LoggingFileFormat::Json),
+        ("ndjson", LoggingFileFormat::Json),
+    ] {
+        let parsed = parse_logging_file_format(raw).expect("file format");
+        assert_eq!(parsed.as_str(), expected.as_str());
+    }
+
+    assert!(matches!(
+        parse_logging_file_format("xml"),
         Err(SettingsError::InvalidLoggingConfig(_))
     ));
 }
@@ -1073,6 +1112,8 @@ fn loads_runtime_settings_from_environment() {
         "LOG_MODULE_PATH",
         "LOG_TARGET",
         "LOG_TIMESTAMP",
+        "LOG_FILE",
+        "LOG_FILE_FORMAT",
         "OIDC_ISSUERS",
         "BIND_ADDRESS",
         "SUPERADMIN_EMAIL",
@@ -1131,6 +1172,8 @@ fn loads_runtime_settings_from_environment() {
     env.set("LOG_MODULE_PATH", "false");
     env.set("LOG_TARGET", "true");
     env.set("LOG_TIMESTAMP", "nanos");
+    env.set("LOG_FILE", "/tmp/pyregistry.log");
+    env.set("LOG_FILE_FORMAT", "json");
     env.set(
             "OIDC_ISSUERS",
             "github|https://github-issuer|https://github-issuer/jwks|pyregistry,gitlab|https://gitlab.example|https://gitlab.example/jwks|gitlab-aud",
@@ -1231,6 +1274,11 @@ fn loads_runtime_settings_from_environment() {
     assert!(!settings.logging.module_path);
     assert!(settings.logging.target);
     assert_eq!(settings.logging.timestamp.as_str(), "nanos");
+    assert_eq!(
+        settings.logging.file_path,
+        Some(PathBuf::from("/tmp/pyregistry.log"))
+    );
+    assert_eq!(settings.logging.file_format.as_str(), "json");
     assert_eq!(settings.oidc_issuers.len(), 2);
     assert_eq!(
         settings.oidc_issuers[1].provider,

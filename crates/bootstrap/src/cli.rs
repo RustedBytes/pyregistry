@@ -183,7 +183,7 @@ pub(crate) async fn execute(cli: Cli) -> anyhow::Result<()> {
             let mut settings =
                 Settings::load_for_cli(config_path.clone()).context("failed to load settings")?;
             apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
-            init_logging(&settings.logging, redact_logs);
+            init_logging(&settings.logging, redact_logs)?;
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             serve(settings, config_source).await
@@ -198,7 +198,7 @@ pub(crate) async fn execute(cli: Cli) -> anyhow::Result<()> {
                 InitStorageTemplate::Minio => Settings::new_minio_template(),
             };
             apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
-            init_logging(&settings.logging, redact_logs);
+            init_logging(&settings.logging, redact_logs)?;
             debug!("parsed CLI arguments: {cli_debug}");
             init_config(path, force, storage, settings)
         }
@@ -206,7 +206,7 @@ pub(crate) async fn execute(cli: Cli) -> anyhow::Result<()> {
             let mut settings =
                 Settings::load_for_cli(config_path.clone()).context("failed to load settings")?;
             apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
-            init_logging(&settings.logging, redact_logs);
+            init_logging(&settings.logging, redact_logs)?;
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             audit_wheel(project, wheel, &settings).await
@@ -222,7 +222,7 @@ pub(crate) async fn execute(cli: Cli) -> anyhow::Result<()> {
             let mut settings =
                 Settings::load_for_cli(config_path.clone()).context("failed to load settings")?;
             apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
-            init_logging(&settings.logging, redact_logs);
+            init_logging(&settings.logging, redact_logs)?;
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             create_tenant(
@@ -240,7 +240,7 @@ pub(crate) async fn execute(cli: Cli) -> anyhow::Result<()> {
             let mut settings =
                 Settings::load_for_cli(config_path.clone()).context("failed to load settings")?;
             apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
-            init_logging(&settings.logging, redact_logs);
+            init_logging(&settings.logging, redact_logs)?;
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             validate_distribution(file, sha256)
@@ -254,7 +254,7 @@ pub(crate) async fn execute(cli: Cli) -> anyhow::Result<()> {
             let mut settings =
                 Settings::load_for_cli(config_path.clone()).context("failed to load settings")?;
             apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
-            init_logging(&settings.logging, redact_logs);
+            init_logging(&settings.logging, redact_logs)?;
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             validate_registry_distributions(settings, config_source, tenant, project, parallelism)
@@ -265,7 +265,7 @@ pub(crate) async fn execute(cli: Cli) -> anyhow::Result<()> {
             let mut settings =
                 Settings::load_for_cli(config_path.clone()).context("failed to load settings")?;
             apply_cli_overrides(&mut settings, yara_rules_path.as_deref())?;
-            init_logging(&settings.logging, redact_logs);
+            init_logging(&settings.logging, redact_logs)?;
             log_build_mode();
             debug!("parsed CLI arguments: {cli_debug}");
             check_registry(settings, config_source, tenant, project).await

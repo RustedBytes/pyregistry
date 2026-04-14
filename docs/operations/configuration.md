@@ -276,14 +276,18 @@ files to an already-known version does not send a publish notification.
 
 ```toml
 [logging]
-filter = "info"
+filter = "info,turso_core::connection=off"
 module_path = true
 target = false
 timestamp = "seconds"
+file_path = ".pyregistry/pyregistry.log"
+file_format = "json"
 ```
 
-Use module paths while debugging. In production, choose logging settings that
-match your collector and retention policy.
+Use module paths while debugging. Set `file_path` or `LOG_FILE` to append the
+logs to a file while keeping console output enabled. Set `file_format = "json"`
+or `LOG_FILE_FORMAT=json` for newline-delimited JSON logs. In production, choose
+logging settings that match your collector and retention policy.
 
 ## OIDC Issuers
 
@@ -369,7 +373,7 @@ Common environment variables:
 | `NETWORK_SOURCE_TRUST_PROXY_HEADERS` | Use trusted proxy headers for network source checks. |
 | `WEB_UI_SHOW_INDEX_STATS` | Show public index page registry snapshot and metrics. |
 | `VALIDATION_DISTRIBUTION_PARALLELISM` | Default artifact validation workers. |
-| `LOG_FILTER` | Log filter string. |
+| `LOG_FILTER` | Log filter string. Defaults to `info,turso_core::connection=off`. |
 | `LOG_MODULE_PATH` | Include module paths in logs. |
 | `LOG_TARGET` | Include log targets. |
 | `LOG_TIMESTAMP` | Log timestamp style: `off`, `seconds`, `millis`, `micros`, or `nanos`. |

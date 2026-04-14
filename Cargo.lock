@@ -3897,6 +3897,7 @@ dependencies = [
  "pyregistry-infrastructure",
  "pyregistry-web",
  "regex",
+ "serde_json",
  "tokio",
  "tower-http",
  "zip 8.5.1",

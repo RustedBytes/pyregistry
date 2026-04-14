@@ -266,10 +266,12 @@ show_index_stats = true
 distribution_parallelism = 4
 
 [logging]
-filter = "info"
+filter = "info,turso_core::connection=off"
 module_path = true
 target = false
 timestamp = "seconds"
+file_path = ".pyregistry/pyregistry.log"
+file_format = "json"
 ```
 
 The current PostgreSQL adapter uses a single `tokio-postgres` connection with
@@ -369,6 +371,8 @@ Useful environment variables:
 - `LOG_MODULE_PATH`
 - `LOG_TARGET`
 - `LOG_TIMESTAMP`
+- `LOG_FILE`
+- `LOG_FILE_FORMAT`
 - `OIDC_ISSUERS`
 
 Rate limiting applies to package and OIDC API paths (`/t/...` and
