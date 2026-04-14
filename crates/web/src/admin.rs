@@ -1955,6 +1955,78 @@ mod tests {
     }
 
     #[test]
+    fn package_detail_template_places_package_update_in_modal() {
+        let details = PackageDetails {
+            tenant_slug: "acme".into(),
+            project_name: "rsloop".into(),
+            normalized_name: "rsloop".into(),
+            summary: "Rust loop helpers".into(),
+            description: "Long package description".into(),
+            source: "Local".into(),
+            security: PackageSecuritySummary::default(),
+            releases: Vec::new(),
+            trusted_publishers: Vec::new(),
+        };
+
+        let rendered = PackageDetailTemplate {
+            details: package_detail_view(details, "http://127.0.0.1:3000"),
+        }
+        .render()
+        .expect("render package detail");
+
+        assert!(rendered.contains("class=\"secondary manage-package-button\""));
+        assert!(rendered.contains("<dialog id=\"package-governance-modal\">"));
+        assert!(rendered.contains("action=\"/admin/t/acme/packages/rsloop\""));
+        assert!(rendered.contains("Update package"));
+        assert!(!rendered.contains("<h2>Package metadata</h2>"));
+    }
+
+    #[test]
+    fn package_detail_template_disables_mirrored_package_management() {
+        let details = PackageDetails {
+            tenant_slug: "acme".into(),
+            project_name: "rsloop".into(),
+            normalized_name: "rsloop".into(),
+            summary: "Mirrored package".into(),
+            description: String::new(),
+            source: "mirrored".into(),
+            security: PackageSecuritySummary::default(),
+            releases: vec![PackageReleaseDetails {
+                version: "1.0.0".into(),
+                yanked_reason: None,
+                artifacts: vec![PackageArtifactDetails {
+                    filename: "rsloop-1.0.0-py3-none-any.whl".into(),
+                    version: "1.0.0".into(),
+                    size_bytes: 42,
+                    sha256: "abc123".into(),
+                    object_key: "objects/rsloop.whl".into(),
+                    yanked_reason: None,
+                    security: ArtifactSecurityDetails::pending(),
+                }],
+            }],
+            trusted_publishers: Vec::new(),
+        };
+
+        let rendered = PackageDetailTemplate {
+            details: package_detail_view(details, "http://127.0.0.1:3000"),
+        }
+        .render()
+        .expect("render package detail");
+
+        assert!(rendered.contains("Mirrored package metadata and releases are managed"));
+        assert!(rendered.contains("Mirrored releases are read-only"));
+        assert!(!rendered.contains("class=\"secondary manage-package-button\""));
+        assert!(!rendered.contains("<dialog id=\"package-governance-modal\">"));
+        assert!(!rendered.contains("New release version"));
+        assert!(!rendered.contains("class=\"secondary manage-release-button\""));
+        assert!(!rendered.contains("<dialog class=\"release-governance-modal\">"));
+        assert!(!rendered.contains("class=\"secondary manage-file-button\""));
+        assert!(!rendered.contains("<dialog class=\"file-governance-modal\">"));
+        assert!(rendered.contains("Download"));
+        assert!(rendered.contains("Scan wheel"));
+    }
+
+    #[test]
     fn package_detail_template_labels_windows_gnu_pysentry_as_unavailable() {
         let unavailable = concat!(
             "1.0.0: PySentry vulnerability lookup is unavailable on Windows GNU targets; ",

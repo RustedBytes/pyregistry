@@ -270,6 +270,11 @@ impl PyregistryApp {
             .get_project_by_normalized_name(tenant.id, current_name.normalized())
             .await?
             .ok_or_else(|| ApplicationError::NotFound("package".into()))?;
+        if matches!(project.source, ProjectSource::Mirrored) {
+            return Err(ApplicationError::Conflict(
+                "mirrored package metadata is managed by the upstream index".into(),
+            ));
+        }
         let next_name = ProjectName::new(command.project_name)?;
         if next_name.normalized() != project.name.normalized()
             && self
@@ -303,6 +308,11 @@ impl PyregistryApp {
         let project = self
             .ensure_project_available(&command.tenant_slug, &command.project_name)
             .await?;
+        if matches!(project.source, ProjectSource::Mirrored) {
+            return Err(ApplicationError::Conflict(
+                "mirrored package releases are managed by the upstream index".into(),
+            ));
+        }
         let version = ReleaseVersion::new(command.version)?;
         if self
             .store
@@ -338,6 +348,11 @@ impl PyregistryApp {
         let project = self
             .ensure_project_available(&command.tenant_slug, &command.project_name)
             .await?;
+        if matches!(project.source, ProjectSource::Mirrored) {
+            return Err(ApplicationError::Conflict(
+                "mirrored package releases are managed by the upstream index".into(),
+            ));
+        }
         let current_version = ReleaseVersion::new(command.current_version)?;
         let mut release = self
             .store

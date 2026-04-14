@@ -188,6 +188,11 @@ impl PyregistryApp {
         let project = self
             .ensure_project_available(tenant_slug, project_name)
             .await?;
+        if matches!(project.source, ProjectSource::Mirrored) {
+            return Err(ApplicationError::Conflict(
+                "mirrored package releases are managed by the upstream index".into(),
+            ));
+        }
         let release_version = ReleaseVersion::new(version)?;
         self.store
             .get_release_by_version(project.id, &release_version)

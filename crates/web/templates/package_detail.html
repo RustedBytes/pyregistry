@@ -359,6 +359,10 @@
         align-items: flex-start;
         gap: 10px;
       }
+      .package-actions {
+        display: grid;
+        gap: 10px;
+      }
       .yank-card {
         border: 1px solid var(--line);
         border-radius: 8px;
@@ -555,12 +559,51 @@
           <div class="meta-line"><span class="muted">Tenant</span><strong>{{ details.tenant_slug }}</strong></div>
           <div class="meta-line"><span class="muted">Releases</span><strong>{{ details.releases.len() }}</strong></div>
           <div class="meta-line"><span class="muted">Publishers</span><strong>{{ details.trusted_publishers.len() }}</strong></div>
+          {% if details.source == "mirrored" %}
+          <p class="muted">Mirrored package metadata and releases are managed by the upstream index. Remove clears the local cache.</p>
+          {% else %}
           <p class="muted">Remove deletes local metadata and stored files for this package. Mirrored packages can be cached again from upstream.</p>
-          <form class="danger-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/remove" onsubmit="return confirm('Remove package {{ details.project_name }} and its local files? This cannot be undone.');">
-            <button class="danger" type="submit">Remove package</button>
-          </form>
+          {% endif %}
+          <div class="package-actions">
+            {% if details.source != "mirrored" %}
+            <button class="secondary manage-package-button" type="button">Manage package</button>
+            {% endif %}
+            <form class="danger-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/remove" onsubmit="return confirm('Remove package {{ details.project_name }} and its local files? This cannot be undone.');">
+              <button class="danger" type="submit">Remove package</button>
+            </form>
+          </div>
         </aside>
       </header>
+
+      {% if details.source != "mirrored" %}
+      <dialog id="package-governance-modal">
+        <div class="modal-shell">
+          <div class="modal-head">
+            <div>
+              <h2>Manage package</h2>
+              <p class="muted">{{ details.project_name }}</p>
+            </div>
+            <form method="dialog">
+              <button class="modal-close" type="submit">Close</button>
+            </form>
+          </div>
+          <form class="edit-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}">
+            <div class="form-grid">
+              <label>Package name
+                <input type="text" name="project_name" value="{{ details.project_name }}" required>
+              </label>
+              <label>Summary
+                <input type="text" name="summary" value="{{ details.summary }}">
+              </label>
+            </div>
+            <label>Description
+              <textarea name="description">{{ details.description }}</textarea>
+            </label>
+            <button type="submit">Update package</button>
+          </form>
+        </div>
+      </dialog>
+      {% endif %}
 
       <section class="section-block">
         <div class="status-panel {% if details.security.vulnerable_file_count > 0 || details.security.vulnerable_dependency_count > 0 %}security-card{% else %}security-ok{% endif %}">
@@ -664,24 +707,6 @@
       {% endif %}
 
       <section class="section-block">
-        <h2>Package metadata</h2>
-        <form class="edit-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}">
-          <div class="form-grid">
-            <label>Package name
-              <input type="text" name="project_name" value="{{ details.project_name }}" required>
-            </label>
-            <label>Summary
-              <input type="text" name="summary" value="{{ details.summary }}">
-            </label>
-          </div>
-          <label>Description
-            <textarea name="description">{{ details.description }}</textarea>
-          </label>
-          <button type="submit">Update package</button>
-        </form>
-      </section>
-
-      <section class="section-block">
         <details class="install-panel">
           <summary>
             <span>Install</span>
@@ -725,6 +750,9 @@
 
       <section class="section-block">
         <h2>Releases</h2>
+        {% if details.source == "mirrored" %}
+        <p class="muted">Mirrored releases are read-only in this registry. Refresh the mirror to pick up upstream changes.</p>
+        {% else %}
         <p class="muted">Yanking is reversible and tells installers to avoid a release or file when possible. Purge is irreversible and removes local artifacts.</p>
         <form class="edit-form" method="post" action="/admin/t/{{ details.tenant_slug }}/packages/{{ details.normalized_name }}/releases">
           <div class="form-grid">
@@ -734,6 +762,7 @@
           </div>
           <button type="submit">Create release</button>
         </form>
+        {% endif %}
         {% for release in details.releases %}
         <div class="release">
           <div class="release-head">
@@ -750,6 +779,7 @@
                 {% endmatch %}
               </div>
             </div>
+            {% if details.source != "mirrored" %}
             <div class="release-actions">
               <button class="secondary manage-release-button" type="button">Manage release</button>
               <dialog class="release-governance-modal">
@@ -818,6 +848,7 @@
                 </div>
               </dialog>
             </div>
+            {% endif %}
           </div>
 
           <details {% if release.expanded %}open{% endif %}>
@@ -943,6 +974,7 @@
                   </button>
                   {% endif %}
 
+                  {% if details.source != "mirrored" %}
                   <button class="secondary manage-file-button" type="button">Manage file</button>
                   <dialog class="file-governance-modal">
                     <div class="modal-shell">
@@ -984,6 +1016,7 @@
                       </div>
                     </div>
                   </dialog>
+                  {% endif %}
                 </div>
               </div>
               {% endfor %}
@@ -1059,6 +1092,15 @@
         document.querySelectorAll(".scan-wheel-button").forEach((button) => {
           button.addEventListener("click", () => {
             runWheelScan(button);
+          });
+        });
+
+        document.querySelectorAll(".manage-package-button").forEach((button) => {
+          button.addEventListener("click", () => {
+            const modal = document.getElementById("package-governance-modal");
+            if (modal instanceof HTMLDialogElement) {
+              modal.showModal();
+            }
           });
         });
 

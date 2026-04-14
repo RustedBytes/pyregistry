@@ -1,18 +1,18 @@
 use super::*;
 use crate::{
-    AttestationSigner, CancellationSignal, Clock, CreateTenantCommand, DeletionCommand,
-    DependencyVulnerabilityQuery, DependencyVulnerabilityReport, DistributionFileInspector,
-    DistributionInspection, DistributionKind, IdGenerator, IssueApiTokenCommand,
-    MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot,
+    AttestationSigner, CancellationSignal, Clock, CreateReleaseCommand, CreateTenantCommand,
+    DeletionCommand, DependencyVulnerabilityQuery, DependencyVulnerabilityReport,
+    DistributionFileInspector, DistributionInspection, DistributionKind, IdGenerator,
+    IssueApiTokenCommand, MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot,
     NoopPackagePublishNotifier, NoopVulnerabilityNotifier, NoopWheelAuditNotifier, ObjectStorage,
     OidcVerifier, PackageArtifactDetails, PackagePublishEventKind, PackagePublishNotification,
     PackagePublishNotifier, PackageReleaseDetails, PackageVulnerability, PackageVulnerabilityQuery,
     PackageVulnerabilityReport, PasswordHasher, RecordAuditEventCommand,
     RegisterTrustedPublisherCommand, RegistryDistributionValidationStatus, RegistryOverview,
-    RegistryStore, SearchHit, TokenHasher, UploadArtifactCommand,
-    ValidateRegistryDistributionsCommand, VulnerabilityNotifier, VulnerabilityScanner,
-    VulnerablePackageNotification, WheelArchiveEntry, WheelArchiveReader, WheelArchiveSnapshot,
-    WheelAuditFindingKind, WheelAuditFindingNotification, WheelAuditNotifier,
+    RegistryStore, SearchHit, TokenHasher, UpdatePackageCommand, UpdateReleaseCommand,
+    UploadArtifactCommand, ValidateRegistryDistributionsCommand, VulnerabilityNotifier,
+    VulnerabilityScanner, VulnerablePackageNotification, WheelArchiveEntry, WheelArchiveReader,
+    WheelArchiveSnapshot, WheelAuditFindingKind, WheelAuditFindingNotification, WheelAuditNotifier,
     WheelSourceSecurityScanResult, WheelSourceSecurityScanner, WheelVirusScanResult,
     WheelVirusScanner,
 };
@@ -502,6 +502,63 @@ async fn remove_package_purges_local_packages_and_evicts_mirrored_packages() {
             .expect("local lookup")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn mirrored_packages_reject_admin_metadata_and_release_mutations() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_and_local_projects(true));
+    let app = test_app(
+        store,
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(FakeMirrorClient::with_artifact_count(0)),
+        1,
+    );
+
+    let update_package = app
+        .update_package(UpdatePackageCommand {
+            tenant_slug: "acme".into(),
+            current_project_name: "demo".into(),
+            project_name: "demo-renamed".into(),
+            summary: "Updated".into(),
+            description: "Updated".into(),
+        })
+        .await
+        .expect_err("mirrored package update should be rejected");
+    assert!(matches!(update_package, ApplicationError::Conflict(_)));
+
+    let create_release = app
+        .create_release(CreateReleaseCommand {
+            tenant_slug: "acme".into(),
+            project_name: "demo".into(),
+            version: "9.9.9".into(),
+        })
+        .await
+        .expect_err("mirrored release creation should be rejected");
+    assert!(matches!(create_release, ApplicationError::Conflict(_)));
+
+    let update_release = app
+        .update_release(UpdateReleaseCommand {
+            tenant_slug: "acme".into(),
+            project_name: "demo".into(),
+            current_version: "1.0.0".into(),
+            version: "1.0.1".into(),
+            yanked_reason: None,
+        })
+        .await
+        .expect_err("mirrored release update should be rejected");
+    assert!(matches!(update_release, ApplicationError::Conflict(_)));
+
+    let upload_artifact = app
+        .upload_release_artifact_as_admin(
+            "acme",
+            "demo",
+            "1.0.0",
+            "demo-1.0.0-py3-none-any.whl".into(),
+            b"wheel bytes".to_vec(),
+        )
+        .await
+        .expect_err("mirrored release upload should be rejected");
+    assert!(matches!(upload_artifact, ApplicationError::Conflict(_)));
 }
 
 #[test]
