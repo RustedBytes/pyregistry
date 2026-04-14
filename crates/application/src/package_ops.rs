@@ -316,6 +316,7 @@ impl PyregistryApp {
             .mirror_client
             .fetch_artifact_bytes(upstream_url)
             .await?;
+        validate_mirrored_artifact_payload(&artifact, &bytes)?;
         self.object_storage
             .put(&artifact.object_key, bytes.clone())
             .await?;

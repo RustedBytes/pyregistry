@@ -7,6 +7,10 @@ use std::io::Read;
 use std::path::Path;
 use zip::ZipArchive;
 
+const MAX_WHEEL_ENTRIES: usize = 10_000;
+const MAX_WHEEL_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_WHEEL_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+
 pub struct ZipWheelArchiveReader;
 
 impl WheelArchiveReader for ZipWheelArchiveReader {
@@ -44,19 +48,45 @@ fn read_zip_archive<R: Read + std::io::Seek>(
     wheel_filename: String,
 ) -> Result<WheelArchiveSnapshot, ApplicationError> {
     let mut entries = Vec::new();
+    let mut total_uncompressed_bytes = 0_u64;
     for index in 0..archive.len() {
-        let mut file = archive
+        if entries.len() >= MAX_WHEEL_ENTRIES {
+            return Err(ApplicationError::Conflict(format!(
+                "wheel archive `{wheel_filename}` has too many files"
+            )));
+        }
+        let file = archive
             .by_index(index)
             .map_err(|error| ApplicationError::External(error.to_string()))?;
         if file.is_dir() {
             continue;
         }
 
+        let entry_name = file.name().to_string();
+        if file.size() > MAX_WHEEL_ENTRY_BYTES {
+            return Err(ApplicationError::Conflict(format!(
+                "wheel entry `{}` exceeds the per-file uncompressed size limit",
+                entry_name
+            )));
+        }
+        total_uncompressed_bytes = total_uncompressed_bytes.saturating_add(file.size());
+        if total_uncompressed_bytes > MAX_WHEEL_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(ApplicationError::Conflict(format!(
+                "wheel archive `{wheel_filename}` exceeds the total uncompressed size limit"
+            )));
+        }
+
         let mut contents = Vec::new();
-        file.read_to_end(&mut contents)
+        file.take(MAX_WHEEL_ENTRY_BYTES + 1)
+            .read_to_end(&mut contents)
             .map_err(|error| ApplicationError::External(error.to_string()))?;
+        if contents.len() as u64 > MAX_WHEEL_ENTRY_BYTES {
+            return Err(ApplicationError::Conflict(format!(
+                "wheel entry `{entry_name}` exceeds the per-file uncompressed size limit"
+            )));
+        }
         entries.push(WheelArchiveEntry {
-            path: file.name().to_string(),
+            path: entry_name,
             contents,
         });
     }
@@ -127,9 +157,29 @@ mod tests {
         assert!(matches!(error, ApplicationError::External(_)));
     }
 
+    #[test]
+    fn rejects_wheels_with_too_many_entries() {
+        let mut fixtures = Vec::new();
+        for index in 0..=MAX_WHEEL_ENTRIES {
+            let path = format!("demo_pkg/module_{index}.py");
+            fixtures.push(ZipFixtureEntry::owned_file(path, b""));
+            if index == MAX_WHEEL_ENTRIES {
+                break;
+            }
+        }
+        let bytes = build_zip_bytes(&fixtures);
+
+        let error = ZipWheelArchiveReader
+            .read_wheel_bytes("too-many-entries.whl", &bytes)
+            .expect_err("entry limit should fail");
+
+        assert!(error.to_string().contains("too many files"));
+    }
+
     enum ZipFixtureEntry<'a> {
         Directory(&'a str),
         File(&'a str, &'a [u8]),
+        OwnedFile(String, &'a [u8]),
     }
 
     impl<'a> ZipFixtureEntry<'a> {
@@ -139,6 +189,10 @@ mod tests {
 
         fn file(path: &'a str, contents: &'a [u8]) -> Self {
             Self::File(path, contents)
+        }
+
+        fn owned_file(path: String, contents: &'a [u8]) -> Self {
+            Self::OwnedFile(path, contents)
         }
     }
 
@@ -154,6 +208,12 @@ mod tests {
                     ZipFixtureEntry::File(path, contents) => {
                         writer
                             .start_file(*path, SimpleFileOptions::default())
+                            .expect("start zip file");
+                        writer.write_all(contents).expect("write zip contents");
+                    }
+                    ZipFixtureEntry::OwnedFile(path, contents) => {
+                        writer
+                            .start_file(path, SimpleFileOptions::default())
                             .expect("start zip file");
                         writer.write_all(contents).expect("write zip contents");
                     }

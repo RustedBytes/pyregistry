@@ -7,7 +7,7 @@ use pyregistry_application::{ApplicationError, ObjectStorage};
 use std::collections::BTreeMap;
 #[cfg(feature = "opendal-fs")]
 use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 use tokio::fs;
 
 use crate::OpenDalStorageConfig;
@@ -22,8 +22,9 @@ impl FileSystemObjectStorage {
         Self { root: root.into() }
     }
 
-    fn path_for(&self, key: &str) -> PathBuf {
-        self.root.join(key)
+    fn path_for(&self, key: &str) -> Result<PathBuf, ApplicationError> {
+        validate_object_key(key)?;
+        Ok(self.root.join(key))
     }
 }
 
@@ -59,8 +60,9 @@ impl OpenDalObjectStorage {
     }
 
     #[cfg(feature = "opendal-fs")]
-    fn key_for(&self, key: &str) -> String {
-        key.trim_start_matches('/').to_string()
+    fn key_for(&self, key: &str) -> Result<String, ApplicationError> {
+        validate_object_key(key)?;
+        Ok(key.trim_start_matches('/').to_string())
     }
 }
 
@@ -68,7 +70,7 @@ impl OpenDalObjectStorage {
 #[async_trait]
 impl ObjectStorage for OpenDalObjectStorage {
     async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<(), ApplicationError> {
-        let key = self.key_for(key);
+        let key = self.key_for(key)?;
         debug!(
             "writing {} byte(s) to OpenDAL object storage scheme `{}` key `{}`",
             bytes.len(),
@@ -83,7 +85,7 @@ impl ObjectStorage for OpenDalObjectStorage {
     }
 
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, ApplicationError> {
-        let key = self.key_for(key);
+        let key = self.key_for(key)?;
         match self.operator.read(&key).await {
             Ok(bytes) => {
                 debug!(
@@ -106,7 +108,7 @@ impl ObjectStorage for OpenDalObjectStorage {
     }
 
     async fn delete(&self, key: &str) -> Result<(), ApplicationError> {
-        let key = self.key_for(key);
+        let key = self.key_for(key)?;
         self.operator
             .delete(&key)
             .await
@@ -351,6 +353,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn filesystem_storage_rejects_unsafe_object_keys() {
+        let root = std::env::temp_dir().join(format!("pyregistry-fs-{}", Uuid::new_v4()));
+        let storage = FileSystemObjectStorage::new(root.clone());
+
+        for key in [
+            "../escape.whl",
+            "tenant/../../escape.whl",
+            "/absolute/escape.whl",
+            "tenant//escape.whl",
+        ] {
+            assert!(
+                storage.put(key, b"nope".to_vec()).await.is_err(),
+                "key `{key}` should be rejected"
+            );
+            assert!(
+                storage.get(key).await.is_err(),
+                "key `{key}` should be rejected"
+            );
+            assert!(
+                storage.delete(key).await.is_err(),
+                "key `{key}` should be rejected"
+            );
+        }
+
+        assert!(
+            std::fs::metadata(root.join("../escape.whl")).is_err(),
+            "unsafe put should not write outside the storage root"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn normalizes_fs_roots_and_rejects_missing_storage_options() {
         let mut options = BTreeMap::from([("root".into(), "relative-blobs".into())]);
@@ -393,7 +427,7 @@ mod tests {
 #[async_trait]
 impl ObjectStorage for FileSystemObjectStorage {
     async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<(), ApplicationError> {
-        let path = self.path_for(key);
+        let path = self.path_for(key)?;
         debug!(
             "writing {} byte(s) to local object storage key `{}` at {}",
             bytes.len(),
@@ -411,7 +445,7 @@ impl ObjectStorage for FileSystemObjectStorage {
     }
 
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, ApplicationError> {
-        let path = self.path_for(key);
+        let path = self.path_for(key)?;
         match fs::read(path).await {
             Ok(bytes) => {
                 debug!(
@@ -430,7 +464,7 @@ impl ObjectStorage for FileSystemObjectStorage {
     }
 
     async fn delete(&self, key: &str) -> Result<(), ApplicationError> {
-        let path = self.path_for(key);
+        let path = self.path_for(key)?;
         match fs::remove_file(path).await {
             Ok(()) => {
                 debug!("deleted local object storage key `{key}`");
@@ -443,4 +477,26 @@ impl ObjectStorage for FileSystemObjectStorage {
             Err(error) => Err(ApplicationError::External(error.to_string())),
         }
     }
+}
+
+fn validate_object_key(key: &str) -> Result<(), ApplicationError> {
+    if key.trim().is_empty()
+        || key.contains('\\')
+        || key.contains("//")
+        || std::path::Path::new(key).is_absolute()
+    {
+        return Err(ApplicationError::Conflict(
+            "object storage key must be a relative path".into(),
+        ));
+    }
+
+    for component in std::path::Path::new(key).components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(ApplicationError::Conflict(
+                "object storage key contains unsafe path components".into(),
+            ));
+        }
+    }
+
+    Ok(())
 }

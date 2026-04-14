@@ -13,9 +13,13 @@ pub use rate_limit::{RateLimitConfig, RateLimiter};
 pub use state::{AppState, MirrorJobs};
 
 use axum::{
-    Router, middleware,
+    Router,
+    extract::DefaultBodyLimit,
+    middleware,
     routing::{get, post},
 };
+
+const MAX_REQUEST_BODY_BYTES: usize = 100 * 1024 * 1024;
 
 pub fn router(state: AppState) -> Router {
     let rate_limit_layer =
@@ -24,6 +28,7 @@ pub fn router(state: AppState) -> Router {
         state.clone(),
         network_source::enforce_network_source_access,
     );
+    let admin_csrf_layer = middleware::from_fn(admin::enforce_admin_origin);
 
     Router::new()
         .route("/", get(admin::index))
@@ -107,6 +112,8 @@ pub fn router(state: AppState) -> Router {
         )
         .method_not_allowed_fallback(error::method_not_allowed)
         .fallback(error::not_found)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .layer(admin_csrf_layer)
         .layer(rate_limit_layer)
         .layer(network_source_layer)
         .with_state(state)
@@ -923,6 +930,31 @@ mod tests {
             .expect("response");
         assert_eq!(login_form.status(), StatusCode::OK);
 
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "email=admin%40pyregistry.local&password=change-me-now",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("login response");
+        assert_eq!(login.status(), StatusCode::SEE_OTHER);
+        let set_cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("set-cookie")
+            .to_str()
+            .expect("cookie");
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Strict"));
+        assert!(set_cookie.contains("Max-Age="));
+
         let cookie = login_cookie(app.clone()).await;
 
         let dashboard = app
@@ -1015,6 +1047,43 @@ mod tests {
             .await
             .expect("after logout response");
         assert_eq!(after_logout.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_posts_reject_cross_site_origins() {
+        let app = router(state().await);
+        let cookie = login_cookie(app.clone()).await;
+
+        let cross_site = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/logout")
+                    .header(header::HOST, "registry.example.test")
+                    .header(header::ORIGIN, "https://evil.example.test")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("cross-site response");
+        assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
+
+        let same_site = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/logout")
+                    .header(header::HOST, "registry.example.test")
+                    .header(header::ORIGIN, "https://registry.example.test")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("same-site response");
+        assert_eq!(same_site.status(), StatusCode::SEE_OTHER);
     }
 
     #[tokio::test]

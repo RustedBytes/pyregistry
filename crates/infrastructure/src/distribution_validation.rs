@@ -6,7 +6,7 @@ use pyregistry_application::{
 };
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::{self, Cursor, Read, Seek};
+use std::io::{self, Cursor, Read, Seek, Write};
 use std::path::Path;
 #[cfg(feature = "file-type-ml")]
 use std::sync::{LazyLock, Mutex};
@@ -14,6 +14,10 @@ use tar::Archive;
 use zip::ZipArchive;
 
 pub struct FilesystemDistributionInspector;
+
+const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
 #[cfg(feature = "file-type-ml")]
 static MAGIKA_SESSION: LazyLock<Mutex<Option<magika::Session>>> =
@@ -382,9 +386,15 @@ fn inspect_zip_archive<R: Read + Seek>(
     }
 
     let mut entry_count = 0;
+    let mut total_uncompressed_bytes = 0_u64;
     let mut has_wheel_metadata = false;
     let mut has_package_metadata = false;
     for index in 0..archive.len() {
+        if entry_count >= MAX_ARCHIVE_ENTRIES {
+            return Err(ApplicationError::Conflict(format!(
+                "wheel archive `{label}` has too many files"
+            )));
+        }
         let mut file = archive
             .by_index(index)
             .map_err(|error| ApplicationError::External(error.to_string()))?;
@@ -393,9 +403,20 @@ fn inspect_zip_archive<R: Read + Seek>(
         }
 
         let name = file.name().to_string();
+        if file.size() > MAX_ARCHIVE_ENTRY_BYTES {
+            return Err(ApplicationError::Conflict(format!(
+                "archive entry `{name}` exceeds the per-file uncompressed size limit"
+            )));
+        }
+        total_uncompressed_bytes = total_uncompressed_bytes.saturating_add(file.size());
+        if total_uncompressed_bytes > MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(ApplicationError::Conflict(format!(
+                "wheel archive `{label}` exceeds the total uncompressed size limit"
+            )));
+        }
         has_wheel_metadata |= name.ends_with(".dist-info/WHEEL");
         has_package_metadata |= name.ends_with(".dist-info/METADATA");
-        io::copy(&mut file, &mut io::sink())
+        io::copy(&mut file, &mut LimitedSink::new(MAX_ARCHIVE_ENTRY_BYTES))
             .map_err(|error| ApplicationError::External(error.to_string()))?;
         entry_count += 1;
     }
@@ -435,13 +456,32 @@ fn inspect_source_tar_gz_reader<R: Read>(
         .map_err(|error| ApplicationError::External(error.to_string()))?;
 
     let mut entry_count = 0;
+    let mut total_uncompressed_bytes = 0_u64;
     for entry in entries {
+        if entry_count >= MAX_ARCHIVE_ENTRIES {
+            return Err(ApplicationError::Conflict(format!(
+                "source archive `{label}` has too many files"
+            )));
+        }
         let mut entry = entry.map_err(|error| ApplicationError::External(error.to_string()))?;
         if !entry.header().entry_type().is_file() {
             continue;
         }
 
-        io::copy(&mut entry, &mut io::sink())
+        let entry_size = entry.size();
+        if entry_size > MAX_ARCHIVE_ENTRY_BYTES {
+            return Err(ApplicationError::Conflict(format!(
+                "source archive `{label}` contains a file over the uncompressed size limit"
+            )));
+        }
+        total_uncompressed_bytes = total_uncompressed_bytes.saturating_add(entry_size);
+        if total_uncompressed_bytes > MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(ApplicationError::Conflict(format!(
+                "source archive `{label}` exceeds the total uncompressed size limit"
+            )));
+        }
+
+        io::copy(&mut entry, &mut LimitedSink::new(MAX_ARCHIVE_ENTRY_BYTES))
             .map_err(|error| ApplicationError::External(error.to_string()))?;
         entry_count += 1;
     }
@@ -466,7 +506,13 @@ fn inspect_source_zip_archive<R: Read + Seek>(
     }
 
     let mut entry_count = 0;
+    let mut total_uncompressed_bytes = 0_u64;
     for index in 0..archive.len() {
+        if entry_count >= MAX_ARCHIVE_ENTRIES {
+            return Err(ApplicationError::Conflict(format!(
+                "source zip archive `{label}` has too many files"
+            )));
+        }
         let mut file = archive
             .by_index(index)
             .map_err(|error| ApplicationError::External(error.to_string()))?;
@@ -474,7 +520,19 @@ fn inspect_source_zip_archive<R: Read + Seek>(
             continue;
         }
 
-        io::copy(&mut file, &mut io::sink())
+        if file.size() > MAX_ARCHIVE_ENTRY_BYTES {
+            return Err(ApplicationError::Conflict(format!(
+                "source zip archive `{label}` contains a file over the uncompressed size limit"
+            )));
+        }
+        total_uncompressed_bytes = total_uncompressed_bytes.saturating_add(file.size());
+        if total_uncompressed_bytes > MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(ApplicationError::Conflict(format!(
+                "source zip archive `{label}` exceeds the total uncompressed size limit"
+            )));
+        }
+
+        io::copy(&mut file, &mut LimitedSink::new(MAX_ARCHIVE_ENTRY_BYTES))
             .map_err(|error| ApplicationError::External(error.to_string()))?;
         entry_count += 1;
     }
@@ -486,6 +544,34 @@ fn inspect_source_zip_archive<R: Read + Seek>(
     }
 
     Ok(entry_count)
+}
+
+struct LimitedSink {
+    remaining: u64,
+}
+
+impl LimitedSink {
+    fn new(limit: u64) -> Self {
+        Self { remaining: limit }
+    }
+}
+
+impl Write for LimitedSink {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let length = u64::try_from(buffer.len()).unwrap_or(u64::MAX);
+        if length > self.remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive entry exceeds uncompressed size limit",
+            ));
+        }
+        self.remaining -= length;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

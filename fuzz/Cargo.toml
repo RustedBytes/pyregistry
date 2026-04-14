@@ -1,0 +1,30 @@
+[package]
+name = "pyregistry-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+password-hash = { version = "0.6", features = ["getrandom"] }
+password-hash-05 = { package = "password-hash", version = "0.5", features = ["getrandom"] }
+pyregistry-application = { path = "../crates/application" }
+pyregistry-domain = { path = "../crates/domain" }
+pyregistry-infrastructure = { path = "../crates/infrastructure", default-features = false }
+
+[[bin]]
+name = "domain_inputs"
+path = "fuzz_targets/domain_inputs.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wheel_archive"
+path = "fuzz_targets/wheel_archive.rs"
+test = false
+doc = false

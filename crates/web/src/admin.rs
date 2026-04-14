@@ -16,11 +16,12 @@ use crate::{
 use axum::{
     Form, Json,
     body::{Body, Bytes},
-    extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    extract::{Path, Query, Request, State},
+    http::{HeaderMap, Method, StatusCode, header},
+    middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::{Cookie, CookieJar};
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use log::{debug, info, warn};
 use pyregistry_application::{
     AdminSession, ApplicationError, AuditStoredWheelCommand, CreateTenantCommand, DeletionCommand,
@@ -30,6 +31,63 @@ use pyregistry_application::{
 use pyregistry_domain::{DeletionMode, TokenScope, TrustedPublisherProvider};
 use std::collections::HashMap;
 use std::fmt::Write;
+
+pub(crate) async fn enforce_admin_origin(request: Request, next: Next) -> Response {
+    if request.method() != Method::GET && request.uri().path().starts_with("/admin") {
+        let headers = request.headers();
+        if !request_has_same_origin(headers) {
+            warn!(
+                "admin request rejected by origin check for path `{}`",
+                request.uri().path()
+            );
+            return WebError {
+                status: StatusCode::FORBIDDEN,
+                message: "Cross-site admin form submissions are not allowed".into(),
+            }
+            .into_response();
+        }
+    }
+
+    next.run(request).await
+}
+
+fn request_has_same_origin(headers: &HeaderMap) -> bool {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+
+    for header_name in [header::ORIGIN, header::REFERER] {
+        let Some(value) = headers
+            .get(header_name)
+            .and_then(|value| value.to_str().ok())
+        else {
+            continue;
+        };
+        if !origin_host_matches(value, host) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn origin_host_matches(value: &str, expected_host: &str) -> bool {
+    url::Url::parse(value)
+        .ok()
+        .and_then(|url| {
+            url.host_str().map(|host| {
+                let port = url
+                    .port()
+                    .map_or_else(String::new, |port| format!(":{port}"));
+                format!("{host}{port}")
+            })
+        })
+        .as_deref()
+        == Some(expected_host)
+}
 
 pub(crate) async fn index(State(state): State<AppState>) -> Result<Html<String>, WebError> {
     let overview = state.app.get_registry_overview().await?;
@@ -87,6 +145,8 @@ pub(crate) async fn login_submit(
             let cookie = Cookie::build(("admin_session", session_id))
                 .path("/")
                 .http_only(true)
+                .same_site(SameSite::Strict)
+                .max_age(time::Duration::hours(8))
                 .build();
             Ok((jar.add(cookie), Redirect::to("/admin/dashboard")).into_response())
         }

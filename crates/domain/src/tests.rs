@@ -36,6 +36,22 @@ fn rejects_empty_project_names_and_invalid_versions() {
             ..
         }
     ));
+    for name in [
+        "../demo",
+        "demo/../../escape",
+        "demo\\escape",
+        "/absolute",
+        "trailing-",
+        ".hidden",
+    ] {
+        assert!(matches!(
+            ProjectName::new(name).expect_err("unsafe project"),
+            DomainError::InvalidValue {
+                field: "project_name",
+                ..
+            }
+        ));
+    }
     assert!(matches!(
         ReleaseVersion::new(" bad/version ").expect_err("invalid version"),
         DomainError::InvalidValue {
@@ -72,6 +88,30 @@ fn validates_artifact_filename() {
             ..
         }
     ));
+
+    for filename in [
+        "../demo-1.0.0-py3-none-any.whl",
+        "demo/escape-1.0.0-py3-none-any.whl",
+        "demo\\escape-1.0.0-py3-none-any.whl",
+        "demo..escape-1.0.0-py3-none-any.whl",
+    ] {
+        assert!(matches!(
+            Artifact::new(
+                ArtifactId::default(),
+                ReleaseId::default(),
+                filename,
+                10,
+                DigestSet::new("a".repeat(64), None).expect("digest"),
+                "objects/demo.whl",
+                Utc::now(),
+            )
+            .expect_err("unsafe artifact filename"),
+            DomainError::InvalidValue {
+                field: "artifact_filename",
+                ..
+            }
+        ));
+    }
 }
 
 #[test]

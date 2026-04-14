@@ -146,6 +146,7 @@ impl Artifact {
         created_at: DateTime<Utc>,
     ) -> Result<Self, DomainError> {
         let filename = filename.into();
+        validate_artifact_filename_segment(&filename)?;
         let kind = ArtifactKind::from_filename(&filename)?;
 
         Ok(Self {
@@ -173,6 +174,23 @@ impl Artifact {
     pub fn unyank(&mut self) {
         self.yanked = None;
     }
+}
+
+fn validate_artifact_filename_segment(filename: &str) -> Result<(), DomainError> {
+    if filename.is_empty()
+        || filename == "."
+        || filename == ".."
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains("..")
+    {
+        return Err(DomainError::InvalidValue {
+            field: "artifact_filename",
+            message: "artifact filename must be a single safe path segment".into(),
+        });
+    }
+
+    Ok(())
 }
 
 pub fn ensure_unique_filenames(artifacts: &[Artifact]) -> Result<(), DomainError> {

@@ -317,6 +317,37 @@ async fn mirrored_artifact_download_refetches_and_recaches_missing_payload() {
 }
 
 #[tokio::test]
+async fn mirrored_artifact_lazy_download_rejects_digest_mismatch() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_single_artifact_metadata_and_payload(
+        "demo-1.0.0-py3-none-any.whl",
+        "1.0.0",
+        "https://files.example.test/demo-1.0.0-py3-none-any.whl",
+        b"expected wheel bytes",
+        b"tampered wheel bytes".to_vec(),
+    ));
+    let app = test_app(store, storage.clone(), mirror, 1).with_mirror_eager_download_percent(0);
+
+    app.resolve_project_from_mirror("acme", "demo")
+        .await
+        .expect("mirror resolution")
+        .expect("mirrored project");
+
+    let error = app
+        .download_artifact("acme", "demo", "1.0.0", "demo-1.0.0-py3-none-any.whl")
+        .await
+        .expect_err("tampered mirrored artifact should be rejected");
+
+    assert!(error.to_string().contains("sha256 mismatch"));
+    assert_eq!(
+        storage.object_count(),
+        0,
+        "invalid lazy mirror payload must not be cached"
+    );
+}
+
+#[tokio::test]
 async fn mirrored_project_preserves_provenance_and_skips_already_cached_payloads() {
     let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
     let storage = Arc::new(FakeObjectStorage::default());
@@ -2264,6 +2295,34 @@ impl FakeMirrorClient {
                 }],
             },
             bytes_by_url: HashMap::from([(download_url.into(), bytes)]),
+            counters: Mutex::new(MirrorCounters::default()),
+        }
+    }
+
+    fn with_single_artifact_metadata_and_payload(
+        filename: &str,
+        version: &str,
+        download_url: &str,
+        expected_bytes: &[u8],
+        served_bytes: Vec<u8>,
+    ) -> Self {
+        let sha256 = hex::encode(Sha256::digest(expected_bytes));
+        Self {
+            snapshot: MirroredProjectSnapshot {
+                canonical_name: "demo".into(),
+                summary: "Demo package".into(),
+                description: "Demo package".into(),
+                artifacts: vec![MirroredArtifactSnapshot {
+                    filename: filename.into(),
+                    version: version.into(),
+                    size_bytes: expected_bytes.len() as u64,
+                    sha256,
+                    blake2b_256: None,
+                    download_url: download_url.into(),
+                    provenance_payload: None,
+                }],
+            },
+            bytes_by_url: HashMap::from([(download_url.into(), served_bytes)]),
             counters: Mutex::new(MirrorCounters::default()),
         }
     }

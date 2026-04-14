@@ -322,6 +322,19 @@ impl Settings {
                 "database_store `sqlite` requires a [sqlite] config section or SQLITE_PATH".into(),
             ));
         }
+        if is_public_bind_address(&self.bind_address) {
+            if self.superadmin_password == "change-me-now" {
+                return Err(SettingsError::InvalidSecurityConfig(
+                    "SUPERADMIN_PASSWORD must be changed before binding to a public interface"
+                        .into(),
+                ));
+            }
+            if self.cookie_secret == "replace-me-with-a-long-random-string" {
+                return Err(SettingsError::InvalidSecurityConfig(
+                    "COOKIE_SECRET must be changed before binding to a public interface".into(),
+                ));
+            }
+        }
         if let Some(sqlite) = &self.sqlite
             && sqlite.path.as_os_str().is_empty()
         {
@@ -387,6 +400,15 @@ impl Settings {
 
         Ok(())
     }
+}
+
+fn is_public_bind_address(bind_address: &str) -> bool {
+    let host = bind_address
+        .rsplit_once(':')
+        .map_or(bind_address, |(host, _)| host)
+        .trim()
+        .trim_matches(['[', ']']);
+    !matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
 #[derive(Debug, Clone)]

@@ -16,8 +16,8 @@ services:
       YARA_RULES_PATH: /app/supplied/signature-base/yara
       OIDC_ISSUERS: github|https://issuer.pyregistry.local|http://jwks/jwks.json|pyregistry
       SUPERADMIN_EMAIL: admin@pyregistry.local
-      SUPERADMIN_PASSWORD: change-me-now
-      COOKIE_SECRET: replace-me-with-a-long-random-string
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:?set SUPERADMIN_PASSWORD}
+      COOKIE_SECRET: ${COOKIE_SECRET:?set COOKIE_SECRET}
     ports:
       - "3000:3000"
     volumes:

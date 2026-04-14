@@ -37,10 +37,15 @@ pub struct ProjectName {
 impl ProjectName {
     pub fn new(input: impl Into<String>) -> Result<Self, DomainError> {
         let original = input.into().trim().to_string();
-        if original.is_empty() {
+        let valid = Regex::new(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+            .expect("valid project name regex");
+
+        if original.is_empty() || !valid.is_match(&original) {
             return Err(DomainError::InvalidValue {
                 field: "project_name",
-                message: "project name cannot be empty".into(),
+                message:
+                    "project name must contain only letters, numbers, dots, dashes, and underscores"
+                        .into(),
             });
         }
 
