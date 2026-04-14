@@ -140,6 +140,19 @@ impl PyregistryApp {
         let now = self.clock.now();
         let project_name = ProjectName::new(command.project_name)?;
         let version = ReleaseVersion::new(command.version)?;
+        let inspection = self
+            .distribution_inspector
+            .inspect_distribution_bytes(&command.filename, &command.content)?;
+        if inspection.file_type.extension_mismatch() {
+            warn!(
+                "upload rejected because artifact `{}` content type `{}` does not match extension {:?}",
+                command.filename, inspection.file_type.label, inspection.file_type.actual_extension
+            );
+            return Err(ApplicationError::Conflict(format!(
+                "artifact `{}` content does not match its distribution extension",
+                command.filename
+            )));
+        }
         let existing_project = self
             .store
             .get_project_by_normalized_name(access.tenant.id, project_name.normalized())
@@ -365,26 +378,54 @@ impl PyregistryApp {
             ));
         }
 
-        let audience = publishers[0].audience.clone();
-        let identity = self
-            .oidc_verifier
-            .verify(&command.oidc_token, &audience)
-            .await?;
-        let publisher = publishers
+        let mut matched = None;
+        let mut last_error = None;
+        let mut audiences = publishers
             .iter()
-            .find(|publisher| publisher.matches(&identity).is_ok())
-            .ok_or_else(|| {
-                warn!(
-                    "OIDC publish token mint rejected because issuer `{}` subject `{}` matched no trusted publisher for tenant `{}` project `{}`",
-                    identity.issuer,
-                    identity.subject,
-                    tenant.slug.as_str(),
-                    project_name.original()
-                );
-                ApplicationError::Unauthorized(
+            .map(|publisher| publisher.audience.clone())
+            .collect::<Vec<_>>();
+        audiences.sort();
+        audiences.dedup();
+        for audience in audiences {
+            match self
+                .oidc_verifier
+                .verify(&command.oidc_token, &audience)
+                .await
+            {
+                Ok(identity) => {
+                    if let Some(publisher) = publishers
+                        .iter()
+                        .find(|publisher| publisher.matches(&identity).is_ok())
+                    {
+                        matched = Some((publisher.clone(), identity));
+                        break;
+                    }
+                    warn!(
+                        "OIDC token for issuer `{}` subject `{}` verified for audience `{audience}` but matched no trusted publisher for tenant `{}` project `{}`",
+                        identity.issuer,
+                        identity.subject,
+                        tenant.slug.as_str(),
+                        project_name.original()
+                    );
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
+            }
+        }
+        let (publisher, identity) = matched.ok_or_else(|| {
+            warn!(
+                "OIDC publish token mint rejected because token matched no trusted publisher for tenant `{}` project `{}`",
+                tenant.slug.as_str(),
+                project_name.original()
+            );
+            match last_error {
+                Some(ApplicationError::External(message)) => ApplicationError::External(message),
+                _ => ApplicationError::Unauthorized(
                     "OIDC token does not match a trusted publisher".into(),
-                )
-            })?;
+                ),
+            }
+        })?;
         let identity_issuer = identity.issuer.clone();
         let identity_subject = identity.subject.clone();
 

@@ -75,6 +75,8 @@ pub(crate) async fn serve(settings: Settings, config_source: String) -> anyhow::
             trust_proxy_headers: settings.network_source.trust_proxy_headers,
         }),
         show_index_stats: settings.web_ui.show_index_stats,
+        secure_admin_cookies: bind_address_is_public(&settings.bind_address),
+        external_base_url: None,
     };
     info!(
         "HTTP API rate limiting: {}",
@@ -114,6 +116,15 @@ pub(crate) async fn serve(settings: Settings, config_source: String) -> anyhow::
 
     info!("pyregistry server shutdown complete");
     Ok(())
+}
+
+fn bind_address_is_public(bind_address: &str) -> bool {
+    let host = bind_address
+        .rsplit_once(':')
+        .map_or(bind_address, |(host, _)| host)
+        .trim()
+        .trim_matches(['[', ']']);
+    !matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
 pub(crate) fn spawn_mirror_updater(

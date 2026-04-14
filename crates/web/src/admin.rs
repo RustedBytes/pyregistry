@@ -11,7 +11,7 @@ use crate::{
         PackageVulnerabilityView, PublisherFormData, RevokeTokenFormData, SearchQuery, TenantView,
         WheelAuditResponse, YankFormData,
     },
-    state::{AppState, MirrorJobPhase, MirrorJobStatus, mirror_job_key},
+    state::{AppState, MirrorJobPhase, MirrorJobStatus, StoredAdminSession, mirror_job_key},
 };
 use axum::{
     Form, Json,
@@ -119,11 +119,13 @@ pub(crate) async fn login_submit(
                 "admin session established for `{}` (superadmin={}, tenant={:?})",
                 session.email, session.is_superadmin, session.tenant_slug
             );
-            state
-                .sessions
-                .write()
-                .await
-                .insert(session_id.clone(), session.clone());
+            state.sessions.write().await.insert(
+                session_id.clone(),
+                StoredAdminSession {
+                    session: session.clone(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(8),
+                },
+            );
             record_audit_event(
                 &state,
                 session.email.clone(),
@@ -145,6 +147,7 @@ pub(crate) async fn login_submit(
             let cookie = Cookie::build(("admin_session", session_id))
                 .path("/")
                 .http_only(true)
+                .secure(state.secure_admin_cookies)
                 .same_site(SameSite::Strict)
                 .max_age(time::Duration::hours(8))
                 .build();
@@ -170,7 +173,8 @@ pub(crate) async fn logout(
     } else {
         None
     };
-    if let Some(session) = removed_session {
+    if let Some(stored) = removed_session {
+        let session = stored.session;
         record_audit_event(
             &state,
             session.email.clone(),
@@ -570,7 +574,11 @@ pub(crate) async fn package_detail(
         "admin `{}` is viewing package `{}` in tenant `{}`",
         session.email, project, tenant
     );
-    let install_base_url = registry_base_url(&headers);
+    let install_base_url = registry_base_url(
+        &headers,
+        state.network_source.trust_proxy_headers(),
+        state.external_base_url.as_deref(),
+    );
     let details = package_detail_view(
         state.app.get_package_details(&tenant, &project).await?,
         &install_base_url,
@@ -1290,12 +1298,30 @@ fn attachment_content_disposition(filename: &str) -> String {
     format!("attachment; filename=\"{safe_filename}\"")
 }
 
-fn registry_base_url(headers: &HeaderMap) -> String {
-    let host = forwarded_value(headers, "x-forwarded-host")
-        .or_else(|| forwarded_value(headers, header::HOST.as_str()))
-        .unwrap_or("<registry-host>");
-    let scheme =
-        forwarded_value(headers, "x-forwarded-proto").unwrap_or_else(|| default_scheme_for(host));
+fn registry_base_url(
+    headers: &HeaderMap,
+    trust_forwarded: bool,
+    external_base_url: Option<&str>,
+) -> String {
+    if let Some(base_url) = external_base_url
+        .map(str::trim)
+        .filter(|base_url| !base_url.is_empty())
+    {
+        return base_url.trim_end_matches('/').to_string();
+    }
+
+    let host = if trust_forwarded {
+        forwarded_value(headers, "x-forwarded-host")
+            .or_else(|| forwarded_value(headers, header::HOST.as_str()))
+    } else {
+        forwarded_value(headers, header::HOST.as_str())
+    }
+    .unwrap_or("<registry-host>");
+    let scheme = if trust_forwarded {
+        forwarded_value(headers, "x-forwarded-proto").unwrap_or_else(|| default_scheme_for(host))
+    } else {
+        default_scheme_for(host)
+    };
     format!("{scheme}://{host}")
 }
 
@@ -1951,14 +1977,29 @@ mod tests {
     fn registry_base_url_prefers_forwarded_headers_and_ignores_empty_values() {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:3000"));
-        assert_eq!(registry_base_url(&headers), "http://127.0.0.1:3000");
+        assert_eq!(
+            registry_base_url(&headers, false, None),
+            "http://127.0.0.1:3000"
+        );
 
         headers.insert(
             "x-forwarded-host",
             HeaderValue::from_static("registry.example, proxy.local"),
         );
         headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        assert_eq!(registry_base_url(&headers), "https://registry.example");
+        assert_eq!(
+            registry_base_url(&headers, true, None),
+            "https://registry.example"
+        );
+        assert_eq!(
+            registry_base_url(&headers, false, None),
+            "http://127.0.0.1:3000",
+            "forwarded headers must be ignored unless proxy headers are trusted"
+        );
+        assert_eq!(
+            registry_base_url(&headers, false, Some("https://configured.example/")),
+            "https://configured.example"
+        );
 
         headers.insert("x-forwarded-host", HeaderValue::from_static("   "));
         assert_eq!(

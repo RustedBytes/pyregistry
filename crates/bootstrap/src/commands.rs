@@ -6,8 +6,8 @@ use pyregistry_application::{
 };
 use pyregistry_infrastructure::{
     ArtifactDownloadRetryPolicy, FilesystemDistributionInspector,
-    FoxGuardWheelSourceSecurityScanner, PypiMirrorClient, Settings, YaraWheelVirusScanner,
-    ZipWheelArchiveReader, build_application, seed_application,
+    FoxGuardWheelSourceSecurityScanner, MirrorDownloadLimits, PypiMirrorClient, Settings,
+    YaraWheelVirusScanner, ZipWheelArchiveReader, build_application, seed_application,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -166,8 +166,17 @@ pub(crate) async fn ensure_wheel_is_available(
         settings.pypi.artifact_download_max_attempts,
         Duration::from_millis(settings.pypi.artifact_download_initial_backoff_millis),
     );
-    let mirror_client = PypiMirrorClient::with_retry_policy(&settings.pypi.base_url, retry_policy)
-        .context("configured PyPI base URL is invalid")?;
+    let mirror_limits = MirrorDownloadLimits::new(
+        Duration::from_secs(settings.pypi.mirror_http_timeout_seconds),
+        settings.pypi.mirror_metadata_max_bytes,
+        settings.pypi.mirror_artifact_max_bytes,
+    );
+    let mirror_client = PypiMirrorClient::with_retry_policy_and_limits(
+        &settings.pypi.base_url,
+        retry_policy,
+        mirror_limits,
+    )
+    .context("configured PyPI base URL is invalid")?;
     tokio::select! {
         result = mirror_client.download_project_artifact_by_filename(project, filename, wheel) => {
             result.with_context(|| {

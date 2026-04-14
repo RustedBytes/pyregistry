@@ -130,8 +130,9 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use http_body_util::BodyExt;
     use pyregistry_application::{
-        ApplicationError, AttestationSigner, Clock, CreateTenantCommand,
-        DependencyVulnerabilityQuery, DependencyVulnerabilityReport, IdGenerator,
+        AdminSession, ApplicationError, AttestationSigner, Clock, CreateTenantCommand,
+        DependencyVulnerabilityQuery, DependencyVulnerabilityReport, DistributionFileInspector,
+        DistributionInspection, DistributionKind, FileTypeInspection, IdGenerator,
         IssueApiTokenCommand, MirrorClient, MirroredProjectSnapshot, NoopPackagePublishNotifier,
         NoopVulnerabilityNotifier, NoopWheelAuditNotifier, ObjectStorage, OidcVerifier,
         PackageVulnerabilityQuery, PackageVulnerabilityReport, PasswordHasher, PyregistryApp,
@@ -326,6 +327,49 @@ mod tests {
         }
     }
 
+    struct PermissiveDistributionInspector;
+
+    impl DistributionFileInspector for PermissiveDistributionInspector {
+        fn inspect_distribution(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<DistributionInspection, ApplicationError> {
+            Err(ApplicationError::External(
+                "path distribution inspection is unused in web tests".into(),
+            ))
+        }
+
+        fn inspect_distribution_bytes(
+            &self,
+            filename: &str,
+            bytes: &[u8],
+        ) -> Result<DistributionInspection, ApplicationError> {
+            Ok(DistributionInspection {
+                kind: if filename.ends_with(".whl") {
+                    DistributionKind::Wheel
+                } else if filename.ends_with(".zip") {
+                    DistributionKind::SourceZip
+                } else {
+                    DistributionKind::SourceTarGz
+                },
+                size_bytes: bytes.len() as u64,
+                sha256: "a".repeat(64),
+                archive_entry_count: 1,
+                file_type: FileTypeInspection {
+                    detector: "test".into(),
+                    label: "zip".into(),
+                    mime_type: "application/zip".into(),
+                    group: "archive".into(),
+                    description: "Zip archive".into(),
+                    score: 1.0,
+                    actual_extension: Some("zip".into()),
+                    expected_extensions: vec!["zip".into()],
+                    matches_extension: true,
+                },
+            })
+        }
+    }
+
     struct NoopVirusScanner;
 
     impl WheelVirusScanner for NoopVirusScanner {
@@ -394,6 +438,7 @@ mod tests {
             Arc::new(NoopPackagePublishNotifier),
             Arc::new(NoopWheelAuditNotifier),
             Arc::new(StaticWheelArchiveReader),
+            Arc::new(PermissiveDistributionInspector),
             Arc::new(NoopVirusScanner),
             Arc::new(NoopSourceSecurityScanner),
             Arc::new(FixedClock),
@@ -420,6 +465,8 @@ mod tests {
             rate_limiter: RateLimiter::disabled(),
             network_source: NetworkSourcePolicy::allow_all(),
             show_index_stats: true,
+            secure_admin_cookies: false,
+            external_base_url: None,
         }
     }
 
@@ -482,6 +529,11 @@ mod tests {
 
     fn with_network_source(mut state: AppState, config: NetworkSourceConfig) -> AppState {
         state.network_source = NetworkSourcePolicy::new(config);
+        state
+    }
+
+    fn with_rate_limit(mut state: AppState, config: RateLimitConfig) -> AppState {
+        state.rate_limiter = RateLimiter::new(config);
         state
     }
 
@@ -972,6 +1024,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_login_is_rate_limited() {
+        let app = router(with_rate_limit(
+            state().await,
+            RateLimitConfig {
+                enabled: true,
+                requests_per_minute: 1,
+                burst: 1,
+                max_tracked_clients: 8,
+                trust_proxy_headers: false,
+            },
+        ));
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("email=admin%40pyregistry.local&password=wrong"))
+                    .expect("request"),
+            )
+            .await
+            .expect("first login response");
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("email=admin%40pyregistry.local&password=wrong"))
+                    .expect("request"),
+            )
+            .await
+            .expect("second login response");
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
     async fn admin_rejects_bad_sessions_and_logout_expires_cookie() {
         let app = router(state().await);
 
@@ -1047,6 +1140,41 @@ mod tests {
             .await
             .expect("after logout response");
         assert_eq!(after_logout.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_session_expiry_is_enforced_server_side() {
+        let state = state().await;
+        state.sessions.write().await.insert(
+            "expired-session".into(),
+            crate::state::StoredAdminSession {
+                session: AdminSession {
+                    email: "admin@pyregistry.local".into(),
+                    tenant_slug: None,
+                    is_superadmin: true,
+                },
+                expires_at: Utc::now() - chrono::Duration::minutes(1),
+            },
+        );
+        let sessions = state.sessions.clone();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/dashboard")
+                    .header(header::COOKIE, "admin_session=expired-session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("expired session response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            !sessions.read().await.contains_key("expired-session"),
+            "expired server-side sessions should be pruned on access"
+        );
     }
 
     #[tokio::test]

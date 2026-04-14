@@ -21,19 +21,27 @@ pub(crate) async fn require_session(
             }
         })?;
 
-    state
-        .sessions
-        .read()
-        .await
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| {
+    let stored = state.sessions.read().await.get(&session_id).cloned();
+    let Some(stored) = stored else {
+        return Err({
             warn!("admin session lookup failed because the session was not found or expired");
             WebError {
                 status: StatusCode::UNAUTHORIZED,
                 message: "Session expired, please sign in again".into(),
             }
-        })
+        });
+    };
+
+    if stored.expires_at <= chrono::Utc::now() {
+        state.sessions.write().await.remove(&session_id);
+        warn!("admin session lookup failed because the server-side session expired");
+        return Err(WebError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Session expired, please sign in again".into(),
+        });
+    }
+
+    Ok(stored.session)
 }
 
 pub(crate) fn ensure_tenant_access(session: &AdminSession, tenant: &str) -> Result<(), WebError> {

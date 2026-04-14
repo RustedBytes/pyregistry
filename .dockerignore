@@ -1,4 +1,6 @@
 target/
+fuzz/target/
+fuzz/corpus/
 .git/
 .github/
 .cargo/

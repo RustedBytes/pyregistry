@@ -6,10 +6,11 @@ use crate::SqlServerRegistryStore;
 use crate::SqliteRegistryStore;
 use crate::{
     ArgonPasswordHasher, ArtifactDownloadRetryPolicy, ArtifactStorageBackend, DatabaseStoreKind,
-    DiscordWebhookVulnerabilityNotifier, FileSystemObjectStorage,
+    DiscordWebhookVulnerabilityNotifier, FileSystemObjectStorage, FilesystemDistributionInspector,
     FoxGuardWheelSourceSecurityScanner, InMemoryRegistryStore, JsonAttestationSigner,
-    OpenDalObjectStorage, PySentryVulnerabilityScanner, PypiMirrorClient, Settings,
-    Sha256TokenHasher, SimpleJwksOidcVerifier, YaraWheelVirusScanner, ZipWheelArchiveReader,
+    MirrorDownloadLimits, OpenDalObjectStorage, PySentryVulnerabilityScanner, PypiMirrorClient,
+    Settings, Sha256TokenHasher, SimpleJwksOidcVerifier, YaraWheelVirusScanner,
+    ZipWheelArchiveReader,
 };
 use log::{info, warn};
 use pyregistry_application::{
@@ -27,21 +28,30 @@ pub async fn build_application(
 ) -> Result<Arc<PyregistryApp>, InfrastructureError> {
     let registry_store = build_registry_store(settings).await?;
     info!(
-        "using PyPI-compatible upstream base URL {} with mirror download concurrency {}, eager download percent {}, artifact download attempts {}, initial backoff {} ms",
+        "using PyPI-compatible upstream base URL {} with mirror download concurrency {}, eager download percent {}, artifact download attempts {}, initial backoff {} ms, timeout {} s, metadata cap {} bytes, artifact cap {} bytes",
         settings.pypi.base_url,
         settings.pypi.mirror_download_concurrency,
         settings.pypi.mirror_eager_download_percent,
         settings.pypi.artifact_download_max_attempts,
-        settings.pypi.artifact_download_initial_backoff_millis
+        settings.pypi.artifact_download_initial_backoff_millis,
+        settings.pypi.mirror_http_timeout_seconds,
+        settings.pypi.mirror_metadata_max_bytes,
+        settings.pypi.mirror_artifact_max_bytes
     );
     let object_storage = build_object_storage(settings)?;
     let retry_policy = ArtifactDownloadRetryPolicy::new(
         settings.pypi.artifact_download_max_attempts,
         Duration::from_millis(settings.pypi.artifact_download_initial_backoff_millis),
     );
-    let mirror_client = match PypiMirrorClient::with_retry_policy(
+    let mirror_limits = MirrorDownloadLimits::new(
+        Duration::from_secs(settings.pypi.mirror_http_timeout_seconds),
+        settings.pypi.mirror_metadata_max_bytes,
+        settings.pypi.mirror_artifact_max_bytes,
+    );
+    let mirror_client = match PypiMirrorClient::with_retry_policy_and_limits(
         &settings.pypi.base_url,
         retry_policy,
+        mirror_limits,
     ) {
         Ok(client) => Arc::new(client),
         Err(error) => {
@@ -50,8 +60,12 @@ pub async fn build_application(
                 settings.pypi.base_url, error
             );
             Arc::new(
-                PypiMirrorClient::with_retry_policy("https://pypi.org", retry_policy)
-                    .expect("fallback PyPI URL is valid"),
+                PypiMirrorClient::with_retry_policy_and_limits(
+                    "https://pypi.org",
+                    retry_policy,
+                    mirror_limits,
+                )
+                .expect("fallback PyPI URL is valid"),
             )
         }
     };
@@ -82,6 +96,7 @@ pub async fn build_application(
             package_publish_notifier,
             wheel_audit_notifier,
             Arc::new(ZipWheelArchiveReader),
+            Arc::new(FilesystemDistributionInspector),
             Arc::new(YaraWheelVirusScanner::from_rules_dir_with_ignored_rules(
                 settings.security.yara_rules_path.clone(),
                 settings.security.scanner_ignores.yara_rule_ids.clone(),

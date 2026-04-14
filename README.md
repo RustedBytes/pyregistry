@@ -212,6 +212,9 @@ mirror_download_concurrency = 4
 mirror_eager_download_percent = 10
 artifact_download_max_attempts = 3
 artifact_download_initial_backoff_millis = 250
+mirror_http_timeout_seconds = 30
+mirror_metadata_max_bytes = 10485760
+mirror_artifact_max_bytes = 104857600
 mirror_update_enabled = true
 mirror_update_interval_seconds = 3600
 mirror_update_on_startup = true
@@ -339,6 +342,9 @@ Useful environment variables:
 - `PYPI_MIRROR_DOWNLOAD_CONCURRENCY`
 - `PYPI_ARTIFACT_DOWNLOAD_MAX_ATTEMPTS`
 - `PYPI_ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MILLIS`
+- `PYPI_MIRROR_HTTP_TIMEOUT_SECONDS`
+- `PYPI_MIRROR_METADATA_MAX_BYTES`
+- `PYPI_MIRROR_ARTIFACT_MAX_BYTES`
 - `PYPI_MIRROR_UPDATE_ENABLED`
 - `PYPI_MIRROR_UPDATE_INTERVAL_SECONDS`
 - `PYPI_MIRROR_UPDATE_ON_STARTUP`
@@ -533,6 +539,9 @@ mirror_download_concurrency = 4
 mirror_eager_download_percent = 10
 artifact_download_max_attempts = 3
 artifact_download_initial_backoff_millis = 250
+mirror_http_timeout_seconds = 30
+mirror_metadata_max_bytes = 10485760
+mirror_artifact_max_bytes = 104857600
 mirror_update_enabled = true
 mirror_update_interval_seconds = 3600
 mirror_update_on_startup = true
@@ -545,6 +554,8 @@ By default, only the newest 10% of release versions are eagerly cached while
 older release metadata remains available for on-demand downloads. Set
 `mirror_eager_download_percent = 5` for a smaller eager cache.
 Set it to `0` to disable eager artifact caching entirely.
+Use `mirror_metadata_max_bytes` and `mirror_artifact_max_bytes` to cap upstream
+responses, and `mirror_http_timeout_seconds` to bound slow PyPI requests.
 Artifact downloads retry transient network failures plus HTTP 408, 429, and
 5xx responses using exponential backoff from
 `artifact_download_initial_backoff_millis` up to

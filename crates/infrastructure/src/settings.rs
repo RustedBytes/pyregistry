@@ -1,3 +1,7 @@
+use crate::{
+    DEFAULT_MIRROR_ARTIFACT_MAX_BYTES, DEFAULT_MIRROR_HTTP_TIMEOUT,
+    DEFAULT_MIRROR_METADATA_MAX_BYTES,
+};
 use pyregistry_domain::TrustedPublisherProvider;
 use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
@@ -128,6 +132,18 @@ impl Settings {
                     "PYPI_ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MILLIS",
                     default_artifact_download_initial_backoff_millis(),
                 ),
+                mirror_http_timeout_seconds: read_env_u64(
+                    "PYPI_MIRROR_HTTP_TIMEOUT_SECONDS",
+                    default_mirror_http_timeout_seconds(),
+                ),
+                mirror_metadata_max_bytes: read_env_u64(
+                    "PYPI_MIRROR_METADATA_MAX_BYTES",
+                    default_mirror_metadata_max_bytes(),
+                ),
+                mirror_artifact_max_bytes: read_env_u64(
+                    "PYPI_MIRROR_ARTIFACT_MAX_BYTES",
+                    default_mirror_artifact_max_bytes(),
+                ),
                 mirror_update_enabled: read_env_bool("PYPI_MIRROR_UPDATE_ENABLED", true),
                 mirror_update_interval_seconds: read_env_u64(
                     "PYPI_MIRROR_UPDATE_INTERVAL_SECONDS",
@@ -169,7 +185,7 @@ impl Settings {
                 trust_proxy_headers: read_env_bool("NETWORK_SOURCE_TRUST_PROXY_HEADERS", false),
             },
             web_ui: WebUiConfig {
-                show_index_stats: read_env_bool("WEB_UI_SHOW_INDEX_STATS", true),
+                show_index_stats: read_env_bool("WEB_UI_SHOW_INDEX_STATS", false),
             },
             validation: ValidationConfig {
                 distribution_parallelism: read_env_usize(
@@ -367,6 +383,21 @@ impl Settings {
                 "artifact_download_initial_backoff_millis must be greater than zero".into(),
             ));
         }
+        if self.pypi.mirror_http_timeout_seconds == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "mirror_http_timeout_seconds must be greater than zero".into(),
+            ));
+        }
+        if self.pypi.mirror_metadata_max_bytes == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "mirror_metadata_max_bytes must be greater than zero".into(),
+            ));
+        }
+        if self.pypi.mirror_artifact_max_bytes == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "mirror_artifact_max_bytes must be greater than zero".into(),
+            ));
+        }
         if self.pypi.mirror_update_interval_seconds == 0 {
             return Err(SettingsError::InvalidPypiConfig(
                 "mirror_update_interval_seconds must be greater than zero".into(),
@@ -521,6 +552,9 @@ pub struct PypiConfig {
     pub mirror_eager_download_percent: u8,
     pub artifact_download_max_attempts: usize,
     pub artifact_download_initial_backoff_millis: u64,
+    pub mirror_http_timeout_seconds: u64,
+    pub mirror_metadata_max_bytes: u64,
+    pub mirror_artifact_max_bytes: u64,
     pub mirror_update_enabled: bool,
     pub mirror_update_interval_seconds: u64,
     pub mirror_update_on_startup: bool,
@@ -530,12 +564,15 @@ impl PypiConfig {
     #[must_use]
     pub fn log_safe_summary(&self) -> String {
         format!(
-            "base_url={}, mirror_download_concurrency={}, mirror_eager_download_percent={}, artifact_download_max_attempts={}, artifact_download_initial_backoff_millis={}, mirror_update_enabled={}, mirror_update_interval_seconds={}, mirror_update_on_startup={}",
+            "base_url={}, mirror_download_concurrency={}, mirror_eager_download_percent={}, artifact_download_max_attempts={}, artifact_download_initial_backoff_millis={}, mirror_http_timeout_seconds={}, mirror_metadata_max_bytes={}, mirror_artifact_max_bytes={}, mirror_update_enabled={}, mirror_update_interval_seconds={}, mirror_update_on_startup={}",
             self.base_url,
             self.mirror_download_concurrency,
             self.mirror_eager_download_percent,
             self.artifact_download_max_attempts,
             self.artifact_download_initial_backoff_millis,
+            self.mirror_http_timeout_seconds,
+            self.mirror_metadata_max_bytes,
+            self.mirror_artifact_max_bytes,
             self.mirror_update_enabled,
             self.mirror_update_interval_seconds,
             self.mirror_update_on_startup
@@ -1042,6 +1079,9 @@ struct PypiConfigFile {
     mirror_eager_download_percent: Option<u8>,
     artifact_download_max_attempts: Option<usize>,
     artifact_download_initial_backoff_millis: Option<u64>,
+    mirror_http_timeout_seconds: Option<u64>,
+    mirror_metadata_max_bytes: Option<u64>,
+    mirror_artifact_max_bytes: Option<u64>,
     mirror_update_enabled: Option<bool>,
     mirror_update_interval_seconds: Option<u64>,
     mirror_update_on_startup: Option<bool>,
@@ -1351,6 +1391,30 @@ impl TryFrom<PypiConfigFile> for PypiConfig {
                 "artifact_download_initial_backoff_millis must be greater than zero".into(),
             ));
         }
+        let mirror_http_timeout_seconds = value
+            .mirror_http_timeout_seconds
+            .unwrap_or_else(default_mirror_http_timeout_seconds);
+        if mirror_http_timeout_seconds == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "mirror_http_timeout_seconds must be greater than zero".into(),
+            ));
+        }
+        let mirror_metadata_max_bytes = value
+            .mirror_metadata_max_bytes
+            .unwrap_or_else(default_mirror_metadata_max_bytes);
+        if mirror_metadata_max_bytes == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "mirror_metadata_max_bytes must be greater than zero".into(),
+            ));
+        }
+        let mirror_artifact_max_bytes = value
+            .mirror_artifact_max_bytes
+            .unwrap_or_else(default_mirror_artifact_max_bytes);
+        if mirror_artifact_max_bytes == 0 {
+            return Err(SettingsError::InvalidPypiConfig(
+                "mirror_artifact_max_bytes must be greater than zero".into(),
+            ));
+        }
         let mirror_update_interval_seconds = value
             .mirror_update_interval_seconds
             .unwrap_or_else(default_mirror_update_interval_seconds);
@@ -1366,6 +1430,9 @@ impl TryFrom<PypiConfigFile> for PypiConfig {
             mirror_eager_download_percent,
             artifact_download_max_attempts,
             artifact_download_initial_backoff_millis,
+            mirror_http_timeout_seconds,
+            mirror_metadata_max_bytes,
+            mirror_artifact_max_bytes,
             mirror_update_enabled: value.mirror_update_enabled.unwrap_or(true),
             mirror_update_interval_seconds,
             mirror_update_on_startup: value.mirror_update_on_startup.unwrap_or(true),
@@ -1383,6 +1450,9 @@ impl From<PypiConfig> for PypiConfigFile {
             artifact_download_initial_backoff_millis: Some(
                 value.artifact_download_initial_backoff_millis,
             ),
+            mirror_http_timeout_seconds: Some(value.mirror_http_timeout_seconds),
+            mirror_metadata_max_bytes: Some(value.mirror_metadata_max_bytes),
+            mirror_artifact_max_bytes: Some(value.mirror_artifact_max_bytes),
             mirror_update_enabled: Some(value.mirror_update_enabled),
             mirror_update_interval_seconds: Some(value.mirror_update_interval_seconds),
             mirror_update_on_startup: Some(value.mirror_update_on_startup),
@@ -1785,6 +1855,9 @@ fn default_pypi_config() -> PypiConfig {
         artifact_download_max_attempts: default_artifact_download_max_attempts(),
         artifact_download_initial_backoff_millis: default_artifact_download_initial_backoff_millis(
         ),
+        mirror_http_timeout_seconds: default_mirror_http_timeout_seconds(),
+        mirror_metadata_max_bytes: default_mirror_metadata_max_bytes(),
+        mirror_artifact_max_bytes: default_mirror_artifact_max_bytes(),
         mirror_update_enabled: true,
         mirror_update_interval_seconds: default_mirror_update_interval_seconds(),
         mirror_update_on_startup: true,
@@ -1805,6 +1878,18 @@ fn default_artifact_download_max_attempts() -> usize {
 
 fn default_artifact_download_initial_backoff_millis() -> u64 {
     250
+}
+
+fn default_mirror_http_timeout_seconds() -> u64 {
+    DEFAULT_MIRROR_HTTP_TIMEOUT.as_secs()
+}
+
+fn default_mirror_metadata_max_bytes() -> u64 {
+    DEFAULT_MIRROR_METADATA_MAX_BYTES
+}
+
+fn default_mirror_artifact_max_bytes() -> u64 {
+    DEFAULT_MIRROR_ARTIFACT_MAX_BYTES
 }
 
 fn default_mirror_update_interval_seconds() -> u64 {
@@ -1932,7 +2017,7 @@ fn default_network_source_config() -> NetworkSourceConfig {
 
 fn default_web_ui_config() -> WebUiConfig {
     WebUiConfig {
-        show_index_stats: true,
+        show_index_stats: false,
     }
 }
 

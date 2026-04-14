@@ -1,4 +1,5 @@
 use crate::{network_source::NetworkSourcePolicy, rate_limit::RateLimiter};
+use chrono::{DateTime, Utc};
 use pyregistry_application::{AdminSession, PyregistryApp};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -69,6 +70,12 @@ pub enum MirrorJobPhase {
 
 pub type MirrorJobs = Arc<RwLock<HashMap<String, MirrorJobStatus>>>;
 
+#[derive(Clone)]
+pub struct StoredAdminSession {
+    pub session: AdminSession,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[must_use]
 pub fn mirror_job_key(tenant_slug: &str, project_name: &str) -> String {
     format!(
@@ -81,11 +88,13 @@ pub fn mirror_job_key(tenant_slug: &str, project_name: &str) -> String {
 #[derive(Clone)]
 pub struct AppState {
     pub app: Arc<PyregistryApp>,
-    pub sessions: Arc<RwLock<HashMap<String, AdminSession>>>,
+    pub sessions: Arc<RwLock<HashMap<String, StoredAdminSession>>>,
     pub mirror_jobs: MirrorJobs,
     pub rate_limiter: RateLimiter,
     pub network_source: NetworkSourcePolicy,
     pub show_index_stats: bool,
+    pub secure_admin_cookies: bool,
+    pub external_base_url: Option<String>,
 }
 
 #[cfg(test)]

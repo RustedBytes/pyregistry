@@ -150,6 +150,9 @@ mirror_download_concurrency = 4
 mirror_eager_download_percent = 10
 artifact_download_max_attempts = 3
 artifact_download_initial_backoff_millis = 250
+mirror_http_timeout_seconds = 30
+mirror_metadata_max_bytes = 10485760
+mirror_artifact_max_bytes = 104857600
 mirror_update_enabled = true
 mirror_update_interval_seconds = 3600
 mirror_update_on_startup = true
@@ -162,6 +165,9 @@ By default, only the newest 10% of release versions are eagerly cached while
 older release metadata remains available for on-demand downloads. Set
 `mirror_eager_download_percent = 5` for a smaller eager cache.
 Set it to `0` to disable eager artifact caching entirely.
+Use `mirror_metadata_max_bytes` and `mirror_artifact_max_bytes` to bound memory
+and disk exposure from an upstream mirror. `mirror_http_timeout_seconds` applies
+to PyPI metadata and artifact requests.
 
 ## Rate Limiting
 
@@ -337,6 +343,9 @@ Common environment variables:
 | `PYPI_MIRROR_DOWNLOAD_CONCURRENCY` | Parallel artifact downloads during mirroring. |
 | `PYPI_ARTIFACT_DOWNLOAD_MAX_ATTEMPTS` | Mirror artifact download retry attempts. |
 | `PYPI_ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MILLIS` | Initial mirror retry backoff. |
+| `PYPI_MIRROR_HTTP_TIMEOUT_SECONDS` | Upstream PyPI metadata and artifact request timeout. |
+| `PYPI_MIRROR_METADATA_MAX_BYTES` | Maximum upstream project metadata response size. |
+| `PYPI_MIRROR_ARTIFACT_MAX_BYTES` | Maximum upstream artifact response size. |
 | `PYPI_MIRROR_UPDATE_ENABLED` | Enable or disable the background mirror updater. |
 | `PYPI_MIRROR_UPDATE_INTERVAL_SECONDS` | Background mirror refresh interval. |
 | `PYPI_MIRROR_UPDATE_ON_STARTUP` | Refresh mirrored projects when the service starts. |

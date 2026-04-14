@@ -1,4 +1,7 @@
 /target
+/fuzz/target
+/fuzz/corpus
+
 .pyregistry/
 .env
 

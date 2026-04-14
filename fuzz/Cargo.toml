@@ -28,3 +28,9 @@ name = "wheel_archive"
 path = "fuzz_targets/wheel_archive.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "distribution_validation"
+path = "fuzz_targets/distribution_validation.rs"
+test = false
+doc = false

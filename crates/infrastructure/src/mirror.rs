@@ -13,11 +13,59 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
 use url::Url;
 
+pub const DEFAULT_MIRROR_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_MIRROR_METADATA_MAX_BYTES: u64 = 10 * 1024 * 1024;
+pub const DEFAULT_MIRROR_ARTIFACT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct PypiMirrorClient {
     client: reqwest::Client,
     base_url: Url,
     retry_policy: ArtifactDownloadRetryPolicy,
+    limits: MirrorDownloadLimits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MirrorDownloadLimits {
+    http_timeout: Duration,
+    metadata_max_bytes: u64,
+    artifact_max_bytes: u64,
+}
+
+impl Default for MirrorDownloadLimits {
+    fn default() -> Self {
+        Self {
+            http_timeout: DEFAULT_MIRROR_HTTP_TIMEOUT,
+            metadata_max_bytes: DEFAULT_MIRROR_METADATA_MAX_BYTES,
+            artifact_max_bytes: DEFAULT_MIRROR_ARTIFACT_MAX_BYTES,
+        }
+    }
+}
+
+impl MirrorDownloadLimits {
+    #[must_use]
+    pub fn new(http_timeout: Duration, metadata_max_bytes: u64, artifact_max_bytes: u64) -> Self {
+        Self {
+            http_timeout: http_timeout.max(Duration::from_millis(1)),
+            metadata_max_bytes: metadata_max_bytes.max(1),
+            artifact_max_bytes: artifact_max_bytes.max(1),
+        }
+    }
+
+    #[must_use]
+    pub fn http_timeout(self) -> Duration {
+        self.http_timeout
+    }
+
+    #[must_use]
+    pub fn metadata_max_bytes(self) -> u64 {
+        self.metadata_max_bytes
+    }
+
+    #[must_use]
+    pub fn artifact_max_bytes(self) -> u64 {
+        self.artifact_max_bytes
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,13 +124,27 @@ impl PypiMirrorClient {
         base_url: &str,
         retry_policy: ArtifactDownloadRetryPolicy,
     ) -> Result<Self, ApplicationError> {
+        Self::with_retry_policy_and_limits(base_url, retry_policy, MirrorDownloadLimits::default())
+    }
+
+    pub fn with_retry_policy_and_limits(
+        base_url: &str,
+        retry_policy: ArtifactDownloadRetryPolicy,
+        limits: MirrorDownloadLimits,
+    ) -> Result<Self, ApplicationError> {
         let normalized = base_url.trim().trim_end_matches('/');
         let base_url = Url::parse(normalized)
             .map_err(|error| ApplicationError::External(error.to_string()))?;
+        let client = reqwest::Client::builder()
+            .timeout(limits.http_timeout())
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|error| ApplicationError::External(error.to_string()))?;
         Ok(Self {
-            client: reqwest::Client::new(),
+            client,
             base_url,
             retry_policy,
+            limits,
         })
     }
 
@@ -178,6 +240,12 @@ impl PypiMirrorClient {
         temp_path: &Path,
     ) -> Result<(), ArtifactDownloadError> {
         let mut response = self.get_artifact_response(download_url).await?;
+        ensure_content_length_within_limit(
+            response.content_length(),
+            expected_size_bytes,
+            self.limits.artifact_max_bytes(),
+            download_url,
+        )?;
         let mut file = fs::File::create(temp_path)
             .await
             .map_err(|error| ArtifactDownloadError::fatal(error.to_string()))?;
@@ -192,10 +260,17 @@ impl PypiMirrorClient {
                 break;
             };
 
+            downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+            if downloaded_bytes > self.limits.artifact_max_bytes()
+                || (expected_size_bytes > 0 && downloaded_bytes > expected_size_bytes)
+            {
+                return Err(ArtifactDownloadError::fatal(format!(
+                    "downloaded artifact `{download_url}` exceeded the allowed size"
+                )));
+            }
             file.write_all(&chunk)
                 .await
                 .map_err(|error| ArtifactDownloadError::fatal(error.to_string()))?;
-            downloaded_bytes += chunk.len() as u64;
             debug!(
                 "downloaded chunk of {} byte(s) for {}, total={} byte(s)",
                 chunk.len(),
@@ -261,13 +336,10 @@ impl PypiMirrorClient {
         download_url: &str,
     ) -> Result<Vec<u8>, ArtifactDownloadError> {
         let bytes = self
-            .get_artifact_response(download_url)
-            .await?
-            .bytes()
-            .await
-            .map_err(ArtifactDownloadError::from_reqwest)?;
+            .read_response_bytes_with_limit(download_url, self.limits.artifact_max_bytes())
+            .await?;
         debug!("fetched {} byte(s) from upstream artifact URL", bytes.len());
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
 
     async fn get_artifact_response(
@@ -291,6 +363,65 @@ impl PypiMirrorClient {
         }
         Ok(response)
     }
+
+    async fn read_response_bytes_with_limit(
+        &self,
+        url: &str,
+        limit: u64,
+    ) -> Result<Vec<u8>, ArtifactDownloadError> {
+        let mut response = self.get_artifact_response(url).await?;
+        if let Some(content_length) = response.content_length()
+            && content_length > limit
+        {
+            return Err(ArtifactDownloadError::fatal(format!(
+                "upstream response `{url}` content length {content_length} exceeds limit {limit}"
+            )));
+        }
+
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(ArtifactDownloadError::from_reqwest)?
+        {
+            let next_len = bytes.len().saturating_add(chunk.len());
+            if next_len as u64 > limit {
+                return Err(ArtifactDownloadError::fatal(format!(
+                    "upstream response `{url}` exceeded limit {limit}"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+}
+
+fn ensure_content_length_within_limit(
+    content_length: Option<u64>,
+    expected_size_bytes: u64,
+    hard_limit: u64,
+    download_url: &str,
+) -> Result<(), ArtifactDownloadError> {
+    if expected_size_bytes > hard_limit {
+        return Err(ArtifactDownloadError::fatal(format!(
+            "upstream artifact `{download_url}` declared size {expected_size_bytes} exceeds limit {hard_limit}"
+        )));
+    }
+
+    if let Some(content_length) = content_length {
+        if content_length > hard_limit {
+            return Err(ArtifactDownloadError::fatal(format!(
+                "upstream artifact `{download_url}` content length {content_length} exceeds limit {hard_limit}"
+            )));
+        }
+        if expected_size_bytes > 0 && content_length > expected_size_bytes {
+            return Err(ArtifactDownloadError::fatal(format!(
+                "upstream artifact `{download_url}` content length {content_length} exceeds expected size {expected_size_bytes}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -397,6 +528,7 @@ impl MirrorClient for PypiMirrorClient {
         project_name: &str,
     ) -> Result<Option<MirroredProjectSnapshot>, ApplicationError> {
         let metadata_url = self.project_metadata_url(project_name)?;
+        let payload_url = metadata_url.to_string();
         info!("fetching PyPI metadata for project `{project_name}` from `{metadata_url}`");
         let response = self
             .client
@@ -410,11 +542,34 @@ impl MirrorClient for PypiMirrorClient {
             return Ok(None);
         }
 
-        let payload: PypiResponse = response
+        let payload = response
             .error_for_status()
-            .map_err(|error| ApplicationError::External(error.to_string()))?
-            .json()
+            .map_err(|error| ApplicationError::External(error.to_string()))?;
+        if let Some(content_length) = payload.content_length()
+            && content_length > self.limits.metadata_max_bytes()
+        {
+            return Err(ApplicationError::External(format!(
+                "PyPI metadata response `{payload_url}` content length {content_length} exceeds limit {}",
+                self.limits.metadata_max_bytes()
+            )));
+        }
+        let mut payload = payload;
+        let mut body = Vec::new();
+        while let Some(chunk) = payload
+            .chunk()
             .await
+            .map_err(|error| ApplicationError::External(error.to_string()))?
+        {
+            let next_len = body.len().saturating_add(chunk.len());
+            if next_len as u64 > self.limits.metadata_max_bytes() {
+                return Err(ApplicationError::External(format!(
+                    "PyPI metadata response `{payload_url}` exceeded limit {}",
+                    self.limits.metadata_max_bytes()
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let payload: PypiResponse = serde_json::from_slice(&body)
             .map_err(|error| ApplicationError::External(error.to_string()))?;
 
         let mut artifacts = Vec::new();
@@ -490,10 +645,10 @@ fn is_mirrorable_distribution_filename(filename: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactDownloadError, ArtifactDownloadRetryPolicy, PypiDigests, PypiMirrorClient,
-        PypiReleaseFile, find_artifact_by_filename, is_mirrorable_distribution,
-        is_mirrorable_distribution_filename, is_retryable_status, should_retry_download,
-        temp_download_path,
+        ArtifactDownloadError, ArtifactDownloadRetryPolicy, DEFAULT_MIRROR_ARTIFACT_MAX_BYTES,
+        MirrorDownloadLimits, PypiDigests, PypiMirrorClient, PypiReleaseFile,
+        find_artifact_by_filename, is_mirrorable_distribution, is_mirrorable_distribution_filename,
+        is_retryable_status, should_retry_download, temp_download_path,
     };
     use pyregistry_application::{MirrorClient, MirroredArtifactSnapshot};
     use std::path::{Path, PathBuf};
@@ -567,6 +722,10 @@ mod tests {
             client.retry_policy.initial_backoff(),
             Duration::from_millis(250)
         );
+        assert_eq!(
+            client.limits.artifact_max_bytes(),
+            DEFAULT_MIRROR_ARTIFACT_MAX_BYTES
+        );
     }
 
     #[test]
@@ -594,10 +753,15 @@ mod tests {
     }
 
     #[test]
-    fn configures_artifact_download_retry_policy() {
+    fn configures_artifact_download_retry_policy_and_limits() {
         let policy = ArtifactDownloadRetryPolicy::new(5, Duration::from_millis(10));
-        let client = PypiMirrorClient::with_retry_policy("https://mirror.example", policy)
-            .expect("configured base URL");
+        let limits = MirrorDownloadLimits::new(Duration::from_secs(7), 123, 456);
+        let client = PypiMirrorClient::with_retry_policy_and_limits(
+            "https://mirror.example",
+            policy,
+            limits,
+        )
+        .expect("configured base URL");
 
         assert_eq!(client.retry_policy.max_attempts(), 5);
         assert_eq!(
@@ -608,6 +772,9 @@ mod tests {
             client.retry_policy.delay_for_attempt(3),
             Duration::from_millis(40)
         );
+        assert_eq!(client.limits.http_timeout(), Duration::from_secs(7));
+        assert_eq!(client.limits.metadata_max_bytes(), 123);
+        assert_eq!(client.limits.artifact_max_bytes(), 456);
     }
 
     #[test]
@@ -695,6 +862,40 @@ mod tests {
             .expect_err("404 should not retry");
 
         assert!(error.to_string().contains("HTTP 404"));
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn artifact_byte_download_rejects_oversized_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut buffer = [0_u8; 1024];
+            let _ = socket.read(&mut buffer).await.expect("read request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                DEFAULT_MIRROR_ARTIFACT_MAX_BYTES + 1
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        let client = PypiMirrorClient::with_retry_policy(
+            "https://pypi.org",
+            ArtifactDownloadRetryPolicy::new(1, Duration::from_millis(1)),
+        )
+        .expect("client");
+
+        let error = client
+            .fetch_artifact_bytes(&format!("http://{address}/too-large.whl"))
+            .await
+            .expect_err("oversized artifact should fail before body allocation");
+
+        assert!(error.to_string().contains("exceeds limit"));
         server.await.expect("server task");
     }
 

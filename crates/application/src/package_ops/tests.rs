@@ -120,6 +120,7 @@ async fn mirrored_project_scans_cached_wheels_and_notifies_findings() {
         Arc::new(NoopPackagePublishNotifier),
         notifier.clone(),
         Arc::new(SuspiciousWheelArchiveReader),
+        Arc::new(FakeDistributionInspector),
         Arc::new(UnusedWheelVirusScanner),
         Arc::new(UnusedWheelSourceSecurityScanner),
         Arc::new(FixedClock),
@@ -976,6 +977,102 @@ async fn upload_artifact_notifies_when_package_or_version_is_new() {
 }
 
 #[tokio::test]
+async fn upload_artifact_rejects_extension_mismatched_distribution_bytes() {
+    let app = test_app_with_distribution_inspector(Arc::new(MismatchedDistributionInspector));
+
+    app.create_tenant(CreateTenantCommand {
+        slug: "acme".into(),
+        display_name: "Acme".into(),
+        mirroring_enabled: false,
+        admin_email: "admin@acme.test".into(),
+        admin_password: "tenant-secret".into(),
+    })
+    .await
+    .expect("tenant");
+    let publish_token = app
+        .issue_api_token(IssueApiTokenCommand {
+            tenant_slug: "acme".into(),
+            label: "publisher".into(),
+            scopes: vec![TokenScope::Publish],
+            ttl_hours: None,
+        })
+        .await
+        .expect("publish token");
+    let publish_access = app
+        .authenticate_tenant_token("acme", &publish_token.secret, TokenScope::Publish)
+        .await
+        .expect("publish access");
+
+    let error = app
+        .upload_artifact(
+            &publish_access,
+            UploadArtifactCommand {
+                tenant_slug: "acme".into(),
+                project_name: "Demo_Pkg".into(),
+                version: "1.0.0".into(),
+                filename: "demo_pkg-1.0.0-py3-none-any.whl".into(),
+                summary: "Demo package".into(),
+                description: "Demo package".into(),
+                content: b"not a wheel archive".to_vec(),
+            },
+        )
+        .await
+        .expect_err("mismatched distribution should be rejected");
+
+    assert!(matches!(error, ApplicationError::Conflict(_)));
+    assert_eq!(
+        app.get_registry_overview()
+            .await
+            .expect("overview")
+            .artifact_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn oidc_publish_token_accepts_later_publisher_audience() {
+    let app = test_app_with_oidc_verifier(Arc::new(AudienceSelectiveOidcVerifier {
+        accepted_audience: "second-audience".into(),
+    }));
+
+    app.create_tenant(CreateTenantCommand {
+        slug: "acme".into(),
+        display_name: "Acme".into(),
+        mirroring_enabled: false,
+        admin_email: "admin@acme.test".into(),
+        admin_password: "tenant-secret".into(),
+    })
+    .await
+    .expect("tenant");
+
+    for audience in ["first-audience", "second-audience"] {
+        let mut claim_rules = BTreeMap::new();
+        claim_rules.insert("repository".into(), "acme/demo-pkg".into());
+        app.register_trusted_publisher(RegisterTrustedPublisherCommand {
+            tenant_slug: "acme".into(),
+            project_name: "Demo_Pkg".into(),
+            provider: TrustedPublisherProvider::GitHubActions,
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            audience: audience.into(),
+            claim_rules,
+        })
+        .await
+        .expect("trusted publisher");
+    }
+
+    let grant = app
+        .mint_oidc_publish_token(MintOidcPublishTokenCommand {
+            tenant_slug: "acme".into(),
+            project_name: "Demo_Pkg".into(),
+            oidc_token: "fixture.jwt".into(),
+        })
+        .await
+        .expect("second audience should verify");
+
+    assert!(grant.token.starts_with("oidc_"));
+}
+
+#[tokio::test]
 async fn admin_and_publish_use_cases_report_missing_expired_and_oidc_edges() {
     let app = test_app(
         Arc::new(FakeRegistryStore::default()),
@@ -1490,6 +1587,57 @@ fn test_app_with_package_publish_notifier(
         notifier,
         Arc::new(NoopWheelAuditNotifier),
         Arc::new(UnusedWheelArchiveReader),
+        Arc::new(FakeDistributionInspector),
+        Arc::new(UnusedWheelVirusScanner),
+        Arc::new(UnusedWheelSourceSecurityScanner),
+        Arc::new(FixedClock),
+        Arc::new(SequentialIds::default()),
+        1,
+    )
+}
+
+fn test_app_with_distribution_inspector(
+    distribution_inspector: Arc<dyn DistributionFileInspector>,
+) -> PyregistryApp {
+    init_test_logger();
+    PyregistryApp::new(
+        Arc::new(FakeRegistryStore::default()),
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(FakeMirrorClient::with_artifact_count(0)),
+        Arc::new(UnusedOidcVerifier),
+        Arc::new(UnusedAttestationSigner),
+        Arc::new(UnusedPasswordHasher),
+        Arc::new(UnusedTokenHasher),
+        Arc::new(UnusedVulnerabilityScanner),
+        Arc::new(NoopVulnerabilityNotifier),
+        Arc::new(NoopPackagePublishNotifier),
+        Arc::new(NoopWheelAuditNotifier),
+        Arc::new(UnusedWheelArchiveReader),
+        distribution_inspector,
+        Arc::new(UnusedWheelVirusScanner),
+        Arc::new(UnusedWheelSourceSecurityScanner),
+        Arc::new(FixedClock),
+        Arc::new(SequentialIds::default()),
+        1,
+    )
+}
+
+fn test_app_with_oidc_verifier(oidc_verifier: Arc<dyn OidcVerifier>) -> PyregistryApp {
+    init_test_logger();
+    PyregistryApp::new(
+        Arc::new(FakeRegistryStore::default()),
+        Arc::new(FakeObjectStorage::default()),
+        Arc::new(FakeMirrorClient::with_artifact_count(0)),
+        oidc_verifier,
+        Arc::new(UnusedAttestationSigner),
+        Arc::new(UnusedPasswordHasher),
+        Arc::new(UnusedTokenHasher),
+        Arc::new(UnusedVulnerabilityScanner),
+        Arc::new(NoopVulnerabilityNotifier),
+        Arc::new(NoopPackagePublishNotifier),
+        Arc::new(NoopWheelAuditNotifier),
+        Arc::new(UnusedWheelArchiveReader),
+        Arc::new(FakeDistributionInspector),
         Arc::new(UnusedWheelVirusScanner),
         Arc::new(UnusedWheelSourceSecurityScanner),
         Arc::new(FixedClock),
@@ -1552,6 +1700,7 @@ fn test_app_with_ports_and_notifier(
         Arc::new(NoopPackagePublishNotifier),
         Arc::new(NoopWheelAuditNotifier),
         Arc::new(UnusedWheelArchiveReader),
+        Arc::new(FakeDistributionInspector),
         Arc::new(UnusedWheelVirusScanner),
         Arc::new(UnusedWheelSourceSecurityScanner),
         Arc::new(FixedClock),
@@ -2506,6 +2655,34 @@ impl OidcVerifier for UnusedOidcVerifier {
     }
 }
 
+struct AudienceSelectiveOidcVerifier {
+    accepted_audience: String,
+}
+
+#[async_trait]
+impl OidcVerifier for AudienceSelectiveOidcVerifier {
+    async fn verify(
+        &self,
+        _token: &str,
+        audience: &str,
+    ) -> Result<PublishIdentity, ApplicationError> {
+        if audience != self.accepted_audience {
+            return Err(ApplicationError::Unauthorized("wrong audience".into()));
+        }
+
+        Ok(PublishIdentity {
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            subject: "repo:acme/demo-pkg:ref:refs/heads/main".into(),
+            audience: audience.to_string(),
+            provider: TrustedPublisherProvider::GitHubActions,
+            claims: BTreeMap::from([
+                ("repository".into(), "acme/demo-pkg".into()),
+                ("ref".into(), "refs/heads/main".into()),
+            ]),
+        })
+    }
+}
+
 struct UnusedAttestationSigner;
 
 #[async_trait]
@@ -2685,6 +2862,45 @@ impl DistributionFileInspector for FakeDistributionInspector {
                 actual_extension: Some("zip".into()),
                 expected_extensions: vec!["zip".into()],
                 matches_extension: true,
+            },
+        })
+    }
+}
+
+struct MismatchedDistributionInspector;
+
+impl DistributionFileInspector for MismatchedDistributionInspector {
+    fn inspect_distribution(
+        &self,
+        _path: &Path,
+    ) -> Result<DistributionInspection, ApplicationError> {
+        Err(ApplicationError::External(
+            "path distribution inspection is unused".into(),
+        ))
+    }
+
+    fn inspect_distribution_bytes(
+        &self,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<DistributionInspection, ApplicationError> {
+        Ok(DistributionInspection {
+            kind: DistributionKind::Wheel,
+            size_bytes: bytes.len() as u64,
+            sha256: hex::encode(Sha256::digest(bytes)),
+            archive_entry_count: 0,
+            file_type: crate::FileTypeInspection {
+                detector: "fake".into(),
+                label: "unknown".into(),
+                mime_type: "application/octet-stream".into(),
+                group: "unknown".into(),
+                description: "unknown file type".into(),
+                score: 0.0,
+                actual_extension: filename
+                    .rsplit_once('.')
+                    .map(|(_, extension)| extension.into()),
+                expected_extensions: vec!["whl".into()],
+                matches_extension: false,
             },
         })
     }

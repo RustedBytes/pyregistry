@@ -223,7 +223,7 @@ fn prune_idle_buckets(buckets: &mut HashMap<String, RateLimitBucket>, now: Insta
 }
 
 fn should_rate_limit_path(path: &str) -> bool {
-    path.starts_with("/t/") || path.starts_with("/_/oidc/")
+    path == "/admin/login" || path.starts_with("/t/") || path.starts_with("/_/oidc/")
 }
 
 fn too_many_requests(decision: RateLimitDecision) -> Response {
@@ -302,10 +302,11 @@ mod tests {
     }
 
     #[test]
-    fn only_limits_package_and_oidc_api_paths() {
+    fn limits_package_oidc_and_admin_login_paths() {
         assert!(should_rate_limit_path("/t/acme/simple/"));
         assert!(should_rate_limit_path("/t/acme/files/demo/1.0/demo.whl"));
         assert!(should_rate_limit_path("/_/oidc/mint-token"));
+        assert!(should_rate_limit_path("/admin/login"));
         assert!(!should_rate_limit_path("/"));
         assert!(!should_rate_limit_path("/admin/dashboard"));
     }
