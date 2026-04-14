@@ -30,6 +30,9 @@ pub(crate) struct DashboardTemplate {
     pub(crate) audit_events: Vec<AuditTrailEntryView>,
     pub(crate) search_query: String,
     pub(crate) search_results: Vec<SearchHit>,
+    pub(crate) package_pagination: PaginationView,
+    pub(crate) audit_pagination: PaginationView,
+    pub(crate) build_features: Vec<String>,
     pub(crate) session: AdminSession,
 }
 
@@ -100,6 +103,16 @@ pub(crate) struct AuditTrailEntryView {
 pub(crate) struct AuditTrailMetadataView {
     pub(crate) key: String,
     pub(crate) value: String,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct PaginationView {
+    pub(crate) page: usize,
+    pub(crate) page_size: usize,
+    pub(crate) shown_count: usize,
+    pub(crate) total_count: Option<usize>,
+    pub(crate) previous_url: Option<String>,
+    pub(crate) next_url: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -244,6 +257,8 @@ pub(crate) struct RevokeTokenFormData {
 pub(crate) struct SearchQuery {
     pub(crate) tenant: Option<String>,
     pub(crate) q: Option<String>,
+    pub(crate) package_page: Option<usize>,
+    pub(crate) audit_page: Option<usize>,
 }
 
 #[derive(Deserialize)]

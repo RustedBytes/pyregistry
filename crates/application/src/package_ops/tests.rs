@@ -106,14 +106,9 @@ async fn registry_overview_counts_only_cached_artifact_storage() {
         "mirror metadata should not count as stored bytes until the object is cached"
     );
 
-    app.download_artifact(
-        "acme",
-        "demo",
-        "1.0.0",
-        "demo-1.0.0-py3-none-any.whl",
-    )
-    .await
-    .expect("lazy download");
+    app.download_artifact("acme", "demo", "1.0.0", "demo-1.0.0-py3-none-any.whl")
+        .await
+        .expect("lazy download");
 
     let overview = app.get_registry_overview().await.expect("overview");
     assert_eq!(overview.total_storage_bytes, b"cached wheel".len() as u64);
@@ -2367,6 +2362,29 @@ impl RegistryStore for FakeRegistryStore {
         events.sort_by(|left, right| right.occurred_at.cmp(&left.occurred_at));
         events.truncate(limit);
         Ok(events)
+    }
+
+    async fn list_audit_events_page(
+        &self,
+        tenant_slug: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<AuditEvent>, ApplicationError> {
+        let mut events = self
+            .state
+            .lock()
+            .expect("store state")
+            .audit_events
+            .iter()
+            .filter(|event| {
+                tenant_slug
+                    .map(|tenant_slug| event.tenant_slug.as_deref() == Some(tenant_slug))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| right.occurred_at.cmp(&left.occurred_at));
+        Ok(events.into_iter().skip(offset).take(limit).collect())
     }
 }
 

@@ -387,6 +387,32 @@ impl RegistryStore for InMemoryRegistryStore {
         events.truncate(limit);
         Ok(events)
     }
+
+    async fn list_audit_events_page(
+        &self,
+        tenant_slug: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<AuditEvent>, ApplicationError> {
+        let data = self.data.read().await;
+        let mut events = data
+            .audit_events
+            .values()
+            .filter(|event| {
+                tenant_slug
+                    .map(|tenant_slug| event.tenant_slug.as_deref() == Some(tenant_slug))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| {
+            right
+                .occurred_at
+                .cmp(&left.occurred_at)
+                .then(right.id.cmp(&left.id))
+        });
+        Ok(events.into_iter().skip(offset).take(limit).collect())
+    }
 }
 
 #[cfg(test)]

@@ -164,6 +164,15 @@ mod tests {
             Ok(self.objects.read().await.get(key).cloned())
         }
 
+        async fn size_bytes(&self, key: &str) -> Result<Option<u64>, ApplicationError> {
+            Ok(self
+                .objects
+                .read()
+                .await
+                .get(key)
+                .map(|bytes| bytes.len() as u64))
+        }
+
         async fn delete(&self, key: &str) -> Result<(), ApplicationError> {
             self.objects.write().await.remove(key);
             Ok(())
@@ -465,6 +474,7 @@ mod tests {
             rate_limiter: RateLimiter::disabled(),
             network_source: NetworkSourcePolicy::allow_all(),
             show_index_stats: true,
+            build_features: vec!["test-feature".into()],
             secure_admin_cookies: false,
             external_base_url: None,
         }
@@ -1020,7 +1030,10 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(dashboard.status(), StatusCode::OK);
-        assert!(body_text(dashboard).await.contains("Dashboard"));
+        let body = body_text(dashboard).await;
+        assert!(body.contains("Dashboard"));
+        assert!(body.contains("Build features"));
+        assert!(body.contains("test-feature"));
     }
 
     #[tokio::test]
@@ -1444,6 +1457,66 @@ mod tests {
         let body = body_text(response).await;
         assert!(body.contains("Queued"));
         assert!(body.contains("dashboard.view"));
+    }
+
+    #[tokio::test]
+    async fn admin_dashboard_paginates_packages_and_audit_events() {
+        let state = state().await;
+        let publish_secret = issue_token(&state, vec![TokenScope::Publish]).await;
+        let access = state
+            .app
+            .authenticate_tenant_token("acme", &publish_secret, TokenScope::Publish)
+            .await
+            .expect("publish access");
+        for index in 0..12 {
+            state
+                .app
+                .upload_artifact(
+                    &access,
+                    UploadArtifactCommand {
+                        tenant_slug: "acme".into(),
+                        project_name: format!("Demo_{index:02}"),
+                        version: "1.0.0".into(),
+                        filename: format!("demo_{index:02}-1.0.0-py3-none-any.whl"),
+                        summary: format!("Demo package {index:02}"),
+                        description: String::new(),
+                        content: format!("wheel-{index:02}").into_bytes(),
+                    },
+                )
+                .await
+                .expect("upload package");
+            state
+                .app
+                .record_audit_event(pyregistry_application::RecordAuditEventCommand {
+                    actor: "admin@pyregistry.local".into(),
+                    action: format!("audit.event.{index:02}"),
+                    tenant_slug: Some("acme".into()),
+                    target: Some(format!("demo-{index:02}")),
+                    metadata: std::collections::BTreeMap::new(),
+                })
+                .await
+                .expect("audit event");
+        }
+        let app = router(state);
+        let cookie = login_cookie(app.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/search?tenant=acme&package_page=2&audit_page=2")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("dashboard response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("Showing 2 of 12 packages."));
+        assert!(body.contains("Showing 2 audit events."));
+        assert!(body.contains("audit_page=2"));
+        assert!(body.contains("package_page=2"));
     }
 
     #[tokio::test]

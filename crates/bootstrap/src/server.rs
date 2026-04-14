@@ -75,6 +75,7 @@ pub(crate) async fn serve(settings: Settings, config_source: String) -> anyhow::
             trust_proxy_headers: settings.network_source.trust_proxy_headers,
         }),
         show_index_stats: settings.web_ui.show_index_stats,
+        build_features: enabled_build_features(),
         secure_admin_cookies: bind_address_is_public(&settings.bind_address),
         external_base_url: None,
     };
@@ -125,6 +126,27 @@ fn bind_address_is_public(bind_address: &str) -> bool {
         .trim()
         .trim_matches(['[', ']']);
     !matches!(host, "127.0.0.1" | "::1" | "localhost")
+}
+
+pub(crate) fn enabled_build_features() -> Vec<String> {
+    [
+        ("minimal-local", cfg!(feature = "minimal-local")),
+        ("sqlite", cfg!(feature = "sqlite")),
+        ("postgres", cfg!(feature = "postgres")),
+        ("sqlserver", cfg!(feature = "sqlserver")),
+        ("opendal-fs", cfg!(feature = "opendal-fs")),
+        ("s3", cfg!(feature = "s3")),
+        ("security-default", cfg!(feature = "security-default")),
+        ("security-full", cfg!(feature = "security-full")),
+        ("source-security", cfg!(feature = "source-security")),
+        ("file-type-ml", cfg!(feature = "file-type-ml")),
+        ("vulnerability-db", cfg!(feature = "vulnerability-db")),
+        ("virus-yara", cfg!(feature = "virus-yara")),
+        ("python-ast-audit", cfg!(feature = "python-ast-audit")),
+    ]
+    .into_iter()
+    .filter_map(|(name, enabled)| enabled.then_some(name.to_string()))
+    .collect()
 }
 
 pub(crate) fn spawn_mirror_updater(

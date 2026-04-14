@@ -93,6 +93,7 @@ pub struct AppState {
     pub rate_limiter: RateLimiter,
     pub network_source: NetworkSourcePolicy,
     pub show_index_stats: bool,
+    pub build_features: Vec<String>,
     pub secure_admin_cookies: bool,
     pub external_base_url: Option<String>,
 }

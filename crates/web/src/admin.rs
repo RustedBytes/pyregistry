@@ -8,8 +8,8 @@ use crate::{
         DependencyVulnerabilityView, IndexTemplate, IssueTokenFormData, LoginFormData,
         LoginTemplate, MessageTemplate, MirrorFormData, MirrorJobView, PackageArtifactView,
         PackageDetailTemplate, PackageDetailView, PackageReleaseView, PackageSecuritySummaryView,
-        PackageVulnerabilityView, PublisherFormData, RevokeTokenFormData, SearchQuery, TenantView,
-        WheelAuditResponse, YankFormData,
+        PackageVulnerabilityView, PaginationView, PublisherFormData, RevokeTokenFormData,
+        SearchQuery, TenantView, WheelAuditResponse, YankFormData,
     },
     state::{AppState, MirrorJobPhase, MirrorJobStatus, StoredAdminSession, mirror_job_key},
 };
@@ -34,6 +34,9 @@ use std::fmt::Write;
 
 const MAX_TOKEN_TTL_HOURS: i64 = 24 * 365;
 const MAX_ADMIN_SESSIONS: usize = 10_000;
+const PACKAGE_PAGE_SIZE: usize = 10;
+const AUDIT_PAGE_SIZE: usize = 10;
+const MAX_PAGE: usize = 10_000;
 
 pub(crate) async fn enforce_admin_origin(request: Request, next: Next) -> Response {
     if request.method() != Method::GET && request.uri().path().starts_with("/admin") {
@@ -574,6 +577,8 @@ pub(crate) async fn package_list(
         SearchQuery {
             tenant: Some(tenant),
             q: query.q,
+            package_page: query.package_page,
+            audit_page: query.audit_page,
         },
     )
     .await
@@ -941,13 +946,47 @@ async fn render_dashboard(
     };
 
     let search_query = query.q.unwrap_or_default();
-    let search_results = if let Some(ref tenant_slug) = selected_tenant {
+    let package_page = normalized_page(query.package_page);
+    let audit_page = normalized_page(query.audit_page);
+    let package_offset = page_offset(package_page, PACKAGE_PAGE_SIZE);
+    let audit_offset = page_offset(audit_page, AUDIT_PAGE_SIZE);
+    let all_search_results = if let Some(ref tenant_slug) = selected_tenant {
         state
             .app
             .search_packages(tenant_slug, &search_query)
             .await?
     } else {
         Vec::new()
+    };
+    let search_result_count = all_search_results.len();
+    let search_results = all_search_results
+        .into_iter()
+        .skip(package_offset)
+        .take(PACKAGE_PAGE_SIZE)
+        .collect::<Vec<_>>();
+    let package_pagination = PaginationView {
+        page: package_page,
+        page_size: PACKAGE_PAGE_SIZE,
+        shown_count: search_results.len(),
+        total_count: Some(search_result_count),
+        previous_url: (package_page > 1).then(|| {
+            dashboard_page_url(
+                selected_tenant.as_deref(),
+                &search_query,
+                package_page - 1,
+                audit_page,
+            )
+        }),
+        next_url: (package_offset.saturating_add(PACKAGE_PAGE_SIZE) < search_result_count).then(
+            || {
+                dashboard_page_url(
+                    selected_tenant.as_deref(),
+                    &search_query,
+                    package_page + 1,
+                    audit_page,
+                )
+            },
+        ),
     };
     let mut mirror_jobs = if let Some(ref tenant_slug) = selected_tenant {
         state
@@ -972,13 +1011,43 @@ async fn render_dashboard(
             .cmp(&left.active)
             .then(left.project_name.cmp(&right.project_name))
     });
-    let audit_events = state
+    let mut audit_events = state
         .app
-        .list_audit_trail(selected_tenant.as_deref(), 25)
+        .list_audit_trail_page(
+            selected_tenant.as_deref(),
+            AUDIT_PAGE_SIZE + 1,
+            audit_offset,
+        )
         .await?
         .into_iter()
         .map(audit_trail_entry_view)
         .collect::<Vec<_>>();
+    let has_next_audit_page = audit_events.len() > AUDIT_PAGE_SIZE;
+    if has_next_audit_page {
+        audit_events.truncate(AUDIT_PAGE_SIZE);
+    }
+    let audit_pagination = PaginationView {
+        page: audit_page,
+        page_size: AUDIT_PAGE_SIZE,
+        shown_count: audit_events.len(),
+        total_count: None,
+        previous_url: (audit_page > 1).then(|| {
+            dashboard_page_url(
+                selected_tenant.as_deref(),
+                &search_query,
+                package_page,
+                audit_page - 1,
+            )
+        }),
+        next_url: has_next_audit_page.then(|| {
+            dashboard_page_url(
+                selected_tenant.as_deref(),
+                &search_query,
+                package_page,
+                audit_page + 1,
+            )
+        }),
+    };
     let total_storage_human = human_bytes(overview.total_storage_bytes);
 
     debug!(
@@ -999,8 +1068,46 @@ async fn render_dashboard(
         audit_events,
         search_query,
         search_results,
+        package_pagination,
+        audit_pagination,
+        build_features: state.build_features.clone(),
         session,
     })
+}
+
+fn normalized_page(page: Option<usize>) -> usize {
+    page.unwrap_or(1).clamp(1, MAX_PAGE)
+}
+
+fn page_offset(page: usize, page_size: usize) -> usize {
+    page.saturating_sub(1).saturating_mul(page_size)
+}
+
+fn dashboard_page_url(
+    tenant_slug: Option<&str>,
+    search_query: &str,
+    package_page: usize,
+    audit_page: usize,
+) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(tenant_slug) = tenant_slug {
+        serializer.append_pair("tenant", tenant_slug);
+    }
+    if !search_query.trim().is_empty() {
+        serializer.append_pair("q", search_query);
+    }
+    if package_page > 1 {
+        serializer.append_pair("package_page", &package_page.to_string());
+    }
+    if audit_page > 1 {
+        serializer.append_pair("audit_page", &audit_page.to_string());
+    }
+    let query = serializer.finish();
+    if query.is_empty() {
+        "/admin/search".to_string()
+    } else {
+        format!("/admin/search?{query}")
+    }
 }
 
 fn mirror_job_label(phase: MirrorJobPhase) -> &'static str {

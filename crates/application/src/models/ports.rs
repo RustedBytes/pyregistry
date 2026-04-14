@@ -160,6 +160,20 @@ pub trait RegistryStore: Send + Sync {
         tenant_slug: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AuditEvent>, ApplicationError>;
+
+    async fn list_audit_events_page(
+        &self,
+        tenant_slug: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<AuditEvent>, ApplicationError> {
+        Ok(self
+            .list_audit_events(tenant_slug, limit.saturating_add(offset))
+            .await?
+            .into_iter()
+            .skip(offset)
+            .collect())
+    }
 }
 
 pub trait WheelArchiveReader: Send + Sync {

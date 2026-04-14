@@ -31,16 +31,29 @@ impl PyregistryApp {
         tenant_slug: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AuditTrailEntry>, ApplicationError> {
+        self.list_audit_trail_page(tenant_slug, limit, 0).await
+    }
+
+    pub async fn list_audit_trail_page(
+        &self,
+        tenant_slug: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<AuditTrailEntry>, ApplicationError> {
         let limit = if limit == 0 {
             DEFAULT_AUDIT_LIMIT
         } else {
             limit.min(MAX_AUDIT_LIMIT)
         };
-        let events = self.store.list_audit_events(tenant_slug, limit).await?;
+        let events = self
+            .store
+            .list_audit_events_page(tenant_slug, limit, offset)
+            .await?;
         debug!(
-            "loaded {} audit event(s) for tenant filter {:?}",
+            "loaded {} audit event(s) for tenant filter {:?} offset={}",
             events.len(),
-            tenant_slug
+            tenant_slug,
+            offset
         );
         Ok(events
             .into_iter()

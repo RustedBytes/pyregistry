@@ -13,8 +13,8 @@ use crate::reports::{
     print_wheel_audit_report,
 };
 use crate::server::{
-    WatchCancellation, force_http_shutdown_after_signal, log_mirror_refresh_report,
-    spawn_mirror_updater, wait_for_mirror_updater,
+    WatchCancellation, enabled_build_features, force_http_shutdown_after_signal,
+    log_mirror_refresh_report, spawn_mirror_updater, wait_for_mirror_updater,
 };
 use clap::{CommandFactory, Parser};
 use pyregistry_application::{
@@ -66,6 +66,16 @@ fn in_memory_settings() -> Settings {
     )
     .expect("write test YARA rule");
     settings
+}
+
+#[test]
+fn enabled_build_features_reports_active_cargo_features() {
+    let features = enabled_build_features();
+
+    assert!(features.iter().all(|feature| !feature.trim().is_empty()));
+    if cfg!(feature = "sqlite") {
+        assert!(features.iter().any(|feature| feature == "sqlite"));
+    }
 }
 
 #[test]

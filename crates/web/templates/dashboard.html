@@ -234,6 +234,52 @@
         border-color: #9ed5cd;
         background: var(--surface-soft);
       }
+      .feature-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .feature-pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 7px 10px;
+        color: var(--text-soft);
+        font-size: 0.9rem;
+        font-weight: 700;
+      }
+      .pagination {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }
+      .pagination-links {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .page-link,
+      .page-link-disabled {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 36px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px 11px;
+        text-decoration: none;
+        font-weight: 800;
+      }
+      .page-link-disabled {
+        color: var(--muted);
+        background: var(--bg);
+      }
       .workspace {
         display: grid;
         gap: 18px;
@@ -288,6 +334,9 @@
         border: 1px solid var(--line);
         border-radius: 8px;
         background: var(--surface);
+      }
+      .package-results {
+        margin-top: 14px;
       }
       table {
         width: 100%;
@@ -456,6 +505,19 @@
       </section>
 
       <section class="section-block">
+        <h2>Build features</h2>
+        {% if build_features.len() > 0 %}
+        <div class="feature-list">
+          {% for feature in build_features %}
+          <span class="feature-pill">{{ feature }}</span>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="muted">No optional Cargo features are enabled for this build.</p>
+        {% endif %}
+      </section>
+
+      <section class="section-block">
         <h2>Tenants</h2>
         <div class="tenant-list">
           {% for tenant in tenants %}
@@ -496,7 +558,7 @@
             </div>
           </form>
           {% if search_results.len() > 0 %}
-          <div class="table-wrap">
+          <div class="table-wrap package-results">
             <table>
               <thead>
                 <tr><th>Package</th><th>Summary</th><th>Source</th><th>Latest</th></tr>
@@ -517,6 +579,29 @@
                 {% endfor %}
               </tbody>
             </table>
+          </div>
+          <div class="pagination">
+            <span class="muted">
+              Page {{ package_pagination.page }}.
+              {% match package_pagination.total_count %}
+              {% when Some with (total_count) %}Showing {{ package_pagination.shown_count }} of {{ total_count }} packages.
+              {% when None %}Showing {{ package_pagination.shown_count }} packages.
+              {% endmatch %}
+            </span>
+            <div class="pagination-links">
+              {% match package_pagination.previous_url %}
+              {% when Some with (previous_url) %}
+              <a class="page-link" href="{{ previous_url }}">Previous</a>
+              {% when None %}
+              <span class="page-link-disabled">Previous</span>
+              {% endmatch %}
+              {% match package_pagination.next_url %}
+              {% when Some with (next_url) %}
+              <a class="page-link" href="{{ next_url }}">Next</a>
+              {% when None %}
+              <span class="page-link-disabled">Next</span>
+              {% endmatch %}
+            </div>
           </div>
           {% else %}
           <p class="muted">Search results appear here.</p>
@@ -590,6 +675,23 @@
               {% endfor %}
             </tbody>
           </table>
+        </div>
+        <div class="pagination">
+          <span class="muted">Page {{ audit_pagination.page }}. Showing {{ audit_pagination.shown_count }} audit events.</span>
+          <div class="pagination-links">
+            {% match audit_pagination.previous_url %}
+            {% when Some with (previous_url) %}
+            <a class="page-link" href="{{ previous_url }}">Previous</a>
+            {% when None %}
+            <span class="page-link-disabled">Previous</span>
+            {% endmatch %}
+            {% match audit_pagination.next_url %}
+            {% when Some with (next_url) %}
+            <a class="page-link" href="{{ next_url }}">Next</a>
+            {% when None %}
+            <span class="page-link-disabled">Next</span>
+            {% endmatch %}
+          </div>
         </div>
         {% else %}
         <p class="muted">No audit events recorded yet.</p>
