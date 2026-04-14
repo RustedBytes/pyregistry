@@ -107,6 +107,15 @@ impl ObjectStorage for OpenDalObjectStorage {
         }
     }
 
+    async fn size_bytes(&self, key: &str) -> Result<Option<u64>, ApplicationError> {
+        let key = self.key_for(key)?;
+        match self.operator.stat(&key).await {
+            Ok(metadata) => Ok(Some(metadata.content_length())),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(opendal_to_application_error(error)),
+        }
+    }
+
     async fn delete(&self, key: &str) -> Result<(), ApplicationError> {
         let key = self.key_for(key)?;
         self.operator
@@ -132,6 +141,12 @@ impl ObjectStorage for OpenDalObjectStorage {
     }
 
     async fn get(&self, _key: &str) -> Result<Option<Vec<u8>>, ApplicationError> {
+        Err(ApplicationError::External(
+            "OpenDAL object storage requires the `opendal-fs` feature".into(),
+        ))
+    }
+
+    async fn size_bytes(&self, _key: &str) -> Result<Option<u64>, ApplicationError> {
         Err(ApplicationError::External(
             "OpenDAL object storage requires the `opendal-fs` feature".into(),
         ))
@@ -459,6 +474,15 @@ impl ObjectStorage for FileSystemObjectStorage {
                 debug!("local object storage miss for key `{key}`");
                 Ok(None)
             }
+            Err(error) => Err(ApplicationError::External(error.to_string())),
+        }
+    }
+
+    async fn size_bytes(&self, key: &str) -> Result<Option<u64>, ApplicationError> {
+        let path = self.path_for(key)?;
+        match fs::metadata(path).await {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(ApplicationError::External(error.to_string())),
         }
     }

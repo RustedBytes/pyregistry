@@ -73,6 +73,18 @@ pub trait RegistryStore: Send + Sync {
     ) -> Result<Option<Artifact>, ApplicationError>;
     async fn delete_artifact(&self, artifact_id: ArtifactId) -> Result<(), ApplicationError>;
 
+    async fn list_all_artifacts(&self) -> Result<Vec<Artifact>, ApplicationError> {
+        let mut artifacts = Vec::new();
+        for tenant in self.list_tenants().await? {
+            for project in self.list_projects(tenant.id).await? {
+                for release in self.list_releases(project.id).await? {
+                    artifacts.extend(self.list_artifacts(release.id).await?);
+                }
+            }
+        }
+        Ok(artifacts)
+    }
+
     async fn list_release_artifacts(
         &self,
         project_id: ProjectId,
@@ -188,6 +200,7 @@ pub trait DistributionFileInspector: Send + Sync {
 pub trait ObjectStorage: Send + Sync {
     async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<(), ApplicationError>;
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, ApplicationError>;
+    async fn size_bytes(&self, key: &str) -> Result<Option<u64>, ApplicationError>;
     async fn delete(&self, key: &str) -> Result<(), ApplicationError>;
 }
 

@@ -81,6 +81,44 @@ async fn mirrored_project_eagerly_caches_only_newest_release_percent() {
     assert_eq!(storage.object_count(), 1);
 }
 
+#[tokio::test]
+async fn registry_overview_counts_only_cached_artifact_storage() {
+    let store = Arc::new(FakeRegistryStore::with_mirrored_tenant());
+    let storage = Arc::new(FakeObjectStorage::default());
+    let mirror = Arc::new(FakeMirrorClient::with_single_artifact_named(
+        "demo-1.0.0-py3-none-any.whl",
+        "1.0.0",
+        "https://files.example.test/demo-1.0.0-py3-none-any.whl",
+        b"cached wheel".to_vec(),
+        None,
+    ));
+    let app = test_app(store, storage, mirror, 1).with_mirror_eager_download_percent(0);
+
+    app.resolve_project_from_mirror("acme", "demo")
+        .await
+        .expect("mirror result")
+        .expect("mirrored project");
+
+    let overview = app.get_registry_overview().await.expect("overview");
+    assert_eq!(overview.artifact_count, 1);
+    assert_eq!(
+        overview.total_storage_bytes, 0,
+        "mirror metadata should not count as stored bytes until the object is cached"
+    );
+
+    app.download_artifact(
+        "acme",
+        "demo",
+        "1.0.0",
+        "demo-1.0.0-py3-none-any.whl",
+    )
+    .await
+    .expect("lazy download");
+
+    let overview = app.get_registry_overview().await.expect("overview");
+    assert_eq!(overview.total_storage_bytes, b"cached wheel".len() as u64);
+}
+
 #[test]
 fn eager_cache_candidate_selection_handles_empty_zero_and_full_percentages() {
     assert!(select_eager_cache_candidates(Vec::new(), 50).is_empty());
@@ -2360,6 +2398,15 @@ impl ObjectStorage for FakeObjectStorage {
             .expect("object storage")
             .get(key)
             .cloned())
+    }
+
+    async fn size_bytes(&self, key: &str) -> Result<Option<u64>, ApplicationError> {
+        Ok(self
+            .objects
+            .lock()
+            .expect("object storage")
+            .get(key)
+            .map(|bytes| bytes.len() as u64))
     }
 
     async fn delete(&self, key: &str) -> Result<(), ApplicationError> {

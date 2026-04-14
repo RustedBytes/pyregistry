@@ -455,6 +455,15 @@ mod tests {
                 .cloned())
         }
 
+        async fn size_bytes(&self, key: &str) -> Result<Option<u64>, ApplicationError> {
+            Ok(self
+                .objects
+                .lock()
+                .expect("object storage")
+                .get(key)
+                .map(|bytes| bytes.len() as u64))
+        }
+
         async fn delete(&self, key: &str) -> Result<(), ApplicationError> {
             self.objects.lock().expect("object storage").remove(key);
             Ok(())

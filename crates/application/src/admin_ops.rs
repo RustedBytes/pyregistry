@@ -33,7 +33,8 @@ impl PyregistryApp {
     }
 
     pub async fn get_registry_overview(&self) -> Result<RegistryOverview, ApplicationError> {
-        let overview = self.store.registry_overview().await?;
+        let mut overview = self.store.registry_overview().await?;
+        overview.total_storage_bytes = self.cached_artifact_storage_bytes().await?;
         debug!(
             "loaded registry overview: tenants={}, projects={}, releases={}, artifacts={}, mirrored_projects={}, total_storage_bytes={}",
             overview.tenant_count,
@@ -44,6 +45,17 @@ impl PyregistryApp {
             overview.total_storage_bytes
         );
         Ok(overview)
+    }
+
+    async fn cached_artifact_storage_bytes(&self) -> Result<u64, ApplicationError> {
+        let artifacts = self.store.list_all_artifacts().await?;
+        let mut total_storage_bytes = 0u64;
+        for artifact in artifacts {
+            if let Some(size_bytes) = self.object_storage.size_bytes(&artifact.object_key).await? {
+                total_storage_bytes = total_storage_bytes.saturating_add(size_bytes);
+            }
+        }
+        Ok(total_storage_bytes)
     }
 
     pub async fn list_tenants(&self) -> Result<Vec<Tenant>, ApplicationError> {
