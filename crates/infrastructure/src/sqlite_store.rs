@@ -1040,14 +1040,31 @@ async fn migrate(connection: &Connection) -> Result<(), ApplicationError> {
 }
 
 async fn create_registry_tables(connection: &Connection) -> Result<(), ApplicationError> {
-    execute_batch(connection, registry_table_ddl()).await
+    for ddl in registry_table_ddls() {
+        execute_batch(connection, ddl).await?;
+    }
+    Ok(())
 }
 
 async fn create_registry_indexes(connection: &Connection) -> Result<(), ApplicationError> {
     execute_batch(connection, registry_index_ddl()).await
 }
 
-fn registry_table_ddl() -> &'static str {
+fn registry_table_ddls() -> [&'static str; 9] {
+    [
+        tenants_table_ddl(),
+        admin_users_table_ddl(),
+        api_tokens_table_ddl(),
+        projects_table_ddl(),
+        releases_table_ddl(),
+        artifacts_table_ddl(),
+        attestations_table_ddl(),
+        trusted_publishers_table_ddl(),
+        audit_events_table_ddl(),
+    ]
+}
+
+fn tenants_table_ddl() -> &'static str {
     r#"
         CREATE TABLE IF NOT EXISTS tenants (
             id TEXT PRIMARY KEY,
@@ -1056,7 +1073,11 @@ fn registry_table_ddl() -> &'static str {
             mirroring_enabled INTEGER NOT NULL,
             created_at TEXT NOT NULL
         );
+        "#
+}
 
+fn admin_users_table_ddl() -> &'static str {
+    r#"
         CREATE TABLE IF NOT EXISTS admin_users (
             id TEXT PRIMARY KEY,
             tenant_id TEXT REFERENCES tenants(id) ON DELETE SET NULL,
@@ -1065,7 +1086,11 @@ fn registry_table_ddl() -> &'static str {
             is_superadmin INTEGER NOT NULL,
             created_at TEXT NOT NULL
         );
+        "#
+}
 
+fn api_tokens_table_ddl() -> &'static str {
+    r#"
         CREATE TABLE IF NOT EXISTS api_tokens (
             id TEXT PRIMARY KEY,
             tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -1080,7 +1105,11 @@ fn registry_table_ddl() -> &'static str {
             created_at TEXT NOT NULL,
             expires_at TEXT
         );
+        "#
+}
 
+fn projects_table_ddl() -> &'static str {
+    r#"
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
             tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -1093,7 +1122,11 @@ fn registry_table_ddl() -> &'static str {
             updated_at TEXT NOT NULL,
             UNIQUE(tenant_id, normalized_name)
         );
+        "#
+}
 
+fn releases_table_ddl() -> &'static str {
+    r#"
         CREATE TABLE IF NOT EXISTS releases (
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -1103,7 +1136,11 @@ fn registry_table_ddl() -> &'static str {
             created_at TEXT NOT NULL,
             UNIQUE(project_id, version)
         );
+        "#
+}
 
+fn artifacts_table_ddl() -> &'static str {
+    r#"
         CREATE TABLE IF NOT EXISTS artifacts (
             id TEXT PRIMARY KEY,
             release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
@@ -1120,7 +1157,11 @@ fn registry_table_ddl() -> &'static str {
             created_at TEXT NOT NULL,
             UNIQUE(release_id, filename)
         );
+        "#
+}
 
+fn attestations_table_ddl() -> &'static str {
+    r#"
         CREATE TABLE IF NOT EXISTS attestations (
             artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
             media_type TEXT NOT NULL,
@@ -1128,7 +1169,11 @@ fn registry_table_ddl() -> &'static str {
             source TEXT NOT NULL,
             recorded_at TEXT NOT NULL
         );
+        "#
+}
 
+fn trusted_publishers_table_ddl() -> &'static str {
+    r#"
         CREATE TABLE IF NOT EXISTS trusted_publishers (
             id TEXT PRIMARY KEY,
             tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -1140,7 +1185,11 @@ fn registry_table_ddl() -> &'static str {
             claim_rules_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        "#
+}
 
+fn audit_events_table_ddl() -> &'static str {
+    r#"
         CREATE TABLE IF NOT EXISTS audit_events (
             id TEXT PRIMARY KEY,
             occurred_at TEXT NOT NULL,
