@@ -198,6 +198,12 @@ struct RegistryDistributionValidationTarget {
     artifact: Artifact,
 }
 
+struct RegistryDistributionValidationOutcome {
+    status: RegistryDistributionValidationStatus,
+    inspection: Option<crate::DistributionInspection>,
+    error: Option<String>,
+}
+
 async fn validate_registry_target(
     object_storage: Arc<dyn ObjectStorage>,
     inspector: Arc<dyn DistributionFileInspector>,
@@ -205,47 +211,13 @@ async fn validate_registry_target(
     target: RegistryDistributionValidationTarget,
 ) -> RegistryDistributionValidationItem {
     if !is_supported_distribution_filename(&target.artifact.filename) {
-        return registry_distribution_item(
-            &target.tenant,
-            &target.project,
-            &target.release,
-            &target.artifact,
-            RegistryDistributionValidationStatus::UnsupportedDistribution,
-            None,
-            Some(
-                "only .whl, .tar.gz, .tgz, and .zip files are supported by this validator"
-                    .to_string(),
-            ),
-        );
+        return registry_distribution_item(&target, unsupported_distribution_outcome());
     }
 
     let bytes = match object_storage.get(&target.artifact.object_key).await {
         Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            return registry_distribution_item(
-                &target.tenant,
-                &target.project,
-                &target.release,
-                &target.artifact,
-                RegistryDistributionValidationStatus::MissingBlob,
-                None,
-                Some(format!(
-                    "object storage key `{}` is missing",
-                    target.artifact.object_key
-                )),
-            );
-        }
-        Err(error) => {
-            return registry_distribution_item(
-                &target.tenant,
-                &target.project,
-                &target.release,
-                &target.artifact,
-                RegistryDistributionValidationStatus::StorageError,
-                None,
-                Some(error.to_string()),
-            );
-        }
+        Ok(None) => return registry_distribution_item(&target, missing_blob_outcome(&target)),
+        Err(error) => return registry_distribution_item(&target, storage_error_outcome(error)),
     };
 
     let inspection = match inspect_distribution_bytes_on_rayon(
@@ -258,18 +230,56 @@ async fn validate_registry_target(
     {
         Ok(inspection) => inspection,
         Err(error) => {
-            return registry_distribution_item(
-                &target.tenant,
-                &target.project,
-                &target.release,
-                &target.artifact,
-                RegistryDistributionValidationStatus::InvalidArchive,
-                None,
-                Some(error.to_string()),
-            );
+            return registry_distribution_item(&target, invalid_archive_outcome(error));
         }
     };
 
+    registry_distribution_item(&target, inspected_distribution_outcome(&target, inspection))
+}
+
+fn unsupported_distribution_outcome() -> RegistryDistributionValidationOutcome {
+    RegistryDistributionValidationOutcome {
+        status: RegistryDistributionValidationStatus::UnsupportedDistribution,
+        inspection: None,
+        error: Some(
+            "only .whl, .tar.gz, .tgz, and .zip files are supported by this validator".to_string(),
+        ),
+    }
+}
+
+fn missing_blob_outcome(
+    target: &RegistryDistributionValidationTarget,
+) -> RegistryDistributionValidationOutcome {
+    RegistryDistributionValidationOutcome {
+        status: RegistryDistributionValidationStatus::MissingBlob,
+        inspection: None,
+        error: Some(format!(
+            "object storage key `{}` is missing",
+            target.artifact.object_key
+        )),
+    }
+}
+
+fn storage_error_outcome(error: ApplicationError) -> RegistryDistributionValidationOutcome {
+    RegistryDistributionValidationOutcome {
+        status: RegistryDistributionValidationStatus::StorageError,
+        inspection: None,
+        error: Some(error.to_string()),
+    }
+}
+
+fn invalid_archive_outcome(error: ApplicationError) -> RegistryDistributionValidationOutcome {
+    RegistryDistributionValidationOutcome {
+        status: RegistryDistributionValidationStatus::InvalidArchive,
+        inspection: None,
+        error: Some(error.to_string()),
+    }
+}
+
+fn inspected_distribution_outcome(
+    target: &RegistryDistributionValidationTarget,
+    inspection: crate::DistributionInspection,
+) -> RegistryDistributionValidationOutcome {
     let extension_mismatch_error = if inspection.file_type.extension_mismatch() {
         Some(format!(
             "extension `{}` does not match detected file type `{}` ({})",
@@ -300,15 +310,11 @@ async fn validate_registry_target(
         _ => None,
     };
 
-    registry_distribution_item(
-        &target.tenant,
-        &target.project,
-        &target.release,
-        &target.artifact,
+    RegistryDistributionValidationOutcome {
         status,
-        Some(inspection),
+        inspection: Some(inspection),
         error,
-    )
+    }
 }
 
 async fn inspect_distribution_bytes_on_rayon(
@@ -320,7 +326,9 @@ async fn inspect_distribution_bytes_on_rayon(
     let (sender, receiver) = oneshot::channel();
     rayon_pool.spawn(move || {
         let result = inspector.inspect_distribution_bytes(&filename, &bytes);
-        let _ = sender.send(result);
+        if sender.send(result).is_err() {
+            warn!("distribution validation worker result receiver was dropped");
+        }
     });
     receiver.await.map_err(|_| {
         ApplicationError::External(
@@ -338,23 +346,19 @@ fn is_supported_distribution_filename(filename: &str) -> bool {
 }
 
 fn registry_distribution_item(
-    tenant: &Tenant,
-    project: &Project,
-    release: &Release,
-    artifact: &Artifact,
-    status: RegistryDistributionValidationStatus,
-    inspection: Option<crate::DistributionInspection>,
-    error: Option<String>,
+    target: &RegistryDistributionValidationTarget,
+    outcome: RegistryDistributionValidationOutcome,
 ) -> RegistryDistributionValidationItem {
+    let inspection = outcome.inspection;
     RegistryDistributionValidationItem {
-        tenant_slug: tenant.slug.as_str().to_string(),
-        project_name: project.name.original().to_string(),
-        version: release.version.as_str().to_string(),
-        filename: artifact.filename.clone(),
-        object_key: artifact.object_key.clone(),
-        expected_sha256: artifact.digests.sha256.clone(),
+        tenant_slug: target.tenant.slug.as_str().to_string(),
+        project_name: target.project.name.original().to_string(),
+        version: target.release.version.as_str().to_string(),
+        filename: target.artifact.filename.clone(),
+        object_key: target.artifact.object_key.clone(),
+        expected_sha256: target.artifact.digests.sha256.clone(),
         actual_sha256: inspection.as_ref().map(|value| value.sha256.clone()),
-        recorded_size_bytes: artifact.size_bytes,
+        recorded_size_bytes: target.artifact.size_bytes,
         actual_size_bytes: inspection.as_ref().map(|value| value.size_bytes),
         kind: inspection.as_ref().map(|value| value.kind),
         detected_file_type: inspection
@@ -367,8 +371,8 @@ fn registry_distribution_item(
             .as_ref()
             .map(|value| value.file_type.matches_extension),
         archive_entry_count: inspection.map(|value| value.archive_entry_count),
-        status,
-        error,
+        status: outcome.status,
+        error: outcome.error,
     }
 }
 

@@ -15,43 +15,48 @@ pub struct MirrorJobStatus {
 
 impl MirrorJobStatus {
     #[must_use]
-    pub fn queued(tenant_slug: String, project_name: String) -> Self {
+    pub fn new(
+        tenant_slug: String,
+        project_name: String,
+        phase: MirrorJobPhase,
+        detail: String,
+    ) -> Self {
         Self {
             tenant_slug,
             project_name,
-            phase: MirrorJobPhase::Queued,
-            detail: "Waiting for a background worker slot.".into(),
+            phase,
+            detail,
         }
+    }
+
+    #[must_use]
+    pub fn queued(tenant_slug: String, project_name: String) -> Self {
+        Self::new(
+            tenant_slug,
+            project_name,
+            MirrorJobPhase::Queued,
+            "Waiting for a background worker slot.".into(),
+        )
     }
 
     #[must_use]
     pub fn running(tenant_slug: String, project_name: String) -> Self {
-        Self {
+        Self::new(
             tenant_slug,
             project_name,
-            phase: MirrorJobPhase::Running,
-            detail: "Downloading package metadata and all available artifacts from PyPI.".into(),
-        }
+            MirrorJobPhase::Running,
+            "Downloading package metadata and all available artifacts from PyPI.".into(),
+        )
     }
 
     #[must_use]
     pub fn completed(tenant_slug: String, project_name: String, detail: String) -> Self {
-        Self {
-            tenant_slug,
-            project_name,
-            phase: MirrorJobPhase::Completed,
-            detail,
-        }
+        Self::new(tenant_slug, project_name, MirrorJobPhase::Completed, detail)
     }
 
     #[must_use]
     pub fn failed(tenant_slug: String, project_name: String, detail: String) -> Self {
-        Self {
-            tenant_slug,
-            project_name,
-            phase: MirrorJobPhase::Failed,
-            detail,
-        }
+        Self::new(tenant_slug, project_name, MirrorJobPhase::Failed, detail)
     }
 
     #[must_use]
@@ -96,6 +101,32 @@ pub struct AppState {
     pub build_features: Vec<String>,
     pub secure_admin_cookies: bool,
     pub external_base_url: Option<String>,
+}
+
+impl AppState {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        app: Arc<PyregistryApp>,
+        rate_limiter: RateLimiter,
+        network_source: NetworkSourcePolicy,
+        show_index_stats: bool,
+        build_features: Vec<String>,
+        secure_admin_cookies: bool,
+        external_base_url: Option<String>,
+    ) -> Self {
+        Self {
+            app,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            mirror_jobs: MirrorJobs::default(),
+            rate_limiter,
+            network_source,
+            show_index_stats,
+            build_features,
+            secure_admin_cookies,
+            external_base_url,
+        }
+    }
 }
 
 #[cfg(test)]

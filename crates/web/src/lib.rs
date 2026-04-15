@@ -31,6 +31,20 @@ pub fn router(state: AppState) -> Router {
     let admin_csrf_layer = middleware::from_fn(admin::enforce_admin_origin);
 
     Router::new()
+        .merge(admin_routes())
+        .merge(package_routes())
+        .merge(oidc_routes())
+        .method_not_allowed_fallback(error::method_not_allowed)
+        .fallback(error::not_found)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .layer(admin_csrf_layer)
+        .layer(rate_limit_layer)
+        .layer(network_source_layer)
+        .with_state(state)
+}
+
+fn admin_routes() -> Router<AppState> {
+    Router::new()
         .route("/", get(admin::index))
         .route(
             "/admin/login",
@@ -106,6 +120,10 @@ pub fn router(state: AppState) -> Router {
             "/admin/t/{tenant}/packages/{project}/releases/{version}/artifacts/{filename}/scan",
             post(admin::scan_artifact),
         )
+}
+
+fn package_routes() -> Router<AppState> {
+    Router::new()
         .route("/t/{tenant}/simple/", get(package_api::simple_index))
         .route(
             "/t/{tenant}/simple/{project}/",
@@ -120,18 +138,15 @@ pub fn router(state: AppState) -> Router {
             "/t/{tenant}/provenance/{project}/{version}/{filename}",
             get(package_api::get_provenance),
         )
+}
+
+fn oidc_routes() -> Router<AppState> {
+    Router::new()
         .route("/_/oidc/audience", get(package_api::oidc_audience))
         .route(
             "/_/oidc/mint-token",
             post(package_api::mint_oidc_publish_token),
         )
-        .method_not_allowed_fallback(error::method_not_allowed)
-        .fallback(error::not_found)
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
-        .layer(admin_csrf_layer)
-        .layer(rate_limit_layer)
-        .layer(network_source_layer)
-        .with_state(state)
 }
 
 #[cfg(test)]

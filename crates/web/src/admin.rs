@@ -12,7 +12,9 @@ use crate::{
         ReleaseFormData, RevokeTokenFormData, SearchQuery, TenantView, WheelAuditResponse,
         YankFormData,
     },
-    state::{AppState, MirrorJobPhase, MirrorJobStatus, StoredAdminSession, mirror_job_key},
+    state::{
+        AppState, MirrorJobPhase, MirrorJobStatus, MirrorJobs, StoredAdminSession, mirror_job_key,
+    },
 };
 use axum::{
     Form, Json,
@@ -27,8 +29,8 @@ use log::{debug, info, warn};
 use pyregistry_application::{
     AdminSession, ApplicationError, AuditStoredWheelCommand, CreatePackageCommand,
     CreateReleaseCommand, CreateTenantCommand, DeletionCommand, IssueApiTokenCommand,
-    RegisterTrustedPublisherCommand, UpdatePackageCommand, UpdateReleaseCommand, WheelAuditFinding,
-    WheelAuditFindingKind, WheelAuditReport,
+    RegisterTrustedPublisherCommand, SearchHit, UpdatePackageCommand, UpdateReleaseCommand,
+    WheelAuditFinding, WheelAuditFindingKind, WheelAuditReport,
 };
 use pyregistry_domain::{DeletionMode, TokenScope, TrustedPublisherProvider};
 use std::collections::HashMap;
@@ -412,28 +414,16 @@ pub(crate) async fn cache_mirror_project(
         session.email, tenant, project_name
     );
     let key = mirror_job_key(&tenant, &project_name);
-    {
-        let jobs = state.mirror_jobs.read().await;
-        if jobs.get(&key).is_some_and(MirrorJobStatus::is_active) {
-            let message = format!(
-                "A background mirror sync for `{project_name}` is already running. You can return to the dashboard and watch the status update there."
-            );
-            let back_href = format!("/admin/search?tenant={tenant}");
-            return render_html(MessageTemplate {
-                title: "Mirror sync already running",
-                message: &message,
-                back_href: &back_href,
-            });
-        }
+    if mirror_job_is_active(&state.mirror_jobs, &key).await {
+        return render_mirror_job_already_running(&tenant, &project_name);
     }
 
-    {
-        let mut jobs = state.mirror_jobs.write().await;
-        jobs.insert(
-            key.clone(),
-            MirrorJobStatus::queued(tenant.clone(), project_name.clone()),
-        );
-    }
+    store_mirror_job(
+        &state.mirror_jobs,
+        key.clone(),
+        MirrorJobStatus::queued(tenant.clone(), project_name.clone()),
+    )
+    .await;
     record_audit_event(
         &state,
         session.email,
@@ -444,46 +434,7 @@ pub(crate) async fn cache_mirror_project(
     )
     .await;
 
-    let app = state.app.clone();
-    let mirror_jobs = state.mirror_jobs.clone();
-    let tenant_for_task = tenant.clone();
-    let project_for_task = project_name.clone();
-    tokio::spawn(async move {
-        {
-            let mut jobs = mirror_jobs.write().await;
-            jobs.insert(
-                key.clone(),
-                MirrorJobStatus::running(tenant_for_task.clone(), project_for_task.clone()),
-            );
-        }
-
-        let next_status = match app
-            .resolve_project_from_mirror(&tenant_for_task, &project_for_task)
-            .await
-        {
-            Ok(Some(project)) => MirrorJobStatus::completed(
-                tenant_for_task.clone(),
-                project_for_task.clone(),
-                format!(
-                    "Mirrored `{}` and cached all currently available upstream files.",
-                    project.name.original()
-                ),
-            ),
-            Ok(None) => MirrorJobStatus::failed(
-                tenant_for_task.clone(),
-                project_for_task.clone(),
-                format!("PyPI package `{project_for_task}` was not found."),
-            ),
-            Err(error) => MirrorJobStatus::failed(
-                tenant_for_task.clone(),
-                project_for_task.clone(),
-                error.to_string(),
-            ),
-        };
-
-        let mut jobs = mirror_jobs.write().await;
-        jobs.insert(key, next_status);
-    });
+    spawn_detached_mirror_refresh_job(&state, key, tenant.clone(), project_name.clone());
 
     let message = format!(
         "Started a background mirror sync for `{project_name}`. The dashboard will stay responsive while Pyregistry downloads metadata and all available files from PyPI."
@@ -495,6 +446,74 @@ pub(crate) async fn cache_mirror_project(
         message: &message,
         back_href: &back_href,
     })
+}
+
+async fn mirror_job_is_active(mirror_jobs: &MirrorJobs, key: &str) -> bool {
+    mirror_jobs
+        .read()
+        .await
+        .get(key)
+        .is_some_and(MirrorJobStatus::is_active)
+}
+
+fn render_mirror_job_already_running(
+    tenant: &str,
+    project_name: &str,
+) -> Result<Html<String>, WebError> {
+    let message = format!(
+        "A background mirror sync for `{project_name}` is already running. You can return to the dashboard and watch the status update there."
+    );
+    let back_href = format!("/admin/search?tenant={tenant}");
+    render_html(MessageTemplate {
+        title: "Mirror sync already running",
+        message: &message,
+        back_href: &back_href,
+    })
+}
+
+async fn store_mirror_job(mirror_jobs: &MirrorJobs, key: String, status: MirrorJobStatus) {
+    mirror_jobs.write().await.insert(key, status);
+}
+
+fn spawn_detached_mirror_refresh_job(
+    state: &AppState,
+    key: String,
+    tenant: String,
+    project_name: String,
+) {
+    let app = state.app.clone();
+    let mirror_jobs = state.mirror_jobs.clone();
+    let handle = tokio::spawn(async move {
+        store_mirror_job(
+            &mirror_jobs,
+            key.clone(),
+            MirrorJobStatus::running(tenant.clone(), project_name.clone()),
+        )
+        .await;
+
+        let next_status = match app
+            .resolve_project_from_mirror(&tenant, &project_name)
+            .await
+        {
+            Ok(Some(project)) => MirrorJobStatus::completed(
+                tenant.clone(),
+                project_name.clone(),
+                format!(
+                    "Mirrored `{}` and cached all currently available upstream files.",
+                    project.name.original()
+                ),
+            ),
+            Ok(None) => MirrorJobStatus::failed(
+                tenant.clone(),
+                project_name.clone(),
+                format!("PyPI package `{project_name}` was not found."),
+            ),
+            Err(error) => MirrorJobStatus::failed(tenant, project_name, error.to_string()),
+        };
+
+        store_mirror_job(&mirror_jobs, key, next_status).await;
+    });
+    drop(handle);
 }
 
 pub(crate) async fn register_publisher(
@@ -1103,140 +1122,35 @@ async fn render_dashboard(
         session.email, query.tenant, query.q
     );
     let overview = state.app.get_registry_overview().await?;
-    let tenants = state
-        .app
-        .list_tenants()
-        .await?
-        .into_iter()
-        .map(|tenant| TenantView {
-            slug: tenant.slug.as_str().to_string(),
-            display_name: tenant.display_name,
-            mirroring_enabled: tenant.mirror_rule.enabled,
-        })
-        .collect::<Vec<_>>();
+    let tenants = dashboard_tenants(&state).await?;
 
     let selected_tenant = session
         .tenant_slug
         .clone()
         .or(query.tenant.clone())
         .or_else(|| tenants.first().map(|tenant| tenant.slug.clone()));
-    let metrics = if let Some(ref tenant_slug) = selected_tenant {
-        let metrics = state.app.get_tenant_dashboard(tenant_slug).await?;
-        Some(DashboardView {
-            tenant_slug: metrics.tenant_slug,
-            project_count: metrics.project_count,
-            release_count: metrics.release_count,
-            artifact_count: metrics.artifact_count,
-            token_count: metrics.token_count,
-            trusted_publisher_count: metrics.trusted_publisher_count,
-        })
-    } else {
-        None
-    };
 
     let search_query = query.q.unwrap_or_default();
     let package_page = normalized_page(query.package_page);
     let audit_page = normalized_page(query.audit_page);
-    let package_offset = page_offset(package_page, PACKAGE_PAGE_SIZE);
-    let audit_offset = page_offset(audit_page, AUDIT_PAGE_SIZE);
-    let all_search_results = if let Some(ref tenant_slug) = selected_tenant {
-        state
-            .app
-            .search_packages(tenant_slug, &search_query)
-            .await?
-    } else {
-        Vec::new()
-    };
-    let search_result_count = all_search_results.len();
-    let search_results = all_search_results
-        .into_iter()
-        .skip(package_offset)
-        .take(PACKAGE_PAGE_SIZE)
-        .collect::<Vec<_>>();
-    let package_pagination = PaginationView {
-        page: package_page,
-        page_size: PACKAGE_PAGE_SIZE,
-        shown_count: search_results.len(),
-        total_count: Some(search_result_count),
-        previous_url: (package_page > 1).then(|| {
-            dashboard_page_url(
-                selected_tenant.as_deref(),
-                &search_query,
-                package_page - 1,
-                audit_page,
-            )
-        }),
-        next_url: (package_offset.saturating_add(PACKAGE_PAGE_SIZE) < search_result_count).then(
-            || {
-                dashboard_page_url(
-                    selected_tenant.as_deref(),
-                    &search_query,
-                    package_page + 1,
-                    audit_page,
-                )
-            },
-        ),
-    };
-    let mut mirror_jobs = if let Some(ref tenant_slug) = selected_tenant {
-        state
-            .mirror_jobs
-            .read()
-            .await
-            .values()
-            .filter(|job| job.tenant_slug == *tenant_slug)
-            .map(|job| MirrorJobView {
-                project_name: job.project_name.clone(),
-                status_label: mirror_job_label(job.phase).to_string(),
-                detail: job.detail.clone(),
-                active: matches!(job.phase, MirrorJobPhase::Queued | MirrorJobPhase::Running),
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    mirror_jobs.sort_by(|left, right| {
-        right
-            .active
-            .cmp(&left.active)
-            .then(left.project_name.cmp(&right.project_name))
-    });
-    let mut audit_events = state
-        .app
-        .list_audit_trail_page(
-            selected_tenant.as_deref(),
-            AUDIT_PAGE_SIZE + 1,
-            audit_offset,
-        )
-        .await?
-        .into_iter()
-        .map(audit_trail_entry_view)
-        .collect::<Vec<_>>();
-    let has_next_audit_page = audit_events.len() > AUDIT_PAGE_SIZE;
-    if has_next_audit_page {
-        audit_events.truncate(AUDIT_PAGE_SIZE);
-    }
-    let audit_pagination = PaginationView {
-        page: audit_page,
-        page_size: AUDIT_PAGE_SIZE,
-        shown_count: audit_events.len(),
-        total_count: None,
-        previous_url: (audit_page > 1).then(|| {
-            dashboard_page_url(
-                selected_tenant.as_deref(),
-                &search_query,
-                package_page,
-                audit_page - 1,
-            )
-        }),
-        next_url: has_next_audit_page.then(|| {
-            dashboard_page_url(
-                selected_tenant.as_deref(),
-                &search_query,
-                package_page,
-                audit_page + 1,
-            )
-        }),
-    };
+    let metrics = dashboard_metrics(&state, selected_tenant.as_deref()).await?;
+    let (search_results, package_pagination) = dashboard_package_search(
+        &state,
+        selected_tenant.as_deref(),
+        &search_query,
+        package_page,
+        audit_page,
+    )
+    .await?;
+    let mirror_jobs = dashboard_mirror_jobs(&state, selected_tenant.as_deref()).await;
+    let (audit_events, audit_pagination) = dashboard_audit_events(
+        &state,
+        selected_tenant.as_deref(),
+        &search_query,
+        package_page,
+        audit_page,
+    )
+    .await?;
     let total_storage_human = human_bytes(overview.total_storage_bytes);
 
     debug!(
@@ -1262,6 +1176,134 @@ async fn render_dashboard(
         build_features: state.build_features.clone(),
         session,
     })
+}
+
+async fn dashboard_tenants(state: &AppState) -> Result<Vec<TenantView>, WebError> {
+    Ok(state
+        .app
+        .list_tenants()
+        .await?
+        .into_iter()
+        .map(|tenant| TenantView {
+            slug: tenant.slug.as_str().to_string(),
+            display_name: tenant.display_name,
+            mirroring_enabled: tenant.mirror_rule.enabled,
+        })
+        .collect())
+}
+
+async fn dashboard_metrics(
+    state: &AppState,
+    selected_tenant: Option<&str>,
+) -> Result<Option<DashboardView>, WebError> {
+    let Some(tenant_slug) = selected_tenant else {
+        return Ok(None);
+    };
+    let metrics = state.app.get_tenant_dashboard(tenant_slug).await?;
+    Ok(Some(DashboardView {
+        tenant_slug: metrics.tenant_slug,
+        project_count: metrics.project_count,
+        release_count: metrics.release_count,
+        artifact_count: metrics.artifact_count,
+        token_count: metrics.token_count,
+        trusted_publisher_count: metrics.trusted_publisher_count,
+    }))
+}
+
+async fn dashboard_package_search(
+    state: &AppState,
+    selected_tenant: Option<&str>,
+    search_query: &str,
+    package_page: usize,
+    audit_page: usize,
+) -> Result<(Vec<SearchHit>, PaginationView), WebError> {
+    let package_offset = page_offset(package_page, PACKAGE_PAGE_SIZE);
+    let all_search_results = match selected_tenant {
+        Some(tenant_slug) => state.app.search_packages(tenant_slug, search_query).await?,
+        None => Vec::new(),
+    };
+    let search_result_count = all_search_results.len();
+    let search_results = all_search_results
+        .into_iter()
+        .skip(package_offset)
+        .take(PACKAGE_PAGE_SIZE)
+        .collect::<Vec<_>>();
+    let pagination = PaginationView {
+        page: package_page,
+        page_size: PACKAGE_PAGE_SIZE,
+        shown_count: search_results.len(),
+        total_count: Some(search_result_count),
+        previous_url: (package_page > 1).then(|| {
+            dashboard_page_url(selected_tenant, search_query, package_page - 1, audit_page)
+        }),
+        next_url: (package_offset.saturating_add(PACKAGE_PAGE_SIZE) < search_result_count).then(
+            || dashboard_page_url(selected_tenant, search_query, package_page + 1, audit_page),
+        ),
+    };
+    Ok((search_results, pagination))
+}
+
+async fn dashboard_mirror_jobs(
+    state: &AppState,
+    selected_tenant: Option<&str>,
+) -> Vec<MirrorJobView> {
+    let Some(tenant_slug) = selected_tenant else {
+        return Vec::new();
+    };
+    let mut mirror_jobs = state
+        .mirror_jobs
+        .read()
+        .await
+        .values()
+        .filter(|job| job.tenant_slug == tenant_slug)
+        .map(|job| MirrorJobView {
+            project_name: job.project_name.clone(),
+            status_label: mirror_job_label(job.phase).to_string(),
+            detail: job.detail.clone(),
+            active: matches!(job.phase, MirrorJobPhase::Queued | MirrorJobPhase::Running),
+        })
+        .collect::<Vec<_>>();
+    mirror_jobs.sort_by(|left, right| {
+        right
+            .active
+            .cmp(&left.active)
+            .then(left.project_name.cmp(&right.project_name))
+    });
+    mirror_jobs
+}
+
+async fn dashboard_audit_events(
+    state: &AppState,
+    selected_tenant: Option<&str>,
+    search_query: &str,
+    package_page: usize,
+    audit_page: usize,
+) -> Result<(Vec<AuditTrailEntryView>, PaginationView), WebError> {
+    let audit_offset = page_offset(audit_page, AUDIT_PAGE_SIZE);
+    let mut audit_events = state
+        .app
+        .list_audit_trail_page(selected_tenant, AUDIT_PAGE_SIZE + 1, audit_offset)
+        .await?
+        .into_iter()
+        .map(audit_trail_entry_view)
+        .collect::<Vec<_>>();
+    let has_next_audit_page = audit_events.len() > AUDIT_PAGE_SIZE;
+    if has_next_audit_page {
+        audit_events.truncate(AUDIT_PAGE_SIZE);
+    }
+    let pagination = PaginationView {
+        page: audit_page,
+        page_size: AUDIT_PAGE_SIZE,
+        shown_count: audit_events.len(),
+        total_count: None,
+        previous_url: (audit_page > 1).then(|| {
+            dashboard_page_url(selected_tenant, search_query, package_page, audit_page - 1)
+        }),
+        next_url: has_next_audit_page.then(|| {
+            dashboard_page_url(selected_tenant, search_query, package_page, audit_page + 1)
+        }),
+    };
+    Ok((audit_events, pagination))
 }
 
 fn normalized_page(page: Option<usize>) -> usize {

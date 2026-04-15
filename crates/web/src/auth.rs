@@ -10,18 +10,10 @@ pub(crate) async fn require_session(
     state: &AppState,
     jar: &CookieJar,
 ) -> Result<AdminSession, WebError> {
-    let session_id = jar
-        .get("admin_session")
-        .map(|cookie| cookie.value().to_string())
-        .ok_or_else(|| {
-            warn!("admin session lookup failed because the session cookie was missing");
-            WebError {
-                status: StatusCode::UNAUTHORIZED,
-                message: "Please sign in first".into(),
-            }
-        })?;
+    let session_id = admin_session_cookie(jar)?;
 
-    let stored = state.sessions.read().await.get(&session_id).cloned();
+    let mut sessions = state.sessions.write().await;
+    let stored = sessions.get(&session_id).cloned();
     let Some(stored) = stored else {
         return Err({
             warn!("admin session lookup failed because the session was not found or expired");
@@ -33,7 +25,7 @@ pub(crate) async fn require_session(
     };
 
     if stored.expires_at <= chrono::Utc::now() {
-        state.sessions.write().await.remove(&session_id);
+        sessions.remove(&session_id);
         warn!("admin session lookup failed because the server-side session expired");
         return Err(WebError {
             status: StatusCode::UNAUTHORIZED,
@@ -42,6 +34,18 @@ pub(crate) async fn require_session(
     }
 
     Ok(stored.session)
+}
+
+fn admin_session_cookie(jar: &CookieJar) -> Result<String, WebError> {
+    jar.get("admin_session")
+        .map(|cookie| cookie.value().to_string())
+        .ok_or_else(|| {
+            warn!("admin session lookup failed because the session cookie was missing");
+            WebError {
+                status: StatusCode::UNAUTHORIZED,
+                message: "Please sign in first".into(),
+            }
+        })
 }
 
 pub(crate) fn ensure_tenant_access(session: &AdminSession, tenant: &str) -> Result<(), WebError> {
@@ -117,6 +121,11 @@ pub(crate) fn human_bytes(bytes: u64) -> String {
 }
 
 fn extract_basic_secret(headers: &HeaderMap) -> Result<String, WebError> {
+    let decoded = decode_basic_payload(headers)?;
+    secret_from_basic_payload(&decoded)
+}
+
+fn decode_basic_payload(headers: &HeaderMap) -> Result<String, WebError> {
     let header_value = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -140,6 +149,10 @@ fn extract_basic_secret(headers: &HeaderMap) -> Result<String, WebError> {
         status: StatusCode::UNAUTHORIZED,
         message: "Invalid basic auth payload".into(),
     })?;
+    Ok(decoded)
+}
+
+fn secret_from_basic_payload(decoded: &str) -> Result<String, WebError> {
     let Some((username, password)) = decoded.split_once(':') else {
         let token = decoded.trim();
         if token.is_empty() {
