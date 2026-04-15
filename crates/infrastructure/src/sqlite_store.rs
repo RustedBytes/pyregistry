@@ -1035,9 +1035,20 @@ impl RegistryStore for SqliteRegistryStore {
 }
 
 async fn migrate(connection: &Connection) -> Result<(), ApplicationError> {
-    execute_batch(
-        connection,
-        r#"
+    create_registry_tables(connection).await?;
+    create_registry_indexes(connection).await
+}
+
+async fn create_registry_tables(connection: &Connection) -> Result<(), ApplicationError> {
+    execute_batch(connection, registry_table_ddl()).await
+}
+
+async fn create_registry_indexes(connection: &Connection) -> Result<(), ApplicationError> {
+    execute_batch(connection, registry_index_ddl()).await
+}
+
+fn registry_table_ddl() -> &'static str {
+    r#"
         CREATE TABLE IF NOT EXISTS tenants (
             id TEXT PRIMARY KEY,
             slug TEXT NOT NULL UNIQUE,
@@ -1139,7 +1150,11 @@ async fn migrate(connection: &Connection) -> Result<(), ApplicationError> {
             target TEXT,
             metadata_json TEXT NOT NULL
         );
+        "#
+}
 
+fn registry_index_ddl() -> &'static str {
+    r#"
         CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant ON api_tokens(tenant_id);
         CREATE INDEX IF NOT EXISTS idx_api_tokens_tenant_created
             ON api_tokens(tenant_id, created_at DESC);
@@ -1158,9 +1173,7 @@ async fn migrate(connection: &Connection) -> Result<(), ApplicationError> {
             ON audit_events(tenant_slug, occurred_at);
         CREATE INDEX IF NOT EXISTS idx_audit_events_time
             ON audit_events(occurred_at);
-        "#,
-    )
-    .await
+        "#
 }
 
 async fn execute_batch(connection: &Connection, sql: &str) -> Result<(), ApplicationError> {

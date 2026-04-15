@@ -1,12 +1,13 @@
 use super::*;
 use crate::{
-    AttestationSigner, CancellationSignal, Clock, CreateReleaseCommand, CreateTenantCommand,
-    DeletionCommand, DependencyVulnerabilityQuery, DependencyVulnerabilityReport,
-    DistributionFileInspector, DistributionInspection, DistributionKind, IdGenerator,
-    IssueApiTokenCommand, MintOidcPublishTokenCommand, MirrorClient, MirroredArtifactSnapshot,
-    NoopPackagePublishNotifier, NoopVulnerabilityNotifier, NoopWheelAuditNotifier, ObjectStorage,
-    OidcVerifier, PackageArtifactDetails, PackagePublishEventKind, PackagePublishNotification,
-    PackagePublishNotifier, PackageReleaseDetails, PackageVulnerability, PackageVulnerabilityQuery,
+    AttestationSigner, AuthenticatedAccess, CancellationSignal, Clock, CreateReleaseCommand,
+    CreateTenantCommand, DeletionCommand, DependencyVulnerabilityQuery,
+    DependencyVulnerabilityReport, DistributionFileInspector, DistributionInspection,
+    DistributionKind, IdGenerator, IssueApiTokenCommand, MintOidcPublishTokenCommand, MirrorClient,
+    MirroredArtifactSnapshot, NoopPackagePublishNotifier, NoopVulnerabilityNotifier,
+    NoopWheelAuditNotifier, ObjectStorage, OidcVerifier, PackageArtifactDetails,
+    PackagePublishEventKind, PackagePublishNotification, PackagePublishNotifier,
+    PackageReleaseDetails, PackageVulnerability, PackageVulnerabilityQuery,
     PackageVulnerabilityReport, PasswordHasher, RecordAuditEventCommand,
     RegisterTrustedPublisherCommand, RegistryDistributionValidationStatus, RegistryOverview,
     RegistryStore, SearchHit, TokenHasher, UpdatePackageCommand, UpdateReleaseCommand,
@@ -1265,6 +1266,23 @@ async fn admin_publish_governance_and_audit_use_cases_share_a_consistent_registr
     let mirror = Arc::new(FakeMirrorClient::with_artifact_count(0));
     let app = test_app(store.clone(), storage.clone(), mirror, 2);
 
+    let (tenant, publish_access) = bootstrap_governance_fixture(&app).await;
+    publish_with_trusted_publisher(&app).await;
+    assert_governance_read_models(&app).await;
+    exercise_governance_yank_flows(&app).await;
+    record_and_assert_governance_audit_event(&app).await;
+    purge_governance_fixture(&app, &store, &storage, &tenant, &publish_access).await;
+}
+
+async fn bootstrap_governance_fixture(app: &PyregistryApp) -> (Tenant, AuthenticatedAccess) {
+    let tenant = bootstrap_admin_tenant(app).await;
+    exercise_read_token_lifecycle(app).await;
+    let publish_access = issue_publish_access_and_upload_initial_artifact(app).await;
+
+    (tenant, publish_access)
+}
+
+async fn bootstrap_admin_tenant(app: &PyregistryApp) -> Tenant {
     app.bootstrap_superadmin(" ROOT@Example.COM ", "root-secret")
         .await
         .expect("bootstrap superadmin");
@@ -1310,6 +1328,10 @@ async fn admin_publish_governance_and_audit_use_cases_share_a_consistent_registr
         Err(ApplicationError::Unauthorized(_))
     ));
 
+    tenant
+}
+
+async fn exercise_read_token_lifecycle(app: &PyregistryApp) {
     let read_token = app
         .issue_api_token(IssueApiTokenCommand {
             tenant_slug: "acme".into(),
@@ -1337,7 +1359,11 @@ async fn admin_publish_governance_and_audit_use_cases_share_a_consistent_registr
             .await,
         Err(ApplicationError::Unauthorized(_))
     ));
+}
 
+async fn issue_publish_access_and_upload_initial_artifact(
+    app: &PyregistryApp,
+) -> AuthenticatedAccess {
     let publish_token = app
         .issue_api_token(IssueApiTokenCommand {
             tenant_slug: "acme".into(),
@@ -1399,6 +1425,10 @@ async fn admin_publish_governance_and_audit_use_cases_share_a_consistent_registr
         Err(ApplicationError::Conflict(_))
     ));
 
+    publish_access
+}
+
+async fn publish_with_trusted_publisher(app: &PyregistryApp) {
     let mut claim_rules = BTreeMap::new();
     claim_rules.insert("repository".into(), "acme/demo-pkg".into());
     let publisher = app
@@ -1441,7 +1471,9 @@ async fn admin_publish_governance_and_audit_use_cases_share_a_consistent_registr
     )
     .await
     .expect("trusted upload");
+}
 
+async fn assert_governance_read_models(app: &PyregistryApp) {
     let overview = app.get_registry_overview().await.expect("overview");
     assert_eq!(overview.tenant_count, 1);
     assert_eq!(overview.project_count, 1);
@@ -1525,7 +1557,9 @@ async fn admin_publish_governance_and_audit_use_cases_share_a_consistent_registr
     assert_eq!(security.package_count, 1);
     assert_eq!(security.file_count, 2);
     assert_eq!(security.vulnerability_count, 0);
+}
 
+async fn exercise_governance_yank_flows(app: &PyregistryApp) {
     app.yank_artifact(DeletionCommand {
         tenant_slug: "acme".into(),
         project_name: "demo-pkg".into(),
@@ -1574,7 +1608,9 @@ async fn admin_publish_governance_and_audit_use_cases_share_a_consistent_registr
     app.unyank_release("acme", "demo-pkg", "1.0.0")
         .await
         .expect("unyank release");
+}
 
+async fn record_and_assert_governance_audit_event(app: &PyregistryApp) {
     app.record_audit_event(RecordAuditEventCommand {
         actor: " admin@acme.test ".into(),
         action: " package.scan ".into(),
@@ -1598,7 +1634,15 @@ async fn admin_publish_governance_and_audit_use_cases_share_a_consistent_registr
         Some(&"0".to_string())
     );
     assert!(!audit_trail[0].metadata.contains_key("empty"));
+}
 
+async fn purge_governance_fixture(
+    app: &PyregistryApp,
+    store: &Arc<FakeRegistryStore>,
+    storage: &Arc<FakeObjectStorage>,
+    tenant: &Tenant,
+    publish_access: &AuthenticatedAccess,
+) {
     app.purge_artifact(
         "acme",
         "demo-pkg",
