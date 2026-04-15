@@ -1718,7 +1718,12 @@ fn default_scheme_for(host: &str) -> &'static str {
 }
 
 fn format_wheel_audit_report_text(report: &WheelAuditReport) -> String {
-    let mut out = String::new();
+    const REPORT_HEADER_BYTES: usize = 512;
+    const FINDING_TEXT_ESTIMATE_BYTES: usize = 160;
+
+    let mut out = String::with_capacity(
+        REPORT_HEADER_BYTES + report.findings.len() * FINDING_TEXT_ESTIMATE_BYTES,
+    );
     let _ = writeln!(out, "Wheel audit: {}", report.wheel_filename);
     let _ = writeln!(out, "Project: {}", report.project_name);
     let _ = writeln!(out, "Scanned files: {}", report.scanned_file_count);

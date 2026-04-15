@@ -22,6 +22,7 @@ impl FileSystemObjectStorage {
         Self { root: root.into() }
     }
 
+    #[inline]
     fn path_for(&self, key: &str) -> Result<PathBuf, ApplicationError> {
         validate_object_key(key)?;
         Ok(self.root.join(key))
@@ -60,6 +61,7 @@ impl OpenDalObjectStorage {
     }
 
     #[cfg(feature = "opendal-fs")]
+    #[inline]
     fn key_for(&self, key: &str) -> Result<String, ApplicationError> {
         validate_object_key(key)?;
         Ok(key.trim_start_matches('/').to_string())

@@ -1480,6 +1480,7 @@ fn parse_scopes_json(value: String) -> Result<Vec<TokenScope>, ApplicationError>
     scopes.into_iter().map(parse_token_scope).collect()
 }
 
+#[inline]
 fn parse_claims_json(value: String) -> Result<BTreeMap<String, String>, ApplicationError> {
     parse_json(value)
 }

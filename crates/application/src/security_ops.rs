@@ -575,7 +575,7 @@ fn dependency_scan_parallelism(target_count: usize) -> usize {
 }
 
 fn pinned_requirements_from_wheel(archive: &WheelArchiveSnapshot) -> Vec<PinnedRequirement> {
-    let mut requirements = Vec::new();
+    let mut requirements = Vec::with_capacity(archive.entries.len());
 
     for entry in &archive.entries {
         if !entry.path.ends_with(".dist-info/METADATA") {

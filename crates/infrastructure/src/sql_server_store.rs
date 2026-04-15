@@ -1100,6 +1100,7 @@ where
         .ok_or_else(|| ApplicationError::External(format!("missing sql server column `{column}`")))
 }
 
+#[inline]
 fn optional<'a, T>(row: &'a Row, column: &'static str) -> Result<Option<T>, ApplicationError>
 where
     T: FromSql<'a>,
@@ -1107,12 +1108,14 @@ where
     row.try_get::<T, _>(column).map_err(sql_server_error)
 }
 
-fn required_string(row: &Row, column: &'static str) -> Result<String, ApplicationError> {
-    required::<&str>(row, column).map(ToOwned::to_owned)
-}
-
+#[inline]
 fn optional_string(row: &Row, column: &'static str) -> Result<Option<String>, ApplicationError> {
     optional::<&str>(row, column).map(|value| value.map(ToOwned::to_owned))
+}
+
+#[inline]
+fn required_string(row: &Row, column: &'static str) -> Result<String, ApplicationError> {
+    required::<&str>(row, column).map(ToOwned::to_owned)
 }
 
 fn latest_release_version_from_values(
@@ -1224,62 +1227,106 @@ fn map_release_alias(row: &Row) -> Result<Release, ApplicationError> {
     })
 }
 
-fn map_artifact(row: &Row) -> Result<Artifact, ApplicationError> {
-    let size_bytes = required::<i64>(row, "size_bytes")?;
+fn artifact_size(row: &Row, column: &'static str) -> Result<u64, ApplicationError> {
+    let size_bytes = required::<i64>(row, column)?;
     if size_bytes < 0 {
         return Err(ApplicationError::External(
             "artifact size cannot be negative".into(),
         ));
     }
 
+    Ok(size_bytes as u64)
+}
+
+fn artifact_digests(
+    row: &Row,
+    sha256: &'static str,
+    blake2b_256: &'static str,
+) -> Result<DigestSet, ApplicationError> {
+    Ok(DigestSet::new(
+        required_string(row, sha256)?,
+        optional_string(row, blake2b_256)?,
+    )?)
+}
+
+fn map_artifact_columns(
+    row: &Row,
+    columns: [&'static str; 13],
+) -> Result<Artifact, ApplicationError> {
+    let [
+        id,
+        release_id,
+        filename,
+        kind,
+        size_bytes,
+        sha256,
+        blake2b_256,
+        object_key,
+        upstream_url,
+        provenance_key,
+        yanked_reason,
+        yanked_changed_at,
+        created_at,
+    ] = columns;
+
     Ok(Artifact {
-        id: ArtifactId::new(required::<Uuid>(row, "id")?),
-        release_id: ReleaseId::new(required::<Uuid>(row, "release_id")?),
-        filename: required_string(row, "filename")?,
-        kind: parse_artifact_kind(required_string(row, "kind")?)?,
-        size_bytes: size_bytes as u64,
-        digests: DigestSet::new(
-            required_string(row, "sha256")?,
-            optional_string(row, "blake2b_256")?,
-        )?,
-        object_key: required_string(row, "object_key")?,
-        upstream_url: optional_string(row, "upstream_url")?,
-        provenance_key: optional_string(row, "provenance_key")?,
+        id: ArtifactId::new(required::<Uuid>(row, id)?),
+        release_id: ReleaseId::new(required::<Uuid>(row, release_id)?),
+        filename: required_string(row, filename)?,
+        kind: parse_artifact_kind(required_string(row, kind)?)?,
+        size_bytes: artifact_size(row, size_bytes)?,
+        digests: artifact_digests(row, sha256, blake2b_256)?,
+        object_key: required_string(row, object_key)?,
+        upstream_url: optional_string(row, upstream_url)?,
+        provenance_key: optional_string(row, provenance_key)?,
         yanked: parse_yank(
-            optional_string(row, "yanked_reason")?,
-            optional::<DateTime<Utc>>(row, "yanked_changed_at")?,
+            optional_string(row, yanked_reason)?,
+            optional::<DateTime<Utc>>(row, yanked_changed_at)?,
         ),
-        created_at: required::<DateTime<Utc>>(row, "created_at")?,
+        created_at: required::<DateTime<Utc>>(row, created_at)?,
     })
 }
 
-fn map_artifact_alias(row: &Row) -> Result<Artifact, ApplicationError> {
-    let size_bytes = required::<i64>(row, "artifact_size_bytes")?;
-    if size_bytes < 0 {
-        return Err(ApplicationError::External(
-            "artifact size cannot be negative".into(),
-        ));
-    }
+fn map_artifact(row: &Row) -> Result<Artifact, ApplicationError> {
+    map_artifact_columns(
+        row,
+        [
+            "id",
+            "release_id",
+            "filename",
+            "kind",
+            "size_bytes",
+            "sha256",
+            "blake2b_256",
+            "object_key",
+            "upstream_url",
+            "provenance_key",
+            "yanked_reason",
+            "yanked_changed_at",
+            "created_at",
+        ],
+    )
+}
 
-    Ok(Artifact {
-        id: ArtifactId::new(required::<Uuid>(row, "artifact_id")?),
-        release_id: ReleaseId::new(required::<Uuid>(row, "artifact_release_id")?),
-        filename: required_string(row, "artifact_filename")?,
-        kind: parse_artifact_kind(required_string(row, "artifact_kind")?)?,
-        size_bytes: size_bytes as u64,
-        digests: DigestSet::new(
-            required_string(row, "artifact_sha256")?,
-            optional_string(row, "artifact_blake2b_256")?,
-        )?,
-        object_key: required_string(row, "artifact_object_key")?,
-        upstream_url: optional_string(row, "artifact_upstream_url")?,
-        provenance_key: optional_string(row, "artifact_provenance_key")?,
-        yanked: parse_yank(
-            optional_string(row, "artifact_yanked_reason")?,
-            optional::<DateTime<Utc>>(row, "artifact_yanked_changed_at")?,
-        ),
-        created_at: required::<DateTime<Utc>>(row, "artifact_created_at")?,
-    })
+fn map_artifact_alias(row: &Row) -> Result<Artifact, ApplicationError> {
+    map_artifact_columns(
+        row,
+        [
+            "artifact_id",
+            "artifact_release_id",
+            "artifact_filename",
+            "artifact_kind",
+            "artifact_size_bytes",
+            "artifact_sha256",
+            "artifact_blake2b_256",
+            "artifact_object_key",
+            "artifact_upstream_url",
+            "artifact_provenance_key",
+            "artifact_yanked_reason",
+            "artifact_yanked_changed_at",
+            "artifact_created_at",
+        ],
+    )
 }
 
 fn map_attestation(row: &Row) -> Result<AttestationBundle, ApplicationError> {
@@ -1347,6 +1394,7 @@ fn parse_scopes_json(value: String) -> Result<Vec<TokenScope>, ApplicationError>
     scopes.into_iter().map(parse_token_scope).collect()
 }
 
+#[inline]
 fn parse_claims_json(value: String) -> Result<BTreeMap<String, String>, ApplicationError> {
     parse_json(value)
 }

@@ -47,7 +47,7 @@ fn read_zip_archive<R: Read + std::io::Seek>(
     mut archive: ZipArchive<R>,
     wheel_filename: String,
 ) -> Result<WheelArchiveSnapshot, ApplicationError> {
-    let mut entries = Vec::new();
+    let mut entries = Vec::with_capacity(archive.len().min(MAX_WHEEL_ENTRIES));
     let mut total_uncompressed_bytes = 0_u64;
     for index in 0..archive.len() {
         if entries.len() >= MAX_WHEEL_ENTRIES {

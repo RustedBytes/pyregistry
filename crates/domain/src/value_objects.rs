@@ -3,6 +3,20 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
+
+static TENANT_SLUG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z0-9]+(?:-[a-z0-9]+)*$").expect("valid tenant slug regex"));
+static PROJECT_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$").expect("valid project name regex")
+});
+static PROJECT_NAME_SEPARATOR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[-_.]+").expect("valid project name regex"));
+static RELEASE_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._+\-!]*$").expect("valid release version regex")
+});
+static SHA256_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-fA-F0-9]{64}$").expect("valid sha256 regex"));
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TenantSlug(String);
@@ -10,9 +24,8 @@ pub struct TenantSlug(String);
 impl TenantSlug {
     pub fn new(input: impl Into<String>) -> Result<Self, DomainError> {
         let value = input.into().trim().to_ascii_lowercase();
-        let valid = Regex::new(r"^[a-z0-9]+(?:-[a-z0-9]+)*$").expect("valid tenant slug regex");
 
-        if value.is_empty() || !valid.is_match(&value) {
+        if value.is_empty() || !TENANT_SLUG_RE.is_match(&value) {
             return Err(DomainError::InvalidValue {
                 field: "tenant_slug",
                 message: "slug must contain only lowercase letters, numbers, and dashes".into(),
@@ -37,10 +50,8 @@ pub struct ProjectName {
 impl ProjectName {
     pub fn new(input: impl Into<String>) -> Result<Self, DomainError> {
         let original = input.into().trim().to_string();
-        let valid = Regex::new(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
-            .expect("valid project name regex");
 
-        if original.is_empty() || !valid.is_match(&original) {
+        if original.is_empty() || !PROJECT_NAME_RE.is_match(&original) {
             return Err(DomainError::InvalidValue {
                 field: "project_name",
                 message:
@@ -67,8 +78,7 @@ impl ProjectName {
 }
 
 fn normalize_project_name(input: &str) -> String {
-    let separator = Regex::new(r"[-_.]+").expect("valid project name regex");
-    separator
+    PROJECT_NAME_SEPARATOR_RE
         .replace_all(&input.trim().to_ascii_lowercase(), "-")
         .to_string()
 }
@@ -79,10 +89,8 @@ pub struct ReleaseVersion(String);
 impl ReleaseVersion {
     pub fn new(input: impl Into<String>) -> Result<Self, DomainError> {
         let value = input.into().trim().to_string();
-        let valid =
-            Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._+\-!]*$").expect("valid release version regex");
 
-        if value.is_empty() || !valid.is_match(&value) {
+        if value.is_empty() || !RELEASE_VERSION_RE.is_match(&value) {
             return Err(DomainError::InvalidValue {
                 field: "release_version",
                 message: "version must be non-empty and contain only packaging-safe characters"
@@ -170,9 +178,8 @@ impl DigestSet {
         blake2b_256: Option<String>,
     ) -> Result<Self, DomainError> {
         let sha256 = sha256.into();
-        let valid = Regex::new(r"^[a-fA-F0-9]{64}$").expect("valid sha256 regex");
 
-        if !valid.is_match(&sha256) {
+        if !SHA256_RE.is_match(&sha256) {
             return Err(DomainError::InvalidValue {
                 field: "sha256",
                 message: "sha256 digest must be 64 hexadecimal characters".into(),
@@ -180,7 +187,7 @@ impl DigestSet {
         }
 
         if let Some(ref digest) = blake2b_256
-            && !valid.is_match(digest)
+            && !SHA256_RE.is_match(digest)
         {
             return Err(DomainError::InvalidValue {
                 field: "blake2b_256",

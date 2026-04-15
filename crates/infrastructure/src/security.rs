@@ -364,10 +364,12 @@ fn severity_label(severity: Severity, cvss_score: Option<f32>) -> String {
     effective_severity.to_string()
 }
 
+#[inline]
 fn query_key(query: &PackageVulnerabilityQuery) -> (String, String) {
     (query.package_name.clone(), query.version.clone())
 }
 
+#[inline]
 fn dependency_query_key(query: &DependencyVulnerabilityQuery) -> (String, String) {
     (query.package_name.clone(), query.version.clone())
 }

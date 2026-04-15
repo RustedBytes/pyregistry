@@ -63,6 +63,7 @@ impl MirrorDownloadLimits {
     }
 
     #[must_use]
+    #[inline]
     pub fn artifact_max_bytes(self) -> u64 {
         self.artifact_max_bytes
     }
@@ -93,6 +94,7 @@ impl ArtifactDownloadRetryPolicy {
     }
 
     #[must_use]
+    #[inline]
     pub fn max_attempts(self) -> usize {
         self.max_attempts
     }
@@ -438,6 +440,7 @@ impl ArtifactDownloadError {
         }
     }
 
+    #[inline]
     fn fatal(message: impl Into<String>) -> Self {
         Self {
             error: ApplicationError::External(message.into()),

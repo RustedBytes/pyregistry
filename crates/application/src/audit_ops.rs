@@ -1052,7 +1052,7 @@ fn is_binary_content(contents: &[u8]) -> bool {
 }
 
 fn ascii_strings(contents: &[u8]) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(contents.len());
     let mut current = String::new();
 
     for byte in contents {
@@ -1082,7 +1082,7 @@ fn ascii_strings(contents: &[u8]) -> String {
 
 fn find_patterns(haystack: &str, patterns: &[&str], limit: usize) -> Vec<String> {
     let lower = haystack.to_ascii_lowercase();
-    let mut hits = Vec::new();
+    let mut hits = Vec::with_capacity(limit.min(patterns.len()));
 
     for pattern in patterns {
         if lower.contains(pattern) {

@@ -1475,6 +1475,7 @@ fn parse_scopes_json(value: String, column: usize) -> SqliteResult<Vec<TokenScop
         .collect()
 }
 
+#[inline]
 fn parse_claims_json(value: String, column: usize) -> SqliteResult<BTreeMap<String, String>> {
     parse_json(value, column)
 }
@@ -1620,6 +1621,7 @@ fn value_type(value: &Value) -> &'static str {
     }
 }
 
+#[inline]
 fn conversion_error(column: usize, error: impl std::fmt::Display) -> SqliteStoreError {
     SqliteStoreError::Column {
         column,
@@ -1634,10 +1636,12 @@ fn yank_columns(yanked: &Option<YankState>) -> (Option<String>, Option<String>) 
         .unwrap_or((None, None))
 }
 
+#[inline]
 fn date_string(value: DateTime<Utc>) -> String {
     value.to_rfc3339()
 }
 
+#[inline]
 fn uuid_string(value: Uuid) -> String {
     value.to_string()
 }

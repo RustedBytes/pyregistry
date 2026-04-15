@@ -201,6 +201,7 @@ fn suppresses_turso_connection_record(suppress: bool, record: &Record<'_>) -> bo
             || record.module_path().is_some_and(is_turso_connection_target))
 }
 
+#[inline]
 fn is_turso_connection_target(value: &str) -> bool {
     value == "turso_core::connection"
 }

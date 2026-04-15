@@ -94,7 +94,7 @@ pub(crate) async fn package_access(
 }
 
 pub(crate) fn parse_scopes(raw_scopes: Vec<String>) -> Vec<TokenScope> {
-    let mut scopes = Vec::new();
+    let mut scopes = Vec::with_capacity(raw_scopes.len().max(1));
     for scope in raw_scopes {
         match scope.as_str() {
             "read" => scopes.push(TokenScope::Read),
