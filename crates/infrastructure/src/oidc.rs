@@ -26,25 +26,6 @@ pub struct SimpleJwksOidcVerifier {
     jwks_cache: Arc<RwLock<HashMap<String, CachedJwks>>>,
 }
 
-impl SimpleJwksOidcVerifier {
-    #[must_use]
-    pub fn new(issuers: Vec<OidcIssuerConfig>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(DEFAULT_JWKS_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::limited(3))
-            .build()
-            .unwrap_or_else(|error| {
-                warn!("failed to build timeout-bound OIDC HTTP client: {error}");
-                reqwest::Client::new()
-            });
-        Self {
-            client,
-            issuers,
-            jwks_cache: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct CachedJwks {
     fetched_at: Instant,
@@ -174,6 +155,23 @@ impl OidcVerifier for SimpleJwksOidcVerifier {
 }
 
 impl SimpleJwksOidcVerifier {
+    #[must_use]
+    pub fn new(issuers: Vec<OidcIssuerConfig>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(DEFAULT_JWKS_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .build()
+            .unwrap_or_else(|error| {
+                warn!("failed to build timeout-bound OIDC HTTP client: {error}");
+                reqwest::Client::new()
+            });
+        Self {
+            client,
+            issuers,
+            jwks_cache: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
     async fn fetch_jwks(
         &self,
         issuer: &OidcIssuerConfig,

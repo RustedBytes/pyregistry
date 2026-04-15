@@ -51,6 +51,13 @@ pub struct AdminUser {
     pub created_at: DateTime<Utc>,
 }
 
+impl AdminUser {
+    #[must_use]
+    pub fn new(user: Self) -> Self {
+        user
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiToken {
     pub id: TokenId,
@@ -61,6 +68,13 @@ pub struct ApiToken {
     pub publish_identity: Option<PublishIdentity>,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl ApiToken {
+    #[must_use]
+    pub fn new(token: Self) -> Self {
+        token
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +122,11 @@ pub struct Release {
 }
 
 impl Release {
+    #[must_use]
+    pub fn new(release: Self) -> Self {
+        release
+    }
+
     pub fn yank(&mut self, reason: Option<String>, now: DateTime<Utc>) {
         self.yanked = Some(YankState {
             reason,

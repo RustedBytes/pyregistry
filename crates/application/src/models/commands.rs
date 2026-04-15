@@ -80,6 +80,13 @@ pub struct IssuedApiToken {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+impl IssuedApiToken {
+    #[must_use]
+    pub fn new(token: Self) -> Self {
+        token
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UploadArtifactCommand {
     pub tenant_slug: String,

@@ -23,16 +23,6 @@ impl Default for FoxGuardWheelSourceSecurityScanner {
     }
 }
 
-impl FoxGuardWheelSourceSecurityScanner {
-    #[must_use]
-    pub fn with_ignored_rules(ignored_rule_ids: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
-        Self {
-            registry: RuleRegistry::new(),
-            ignored_rule_ids: IgnoredFindings::new(ignored_rule_ids),
-        }
-    }
-}
-
 impl WheelSourceSecurityScanner for FoxGuardWheelSourceSecurityScanner {
     fn scan_archive(
         &self,
@@ -56,6 +46,14 @@ impl WheelSourceSecurityScanner for FoxGuardWheelSourceSecurityScanner {
 }
 
 impl FoxGuardWheelSourceSecurityScanner {
+    #[must_use]
+    pub fn with_ignored_rules(ignored_rule_ids: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        Self {
+            registry: RuleRegistry::new(),
+            ignored_rule_ids: IgnoredFindings::new(ignored_rule_ids),
+        }
+    }
+
     fn scan_archive_in_temp_dir(
         &self,
         archive: &WheelArchiveSnapshot,

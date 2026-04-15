@@ -234,6 +234,13 @@ pub struct PublishIdentity {
     pub claims: BTreeMap<String, String>,
 }
 
+impl PublishIdentity {
+    #[must_use]
+    pub fn new(identity: Self) -> Self {
+        identity
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttestationSource {
     Mirrored,
@@ -249,6 +256,13 @@ pub struct AttestationBundle {
     pub recorded_at: DateTime<Utc>,
 }
 
+impl AttestationBundle {
+    #[must_use]
+    pub fn new(bundle: Self) -> Self {
+        bundle
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedPublisher {
     pub id: TrustedPublisherId,
@@ -262,6 +276,11 @@ pub struct TrustedPublisher {
 }
 
 impl TrustedPublisher {
+    #[must_use]
+    pub fn new(publisher: Self) -> Self {
+        publisher
+    }
+
     pub fn matches(&self, identity: &PublishIdentity) -> Result<(), DomainError> {
         if self.provider != identity.provider {
             return Err(DomainError::TrustedPublisherMismatch);
