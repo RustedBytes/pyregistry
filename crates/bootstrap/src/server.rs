@@ -75,11 +75,11 @@ fn log_startup_settings(settings: &Settings, config_source: &str) {
 }
 
 async fn build_seeded_application(settings: &Settings) -> anyhow::Result<Arc<PyregistryApp>> {
-    let app = build_application(&settings)
+    let app = build_application(settings)
         .await
         .context("failed to build application services")?;
     info!("seeding bootstrap data");
-    seed_application(&app, &settings)
+    seed_application(&app, settings)
         .await
         .context("failed to seed application")?;
     info!("bootstrap data ready");
