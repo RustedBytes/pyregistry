@@ -215,12 +215,13 @@ rule Suspicious_Size_java_exe {
       author = "Florian Roth (Nextron Systems)"
       score = 60
       date = "2015-12-21"
+      modified = "2026-03-30"
       noarchivescan = 1
       id = "b6dc297b-8388-5e39-ba77-c027cdea7afa"
    condition:
       uint16(0) == 0x5a4d
       and filename == "java.exe"
-      and (filesize < 30KB or filesize > 900KB)
+      and (filesize < 30KB or filesize > 1500KB)
 }
 
 rule Suspicious_Size_lsass_exe {
