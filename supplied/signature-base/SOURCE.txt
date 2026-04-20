@@ -1,4 +1,4 @@
 Source repository: https://github.com/Neo23x0/signature-base.git
 Source ref: master
-Source commit: 8a89b3bf54517bbc35718460321d42536e1e6198
+Source commit: eaf65c0c2c2a7c4b5888b22f4b815369e6465e27
 Bundled path: yara/
