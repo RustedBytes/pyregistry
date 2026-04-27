@@ -20,18 +20,8 @@ Signature-Base is the YARA signature and IOC database for our scanners [LOKI](ht
 
 ## External Variables in YARA Rules
 
-Using the YARA rules in a tool other than [LOKI](https://github.com/Neo23x0/Loki) or [THOR Lite](https://www.nextron-systems.com/thor-lite/) will cause errors stating an `undefined identifier`. The rules that make use of external variables have been moved to the following files:
+Using the YARA rules in a tool other than [LOKI](https://github.com/Neo23x0/Loki) or [THOR Lite](https://www.nextron-systems.com/thor-lite/) will cause errors stating an `undefined identifier`. The rules that make use of external variables are listed in [./yara/external-variable-rules.txt](/Users/neo/code/Workspace/signature-base/yara/external-variable-rules.txt:1). The CI syntax check and assembly workflow both use that same list.
 
-- ./yara/generic_anomalies.yar
-- ./yara/general_cloaking.yar
-- ./yara/gen_webshells_ext_vars.yar
-- ./yara/thor_inverse_matches.yar
-- ./yara/yara_mixed_ext_vars.yar
-- ./yara/configured_vulns_ext_vars.yar
-- ./yara/gen_fake_amsi_dll.yar
-- ./yara/expl_citrix_netscaler_adc_exploitation_cve_2023_3519.yar
-- ./yara/yara-rules_vuln_drivers_strict_renamed.yar
-<!-- When adding entries, also update .github/workflows/yara-assemble.yml -->
 Just remove these files in case you see the above error message.
 
 ## High Quality YARA Rules Feed
