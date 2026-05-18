@@ -6,6 +6,7 @@ rule MAL_Kernel_RegPhantom_Mar26 {
       reference = "Internal Research"
       hash = "006e08f1b8cad821f7849c282dc11d317e76ce66a5bcd84053dd5e7752e0606f"
       score = 80
+      id = "aa8963b5-3053-52a4-a84f-2fc02d03275e"
    strings:
       $s1 = "CmRegisterCallback" fullword
       $s2 = "PsSetCreateThreadNotifyRoutine" fullword

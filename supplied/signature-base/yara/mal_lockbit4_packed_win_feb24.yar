@@ -7,7 +7,7 @@ rule mal_lockbit4_packed_feb24
         score = 100
         reference = "https://0x0d4y.blog/lockbit4-0-evasion-tales/"
         hash = "15796971D60F9D71AD162060F0F76A02"
-        uuid = "3c2b2806-9dce-4dce-a7ca-89ebc9005695"
+        id = "3c2b2806-9dce-4dce-a7ca-89ebc9005695"
         license = "CC BY 4.0"
         rule_matching_tlp = "TLP:WHITE"
         rule_sharing_tlp = "TLP:WHITE"

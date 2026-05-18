@@ -16,6 +16,7 @@ rule Invoke_OSiRis {
       modified = "2025-03-21"
       score = 70
       hash1 = "19e4a8b07f85c3d4c396d0c4e839495c9fba9405c06a631d57af588032d2416e"
+      id = "bc0fe826-6c8a-52e6-afb1-85d499093e50"
    strings:
       $x1 = "$null = Iwmi Win32_Process -EnableA -Impers 3 -AuthenPacketprivacy -Name Create -Arg $ObfusK -Computer $Target" ascii wide
       $x3 = "-Arg@{Name=$VarName;VariableValue=$OSiRis;UserName=$env:Username}" ascii wide

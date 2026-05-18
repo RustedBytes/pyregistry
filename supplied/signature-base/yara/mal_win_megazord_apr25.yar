@@ -6,7 +6,7 @@ rule MAL_WIN_Megazord_Apr25 {
         score = 80
         reference = "https://ish.com.br/wp-content/uploads/2025/04/A-Anatomia-do-Ransomware-Akira-e-sua-expansao-multiplataforma.pdf"
         hash = "FD380DB23531BB7BB610A7B32FC2A6D5"
-        uuid = "6225a690-8f54-4a50-a19a-8f7523537228"
+        id = "6225a690-8f54-4a50-a19a-8f7523537228"
         license = "Detection Rule License 1.1 https://github.com/Neo23x0/signature-base/blob/master/LICENSE"
         rule_matching_tlp = "TLP:WHITE"
         rule_sharing_tlp = "TLP:WHITE"

@@ -7,6 +7,7 @@ rule MAL_LNX_PLAGUE_BACKDOOR_Jul25 {
       score = 80
       hash = "14b0c90a2eff6b94b9c5160875fcf29aff15dcfdfd3402d953441d9b0dca8b39"
       hash = "7c3ada3f63a32f4727c62067d13e40bcb9aa9cbec8fb7e99a319931fc5a9332e"
+      id = "2c2e9030-fcef-58c9-9ed2-798560b8b384"
    strings:
       $s1 = "decrypt_phrase"
       $s2 = "init_phrases"

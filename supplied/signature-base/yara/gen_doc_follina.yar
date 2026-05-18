@@ -7,6 +7,7 @@ rule SUSP_PS1_Msdt_Execution_May22 {
       modified = "2025-03-21"
       reference = "https://doublepulsar.com/follina-a-microsoft-office-code-execution-vulnerability-1a47fce5629e"
       score = 65
+      id = "a1863582-87a2-5d07-a549-ef4a31bf0ed2"
    strings:
       $a = "PCWDiagnostic" ascii wide fullword
       $sa1 = "msdt.exe" ascii wide

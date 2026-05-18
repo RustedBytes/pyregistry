@@ -20,6 +20,7 @@ private rule WINDOWS_UPDATE_BDC
 {
 meta:
    score = 0
+   id = "44f0ab1c-06a6-5133-b1c7-2f8bbbb13409"
 condition:
     (uint32be(0) == 0x44434d01 and // magic: DCM PA30
      uint32be(4) == 0x50413330)

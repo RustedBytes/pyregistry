@@ -13,6 +13,7 @@ rule HKTL_BlueHammer_Apr26 {
       hash = "552dba31a446e96416738d84d4366503c397ba508a732719531c89a41abf3704"
       hash = "c9bec499db6a0a2165bcd2a211c8887e5fadf954eb9a2e5d3c6ca833e4a5ef64"
       score = 90
+      id = "595bf733-b287-5048-88e2-b88caffc7a5d"
    strings:
       $x1 = "Junction created %ws => %ws"
       $x2 = "connect to windows defender RPC port !!!"

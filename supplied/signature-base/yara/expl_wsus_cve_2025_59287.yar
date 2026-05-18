@@ -5,6 +5,7 @@ rule EXPL_WSUS_Exploitation_Indicators_Oct25 {
       reference = "https://www.huntress.com/blog/exploitation-of-windows-server-update-services-remote-code-execution-vulnerability"
       date = "2025-10-25"
       score = 75
+      id = "9a118d85-fbcd-5476-acd8-6bf66f660368"
    strings:
       // Error traceback found in C:\Program Files\Update Services\Logfiles\SoftwareDistribution.log
       $sl1 = "at System.Data.DataSet.DeserializeDataSetSchema(SerializationInfo info, StreamingContext context" ascii wide
@@ -33,6 +34,7 @@ rule HKTL_EXPL_WSUS_Exploitation_POC_Oct25 {
       reference = "https://github.com/jiansiting/CVE-2025-59287/"
       date = "2025-10-26"
       score = 75
+      id = "3f566bda-c217-55c9-bc21-26dd26b271f5"
    strings:
       $sa1 = "/SimpleAuthWebService/SimpleAuth.asmx"
       $sa2 = "/ReportingWebService/ReportingWebService.asmx"

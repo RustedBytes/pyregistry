@@ -5,6 +5,7 @@
         reference = "https://www.nsa.gov/news-features/press-room/Article/2311407/nsa-and-fbi-expose-russian-previously-undisclosed-malware-drovorub-in-cybersecu/"
         date = "2020-08-13"
         score = 50
+        id = "cab3f67e-e239-5aa6-b691-8c6e2c620b5a"
     strings:
         $mw1 = { 89 F1 48 89 FE 48 89 D7 48 F7 C6 FF FF FF FF 0F 84 6B 02 00 00 48 F7 C7
                  FF FF FF FF 0F 84 5E 02 00 00 48 8D 2D }

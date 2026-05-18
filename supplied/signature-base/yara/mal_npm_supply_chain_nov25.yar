@@ -7,6 +7,7 @@ rule MAL_JS_NPM_SupplyChain_Attack_Nov25 {
       reference = "https://www.aikido.dev/blog/shai-hulud-strikes-again-hitting-zapier-ensdomains"
       hash = "62ee164b9b306250c1172583f138c9614139264f889fa99614903c12755468d0"
       score = 80
+      id = "11726cbe-48a7-577a-9694-8f38ffa746e1"
    strings:
       $sa1 = "npm publish"
       $sa2 = "NPM_TOKEN"
@@ -30,6 +31,7 @@ rule SUSP_JS_NPM_Sha1_Hulud_Nov25 {
       reference = "https://www.aikido.dev/blog/shai-hulud-strikes-again-hitting-zapier-ensdomains"
       hash = "62ee164b9b306250c1172583f138c9614139264f889fa99614903c12755468d0"
       score = 70
+      id = "511fa6ca-25fe-57d4-a910-277c92d65e4a"
    strings:
       $x1 = "Sha1-Hulud:\\x"
       $x2 = "SHA1HULUD\"`"
@@ -47,6 +49,7 @@ rule SUSP_JS_NPM_SetupScript_Nov25 {
       reference = "https://www.aikido.dev/blog/shai-hulud-strikes-again-hitting-zapier-ensdomains"
       hash = "a3894003ad1d293ba96d77881ccd2071446dc3f65f434669b49b3da92421901a"
       score = 70
+      id = "2d102efd-681a-5af1-b4fe-3489e5e7f8f2"
    strings:
       $sa1 = "require('child_process')"
       $sa2 = "process.platform ==="
@@ -68,6 +71,7 @@ rule MAL_NPM_SupplyChain_Attack_PreInstallScript_Nov25 {
       reference = "https://www.aikido.dev/blog/shai-hulud-strikes-again-hitting-zapier-ensdomains"
       hash = "c4bc2afd133916f064f2fb7d1e2e067ea65db33463eeae2fa54a9860a6303865"
       score = 80
+      id = "eebcf73d-ee26-59c6-aacb-b76232829ea6"
    strings:
       $x1 = "\"preinstall\": \"node setup_bun.js\""
    condition:

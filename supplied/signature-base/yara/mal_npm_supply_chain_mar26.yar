@@ -6,6 +6,7 @@ rule MAL_NPM_SupplyChain_Attack_Mar26 {
       reference = "https://www.stepsecurity.io/blog/axios-compromised-on-npm-malicious-versions-drop-remote-access-trojan"
       hash = "5e3e89c7351f385e36bb70286866a62957cc1aaab195539edb8c7bb62968a137"
       score = 80
+      id = "88e7af97-f7c1-591e-960c-d5296da94066"
    strings:
       $s1 = "\"dependencies\":"
       // This is the specific malicious package that was added to the npm registry, which is a typo-squatting of the popular crypto-js package
@@ -23,6 +24,7 @@ rule SUSP_JS_Dropper_Mar26 {
       reference = "https://www.stepsecurity.io/blog/axios-compromised-on-npm-malicious-versions-drop-remote-access-trojan"
       hash = "e10b1fa84f1d6481625f741b69892780140d4e0e7769e7491e5f4d894c2e0e09"
       score = 70
+      id = "456a52c2-9cbf-572f-9a5b-b8d74183e3f4"
    strings:
       $sa1 = "Buffer.from("
       $sa2 = "FileSync("

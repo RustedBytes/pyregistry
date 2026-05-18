@@ -5,6 +5,7 @@ rule HKTL_NET_Edge_Saved_Passwords_Dumper_May26 {
       reference = "https://github.com/L1v1ng0ffTh3L4N/Proof-of-Concepts/tree/main/EdgeSavedPasswordsDumper"
       date = "2026-05-05"
       score = 80
+      id = "9d09b27e-16a4-5396-af53-2a2c672bc985"
    strings:
       $x1 = "SELECT ProcessId, Name, ParentProcessId FROM Win32_Process WHERE Name='msedge.exe'" wide
       $x2 = "Scanning process PID: " wide

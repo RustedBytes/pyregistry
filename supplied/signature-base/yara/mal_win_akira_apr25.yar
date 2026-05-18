@@ -6,7 +6,7 @@ rule MAL_WIN_Akira_Apr25 {
         score = 90
         reference = "https://ish.com.br/wp-content/uploads/2025/04/A-Anatomia-do-Ransomware-Akira-e-sua-expansao-multiplataforma.pdf"
         hash = "205589629EAD5D3C1D9E914B49C08589"
-        uuid = "76722cb6-70be-465f-9ef1-afd78f694289"
+        id = "76722cb6-70be-465f-9ef1-afd78f694289"
         license = "Detection Rule License 1.1 https://github.com/Neo23x0/signature-base/blob/master/LICENSE"
         rule_matching_tlp = "TLP:WHITE"
         rule_sharing_tlp = "TLP:WHITE"

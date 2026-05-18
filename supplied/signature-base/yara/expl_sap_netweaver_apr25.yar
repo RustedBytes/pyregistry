@@ -6,6 +6,7 @@ rule APT_SAP_NetWeaver_Exploitation_Activity_Apr25_1 : SCRIPT {
       author = "Florian Roth"
       date = "2025-04-25"
       score = 70
+      id = "1ad16960-f059-57cd-97ba-58f2be6ca3f8"
    strings:
       $x01 = "/helper.jsp?cmd=" ascii wide
       $x02 = "/cache.jsp?cmd=" ascii wide
@@ -20,6 +21,7 @@ rule APT_SAP_NetWeaver_Exploitation_Activity_Apr25_2 : SCRIPT {
       author = "Florian Roth"
       date = "2025-04-25"
       score = 70
+      id = "3b7d3f94-88a9-5686-8a23-ac4040c0e6c1"
    strings:
       $x03 = "MSBuild.exe c:\\programdata\\" ascii wide
    condition:
@@ -34,6 +36,7 @@ rule SUSP_WEBSHELL_Cmd_Indicator_Apr25 {
       date = "2025-04-25"
       modified = "2025-05-07"
       score = 60
+      id = "eeeebfbc-9418-5ff4-b45f-8d96a9e7e4a8"
    strings:
       $xr01 = /\.(asp|aspx|jsp|php)\?cmd=[a-z0-9%+\-\/\.]{3,20} HTTP\/1\.[01]["']? 200/
    condition:

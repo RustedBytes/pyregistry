@@ -32,6 +32,8 @@
 
 private rule PrikormkaDropper
 {
+    meta:
+        id = "a31f8050-360d-5057-875c-64ba6b7ac79c"
     strings:
         $kd1 = "KDSTORAGE" wide
         $kd2 = "KDSTORAGE_64" wide
@@ -50,6 +52,8 @@ private rule PrikormkaDropper
 
 private rule PrikormkaModule
 {
+    meta:
+        id = "69b1414d-6068-5d3e-8727-c63619c305b5"
     strings:
         // binary
         $str1 = {6D 70 2E 64 6C 6C 00 53 74 61 72 74 69 6E 67 00}
@@ -107,6 +111,8 @@ private rule PrikormkaModule
 
 private rule PrikormkaEarlyVersion
 {
+    meta:
+        id = "c93ef2a7-72e2-584f-beb3-95e62e020eb2"
     strings:
         $str1 = "IntelRestore" ascii fullword
         $str2 = "Resent" wide fullword

@@ -7,6 +7,7 @@ rule MAL_CoralWave_LenovoSPKVOL_RemcosMicDrop {
         hash = "65302b435a5bc30e8f0215455679635ec50b5b1caba9e55f9258d17c7238be54"
         score = 85
 
+        id = "fddc398d-6283-5819-895a-d520aff7088c"
     strings:
         $stub_1 = "BAyXuHpAGwdG8ebXF3GvZ32vO3ORY" ascii
         $stub_2 = "IK5HT1XPlj3LoFkKi3YC4QwYQs7s" ascii

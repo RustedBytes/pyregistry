@@ -8,6 +8,7 @@ rule WEBSHELL_ASPX_Sharepoint_Drop_CVE_2025_53770_Jul25 {
       hash = "27c45b8ed7b8a7e5fff473b50c24028bd028a9fe8e25e5cea2bf5e676e531014"
       hash = "92bb4ddb98eeaf11fc15bb32e71d0a63256a0ed826a03ba293ce3a8bf057a514"
       hash = "b336f936be13b3d01a8544ea3906193608022b40c28dd8f1f281e361c9b64e93"
+      id = "f1c8f671-a0d2-5aaf-93f4-025dace0dbe1"
    strings:
       $x1 = "var sy = System.Reflection.Assembly.Load(" ascii
       $x2 = "Response.Write(cg.ValidationKey+" ascii
@@ -30,6 +31,7 @@ rule WEBSHELL_ASPX_Compiled_Sharepoint_Drop_CVE_2025_53770_Jul25_2 {
       hash = "8d3d3f3a17d233bc8562765e61f7314ca7a08130ac0fb153ffd091612920b0f2"
       hash = "d8ca5e5d6400ac34ac4cc138efa89d2ec4d5c0e968a78fa3ba5dbc04c7550649"
       hash = "7e9b77da1f51d03ee2f96bc976f6aeb781f801cf633862a4b8c356cbb555927d"
+      id = "00a844ab-aede-53bf-820f-d43a5d96426d"
    strings:
       $x1 = /App_Web_spinstall\d{0,1}.aspx/ wide
       $x2 = /spinstall[\w]?[\._]aspx/ ascii
@@ -58,6 +60,7 @@ rule APT_EXPL_Sharepoint_CVE_2025_53770_ForensicArtefact_Jul25_1 {
       date = "2025-07-20"
       modified = "2025-07-23"
       score = 75
+      id = "06ad76ef-fc9c-5251-a7c0-cbbb66d79b0e"
    strings:
       $sa1 = /POST \/_layouts\/1[0-9]\/ToolPane\.aspx/ ascii wide nocase
       $sa2 = "DisplayMode=Edit&a=/ToolPane.aspx" ascii wide
@@ -80,6 +83,7 @@ rule APT_EXPL_Sharepoint_CVE_2025_53770_ForensicArtefact_Jul25_2 {
       hash = "30955794792a7ce045660bb1e1917eef36f1d5865891b8110bf982382b305b27"
       hash = "b336f936be13b3d01a8544ea3906193608022b40c28dd8f1f281e361c9b64e93"
       score = 70
+      id = "c6f26461-04b8-5d69-bf28-e47411c38c82"
    strings:
       $x1 = "-EncodedCommand JABiAGEAcwBlADYANABTAHQAcgBpAG4AZwAgAD0" ascii wide
       $x2 = "TEMPLATE\\LAYOUTS\\spinstall" ascii wide

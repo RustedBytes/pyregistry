@@ -5,6 +5,7 @@ rule EXPL_React_Server_CVE_2025_55182_POC_Dec25 {
       reference = "https://x.com/pyn3rd/status/1996840827897954542/photo/1"
       date = "2025-12-05"
       score = 70
+      id = "1ad38541-1477-5c07-9975-318357bcb9b8"
    strings:
       $xs1 = "{const cmd=p.query.cmd;if(!cmd)(s.writeHead(400);"
 
@@ -25,6 +26,7 @@ rule SUSP_WEBSHELL_LOG_Signatures_Dec25 {
       reference = "https://x.com/pyn3rd/status/1996840827897954542/photo/1"
       date = "2025-12-05"
       score = 60
+      id = "8b97ba37-b503-5bcf-be94-76eec8b3d5cd"
    strings:
       $xa1 = "/exec?cmd=ls"
       $xa2 = "/exec?cmd=whoami"
@@ -43,6 +45,7 @@ rule EXPL_RCE_React_Server_CVE_2025_55182_POC_Dec25 {
       reference = "https://www.youtube.com/watch?v=MmdwakT-Ve8"
       date = "2025-12-05"
       score = 70
+      id = "fdd661a9-0532-5246-b744-0c1a9632d1cd"
    strings:
       $s1 = "process.mainModule.require('child_process').execSync("
       $s2 = "$1:constructor:constructor"
@@ -59,6 +62,7 @@ rule EXPL_RCE_React_Server_Next_JS_CVE_2025_66478_Tracebacks_Dec25 {
       reference = "Internal Research"
       date = "2025-12-05"
       score = 55
+      id = "45d9b392-2237-590f-842f-27d549207a09"
    strings:
       $s1 = "Unexpected end of form"
       $s2 = "/next-server/app-page.runtime.dev.js:2:457"
@@ -74,6 +78,7 @@ rule EXPL_RCE_React_Server_Next_JS_CVE_2025_66478_Errors_Dec25 {
       reference = "https://github.com/Malayke/Next.js-RSC-RCE-Scanner-CVE-2025-66478"
       date = "2025-12-05"
       score = 65
+      id = "6baeb522-6299-56a2-be27-21c6b668439b"
    strings:
       $s1 = "[Error: NEXT_REDIRECT]"
       $s2 = "digest: 'uid=0(root) gid=0(root)"
@@ -89,6 +94,7 @@ rule EXPL_SUSP_JS_POC_Dec25 {
       date = "2025-12-05"
       modified = "2025-12-06"
       score = 70
+      id = "114c83f8-b798-5db9-a054-a6148dde7d5a"
    strings:
       $xr1 = /process\.mainModule\.require\(["']child_process["']\).{5,40}\(["'](whoami|powershell|\/bin\/sh|\/bin\/bash|wget|curl|cat \/etc\/passwd|uname|id["'])/
    condition:
@@ -104,6 +110,7 @@ rule EXPL_SUSP_JS_POC_RSC_Detector_Payloads_Dec25 {
       reference = "https://github.com/mrknow001/RSC_Detector"
       date = "2025-12-06"
       score = 70
+      id = "98887e97-2dd4-5777-9fab-02805035de14"
    strings:
       $s1 = "process.mainModule.require('child_process').execSync("
       $s2 = ").toString('base64');"
@@ -122,6 +129,7 @@ rule EXPL_SUSP_JS_Exploitation_Payloads_Dec25 {
       reference = "https://www.greynoise.io/blog/cve-2025-55182-react2shell-opportunistic-exploitation-in-the-wild-what-the-greynoise-observation-grid-is-seeing-so-far"
       date = "2025-12-06"
       score = 70
+      id = "91220a9b-bb97-5fdf-b14d-fac36d6bed3a"
    strings:
       $a1 = "process.mainModule.require('child_process')"
 

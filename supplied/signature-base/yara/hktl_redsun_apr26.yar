@@ -6,6 +6,7 @@ rule HKTL_RedSun_Privilege_Escalation_Apr26 {
       reference = "https://github.com/Nightmare-Eclipse/RedSun"
       hash = "57a70c383feb9af60b64ab6768a1ca1b3f7394b8c5ffdbfafc8e988d63935120"
       score = 80
+      id = "64f86635-cf8c-5c65-b821-2d12e8ee9cdb"
    strings:
       $x1 = "\\??\\pipe\\REDSUN" wide
       $x2 = "The red sun shall prevail.\n" ascii fullword

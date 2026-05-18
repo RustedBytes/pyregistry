@@ -38,6 +38,7 @@ rule WEBSHELL_H4ntu_Shell_Powered_Tsoi_3 {
       score = 70
       old_rule_name = "Webshell_h4ntu_shell_powered_by_tsoi_"
       hash = "06ed0b2398f8096f1bebf092d0526137"
+      id = "d9cd4005-5661-52db-be69-8a633a4b00ba"
    strings:
       $s0 = "  <TD><DIV STYLE=\"font-family: verdana; font-size: 10px;\"><b>Server Adress:</b"
       $s3 = "  <TD><DIV STYLE=\"font-family: verdana; font-size: 10px;\"><b>User Info:</b> ui"
@@ -54,6 +55,7 @@ rule WEBSHELL_H4ntu_Shell_Powered_Tsoi {
       score = 80
       old_rule_name = "Webshell_h4ntu_shell__powered_by_tsoi_"
       hash = "06ed0b2398f8096f1bebf092d0526137"
+      id = "81a017e8-96e4-53c6-a11e-0a11ded13287"
    strings:
       $x1 = "<title>h4ntu shell"
       $x2 = "system(\"$cmd 1> /tmp/cmdtemp 2>&1; cat /tmp/cmdtemp; rm /tmp/cmdtemp\");"
@@ -5764,6 +5766,7 @@ rule WEBSHELL_H4ntu_Shell_Powered_Tsoi_2 {
       modified = "2025-03-21"
       old_rule_name = "WebShell_h4ntu_shell__powered_by_tsoi_"
       hash = "cbca8cd000e705357e2a7e0cf8262678706f18f9"
+      id = "be2d148e-77b6-5322-98b1-503241b4954e"
    strings:
       $s1 = "<title>h4ntu shell [powered by tsoi]</title>" fullword
       $s2 = "$uname = posix_uname( );" fullword

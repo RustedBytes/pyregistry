@@ -6,7 +6,7 @@ rule MAL_Win_Amadey_Jun25 {
       score = 80
       reference = "https://0x0d4y.blog/amadey-targeted-analysis/"
       yarahub_reference_md5 = "1db72c5832fb71b29863ccc3125137a0"
-      yarahub_uuid = "853111b8-e548-46a9-8f5a-ec8621343e0d"
+      id = "853111b8-e548-46a9-8f5a-ec8621343e0d"
       license = "Detection Rule License 1.1 https://github.com/Neo23x0/signature-base/blob/master/LICENSE"
       malpedia_family = "win.amadey"
 

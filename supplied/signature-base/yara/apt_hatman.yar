@@ -19,6 +19,8 @@ private global rule hatman_filesize : hatman {
 /* Private rules that are used at the end in the public rules. */
 
 private rule hatman_setstatus : hatman {
+    meta:
+        id = "1d5d5568-8a65-510f-a49f-aa551fb9c7a2"
     strings:
         $preset     = { 80 00 40 3c  00 00 62 80  40 00 80 3c  40 20 03 7c
                         ?? ?? 82 40  04 00 62 80  60 00 80 3c  40 20 03 7c
@@ -27,6 +29,8 @@ private rule hatman_setstatus : hatman {
         $preset
 }
 private rule hatman_memcpy : hatman {
+    meta:
+        id = "ddbd452a-bf74-5dcb-98a6-034846188aa5"
     strings:
         $memcpy_be  = { 7c a9 03 a6  38 84 ff ff  38 63 ff ff  8c a4 00 01
                         9c a3 00 01  42 00 ff f8  4e 80 00 20              }
@@ -36,6 +40,8 @@ private rule hatman_memcpy : hatman {
         $memcpy_be or $memcpy_le
 }
 private rule hatman_dividers : hatman {
+    meta:
+        id = "8c88e1d9-c7bf-5df0-80e9-7ea4ad45c20b"
     strings:
         $div1       = { 9a 78 56 00 }
         $div2       = { 34 12 00 00 }
@@ -43,12 +49,16 @@ private rule hatman_dividers : hatman {
         $div1 and $div2
 }
 private rule hatman_nullsub : hatman {
+    meta:
+        id = "feaf2242-1db8-5a30-a420-d826b9038266"
     strings:
         $nullsub     = { ff ff 60 38  02 00 00 44  20 00 80 4e }
     condition:
         $nullsub
 }
 private rule hatman_origaddr : hatman {
+    meta:
+        id = "b37364d4-928d-556b-9515-9bb944befe8a"
     strings:
         $oaddr_be   = { 3c 60 00 03  60 63 96 f4  4e 80 00 20 }
         $oaddr_le   = { 03 00 60 3c  f4 96 63 60  20 00 80 4e }
@@ -56,6 +66,8 @@ private rule hatman_origaddr : hatman {
         $oaddr_be or $oaddr_le
 }
 private rule hatman_origcode : hatman {
+    meta:
+        id = "75acf3a2-0e9b-5280-8830-211c0f46737f"
     strings:
         $ocode_be   = { 3c 00 00 03  60 00 a0 b0  7c 09 03 a6  4e 80 04 20 }
         $ocode_le   = { 03 00 00 3c  b0 a0 00 60  a6 03 09 7c  20 04 80 4e }
@@ -63,6 +75,8 @@ private rule hatman_origcode : hatman {
         $ocode_be or $ocode_le
 }
 private rule hatman_mftmsr : hatman {
+    meta:
+        id = "56b400d4-2989-5c34-9e8a-0a14b0bf0af1"
     strings:
         $mfmsr_be   = { 7c 63 00 a6 }
         $mfmsr_le   = { a6 00 63 7c }
@@ -72,6 +86,8 @@ private rule hatman_mftmsr : hatman {
         ($mfmsr_be and $mtmsr_be) or ($mfmsr_le and $mtmsr_le)
 }
 private rule hatman_loadoff : hatman {
+    meta:
+        id = "59229427-e982-59af-8fed-59b3db4b5374"
     strings:
         $loadoff_be = { 80 60 00 04  48 00 ?? ??  70 60 ff ff  28 00 00 00
                         40 82 ?? ??  28 03 00 00  41 82 ?? ??              }
