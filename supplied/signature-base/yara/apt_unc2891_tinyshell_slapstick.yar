@@ -6,6 +6,7 @@ rule EXT_HKTL_MAL_TinyShell_Backdoor {
       reference = "https://www.mandiant.com/resources/blog/unc2891-overview"
       score = 80
       hash1 = "1f889871263bd6cdad8f3d4d5fc58b4a32669b944d3ed0860730374bb87d730a"
+      id = "4ad5d334-98e4-577f-89c9-86626e8feb58"
    strings:
       $sb1 = { C6 00 48 C6 4? ?? 49 C6 4? ?? 49 C6 4? ?? 4C C6 4? ?? 53 C6 4? ?? 45 C6 4? ?? 54 C6 4? ?? 3D C6 4? ?? 46 C6 4? ?? 00 }
       $sb2 = { C6 00 54 C6 4? ?? 4D C6 4? ?? 45 C6 4? ?? 3D C6 4? ?? 52 }
@@ -34,6 +35,7 @@ rule EXT_HKTL_MAL_TinyShell_Backdoor_SPARC {
       date = "2022-03-17"
       reference = "https://www.mandiant.com/resources/blog/unc2891-overview"
       score = 80
+      id = "0a05a316-65b7-5cdf-849b-820ab60afbbd"
    strings:
       $sb_xor_1 = { DA 0A 80 0C 82 18 40 0D C2 2A 00 0B 96 02 E0 01 98 03 20 01 82 1B 20 04 80 A0 00 01 82 60 20 00 98 0B 00 01 C2 4A 00 0B 80 A0 60 00 32 BF FF F5 C2 0A 00 0B 81 C3 E0 08 }
       $sb_xor_2 = { C6 4A 00 00 80 A0 E0 00 02 40 00 0B C8 0A 00 00 85 38 60 00 C4 09 40 02 84 18 80 04 C4 2A 00 00 82 00 60 01 80 A0 60 04 83 64 60 00 10 6F FF F5 90 02 20 01 81 C3 E0 08 }
@@ -48,6 +50,7 @@ rule EXT_APT_UNC2891_SLAPSTICK {
       date = "2022-03-17"
       reference = "https://www.mandiant.com/resources/blog/unc2891-overview"
       score = 80
+      id = "2e97b8cb-a86e-5be9-92dc-fd1474aa9547"
    strings:
       $ss1 = { 25 59 20 25 62 20 25 64 20 25 48 3a 25 4d 3a 25 53 20 20 20 20 00 }
       $ss2 = { 25 2d 32 33 73 20 25 2d 32 33 73 20 25 2d 32 33 73 00 }

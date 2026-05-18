@@ -7,6 +7,7 @@ rule MAL_JS_NPM_SupplyChain_Attack_Sep25 {
       modified = "2025-11-29"
       score = 85
       hash1 = "16f6c756bc8ce5ef5d9aa1ded0f811ec0c9cee3d8f85cc151b8ca1df7b8a4337"
+      id = "f083233e-348a-5b7d-a128-181c543a279c"
    strings:
       $x1 = "const _0x112fa8=_0x180f;(function(_0x13c8b9" ascii
 
@@ -27,6 +28,7 @@ rule MAL_JS_NPM_SupplyChain_Compromise_Sep25 {
       date = "2025-09-16"
       modified = "2025-09-17"
       score = 80
+      id = "f64fa37b-8445-554a-8442-bd2d42a6643b"
    strings:
       $x1 = "if (plat === \"linux\") return \"https://github.com/trufflesecurity/trufflehog/releases"
 

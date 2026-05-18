@@ -6,6 +6,7 @@ rule HKTL_EXPL_WIN_PS1_BadSuccessor_May25 {
       reference = "https://www.akamai.com/blog/security-research/abusing-dmsa-for-privilege-escalation-in-active-directory"
       date = "2025-05-22"
       score = 75
+      id = "4f6ff5ff-831a-520c-8bc5-6fec5e65f9de"
    strings:
       $x1 = "function Get-BadSuccessorOUPermissions" ascii wide
       $x2 = "\"0feb936f-47b3-49f2-9386-1dedc2c23765\"=\"msDS-DelegatedManagedServiceAccount\"" ascii wide

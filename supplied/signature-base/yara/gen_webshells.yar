@@ -116,6 +116,7 @@ rule EXT_WEBSHELL_PHP_Generic {
       hash = "a09dcf52da767815f29f66cb7b03f3d8c102da5cf7b69567928961c389eac11f"
       hash = "d9ae762b011216e520ebe4b7abcac615c61318a8195601526cfa11bbc719a8f1"
       hash = "dd5d8a9b4bb406e0b8f868165a1714fe54ffb18e621582210f96f6e5ae850b33"
+      id = "ce3c93a5-3088-5e7e-a0d4-8bea18cf9cc3"
    strings:
       $wfp_tiny1 = "escapeshellarg" fullword
       $wfp_tiny2 = "addslashes" fullword

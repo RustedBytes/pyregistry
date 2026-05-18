@@ -7,6 +7,7 @@ rule MAL_Etoroloro_Malicious_NodePackage_Dec25 {
       date = "2025-12-12"
       score = 80
       hash = "f08c5b748c91dd45fd73c5e85920f656e361d94b869e2147410b2b528c6ae78f"
+      id = "4c271502-68c6-5d20-85ea-c7f7628e417a"
    strings:
       $s1 = "DLLSideload."
       $s2 = "Failed to expand path:" wide

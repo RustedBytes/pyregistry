@@ -8,6 +8,7 @@ rule EXPL_Office_TemplateInjection_Aug19 {
       modified = "2025-03-20"
       score = 75
       hash = "f2bdf3716b39d29a9c6c3b7b3355e935594b8d8e9149a784a59dc2381fa1628a"
+      id = "2a7e1021-97be-510b-8826-d15ac06ed00e"
    strings:
       $x1 = /attachedTemplate" Target="http[s]?:\/\/[^"]{4,60}/ ascii
 

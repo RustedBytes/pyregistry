@@ -555,6 +555,7 @@ rule SUSP_DLL_SideLoading_Characteristics_Feb26 {
       date = "2026-02-03"
       score = 70
       hash1 = "3bdc4c0637591533f1d4198a72a33426c01f69bd2e15ceee547866f65e26b7ad"
+      id = "465badb7-f550-5a12-87a0-e6977cbcb208"
    strings:
       $s1 = "log.dll" fullword ascii
    condition:
@@ -577,6 +578,7 @@ rule SUSP_Renamed_Bitdefender_Submission_Wizard_Feb26 {
       date = "2026-02-03"
       score = 65
       hash1 = "2da00de67720f5f13b17e9d985fe70f10f153da60c9ab1086fe58f069a156924"
+      id = "1c5e0314-8ced-5680-92eb-df03cc4e5847"
    strings:
       $s1 = "BDSubWiz.exe" wide fullword
       $s2 = "Bitdefender Submission Wizard" wide

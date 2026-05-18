@@ -12,6 +12,7 @@ rule HKTL_EDR_Freeze_Sep25_2 {
       hash5 = "d485017fb20c5a8fe38a6dbf896d4cbce485ff53a6cfe0e1440a1818b2d303ee"
       hash6 = "d989ebd417e6fae60a544e43bfc0ee63f5d9352ce0059b95ed4e7e18efbc5d0b"
       hash7 = "e2b2dd0984e52112965392471f6a09020eb8380aa53d48d2fb4dd3aaa7edae9b"
+      id = "e3fd5815-71c4-5510-bfb4-82203d81cc78"
    strings:
       $x1 = "EDR-Freeze.exe <TargetPID> <SleepTime>" wide fullword
       $x2 = "Successfully created PPL process with PID:" wide fullword

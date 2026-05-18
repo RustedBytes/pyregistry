@@ -6,6 +6,7 @@ rule SUSP_Scheduled_Task_Java_JAR_Aug25 {
       score = 60
       reference = "Internal Research"
       hash = "7c5999082d9c5f3dd342ca05191311ddd1e24ba7675d1e9763fb4d962be3a933"
+      id = "b06df47a-529f-54d0-86ce-6739d45b4837"
    strings:
       $a0 = "<Task version=" wide
       $a1 = "xmlns=\"http://schemas.microsoft.com/windows/" wide
@@ -30,6 +31,7 @@ rule SUSP_JAVA_Loader_Indicators_Aug25 {
       date = "2025-08-07"
       score = 70
       hash1 = "c4cf746fce283878dde567e5457a8ebdbb7ff3414be46569ecdd57338bd96fa1"
+      id = "ed83b697-4e48-504c-8a65-af0a5b765c9d"
    strings:
       $s1 = "Loader.classPK" ascii fullword
       $s2 = "stubPK" ascii
@@ -50,6 +52,7 @@ rule MAL_JAVA_Loader_Final_Jar_Aug25 {
       date = "2025-08-07"
       score = 85
       hash1 = "0a7fddd91b332c8daee2c0727b884fc92cfaede02883dbad75f7efc299e884e3"
+      id = "17894519-060b-5414-8430-d6d025e7db83"
    strings:
       $s1 = "Obfuscation by Allatori Obfuscator" ascii fullword
       $s2 = "MANIFEST.MFM" ascii fullword
@@ -67,6 +70,7 @@ rule SUSP_JAVA_Class_Allatori_Obfuscator_Aug25 {
       date = "2025-08-07"
       score = 50
       hash1 = "0a7fddd91b332c8daee2c0727b884fc92cfaede02883dbad75f7efc299e884e3"
+      id = "d179c944-90c6-5519-8ca2-6450561a31da"
    strings:
       $x1 = "Obfuscation by Allatori Obfuscator" ascii fullword
    condition:

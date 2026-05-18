@@ -6,6 +6,7 @@ rule SUSP_LNX_Sindoor_ELF_Obfuscation_Aug25 {
       score = 70
       reference = "Internal Research"
       hash = "6879a2b730e391964afe4dbbc29667844ba0c29239be5503b7c86e59e7052443"
+      id = "97802224-0d8b-5691-a6f1-f031626cda53"
    strings:
       $s1 = "UPX!"
    condition:
@@ -23,6 +24,7 @@ rule SUSP_LNX_Sindoor_DesktopFile_Aug25 {
       score = 70
       reference = "Internal Research"
       hash = "9943bdf1b2a37434054b14a1a56a8e67aaa6a8b733ca785017d3ed8c1173ac59"
+      id = "16719116-0cb2-5c70-a86f-f65f9ea32153"
    strings:
       $hdr = "[Desktop Entry]"
       $s1 = "printf '\\\\x7FELF' | dd of"
@@ -41,6 +43,7 @@ rule MAL_Sindoor_Decryptor_Aug25 {
       score = 80
       reference = "Internal Research"
       hash = "9a1adb50bb08f5a28160802c8f315749b15c9009f25aa6718c7752471db3bb4b"
+      id = "3c0c5217-b125-51a3-8129-30af5f0c7263"
    strings:
       $s1 = "Go build"
       $s2 = "main.rc4EncryptDecrypt"
@@ -67,6 +70,7 @@ rule MAL_Sindoor_Downloader_Aug25 {
       score = 80
       reference = "Internal Research"
       hash = "38b6b93a536cbab5c289fe542656d8817d7c1217ad75c7f367b15c65d96a21d4"
+      id = "c1188abc-2bea-5cbc-a39d-9690626c0821"
    strings:
       $s1 = "Go build"
       $s2 = "main.downloadFile.deferwrap"

@@ -6,6 +6,7 @@ rule SUSP_Claude_Refusal_Magic_String_Jan26 {
       reference = "https://x.com/williballenthin/status/2014687699165135150"
       hash = "ffa48ed4b7b48897f6756c4222b2606399de0bca627cedfddf61e69986580430"
       score = 75
+      id = "7a164817-9e90-52f6-a3cb-e6965ee1cc54"
    strings:
       $x1 = "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_" ascii wide nocase
    condition:
@@ -19,6 +20,7 @@ rule MAL_Claude_Refusal_Magic_String_Jan26 {
       date = "2026-01-29"
       reference = "Internal Research"
       score = 80
+      id = "8f0351b7-56b8-5059-8c1e-e8d87fa0ca91"
    strings:
       $xb1 = "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_" ascii wide base64 base64wide
    condition:
@@ -33,6 +35,7 @@ rule SUSP_Claude_Redacted_Thinking_Magic_String_Jan26_1 {
       reference = "Internal Research"
       hash = "ffa48ed4b7b48897f6756c4222b2606399de0bca627cedfddf61e69986580430"
       score = 65
+      id = "623de3f9-ea03-5b6a-bb24-14b4a6d4a7c9"
    strings:
       $x1 = "ANTHROPIC_MAGIC_STRING_TRIGGER_REDACTED_THINKING_" ascii wide nocase
    condition:
@@ -46,6 +49,7 @@ rule SUSP_Claude_Redacted_Thinking_Magic_String_Jan26_2 {
       date = "2026-01-29"
       reference = "Internal Research"
       score = 75
+      id = "453ad61a-838f-529a-b119-1dd3ec559069"
    strings:
       $xb1 = "ANTHROPIC_MAGIC_STRING_TRIGGER_REDACTED_THINKING_" ascii wide base64 base64wide
    condition:

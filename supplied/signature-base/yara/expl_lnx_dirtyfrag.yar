@@ -6,6 +6,7 @@ rule EXPL_HKTL_LNX_DirtyFragLPE_May26 {
       score = 80
       hash = "c35594d42f7a5d5d2895164147ee1bc62bb8e294c8468093b7d6fcaab0b174c8"
       reference = "https://github.com/V4bel/dirtyfrag/tree/master"
+      id = "7548b4c6-6b0f-5c05-acab-26dceac109ac"
    strings:
       // Indicators of exploitation attempts
       $x1 = "gained CAP_NET_RAW within netn" ascii
@@ -32,6 +33,7 @@ rule EXPL_HKTL_LNX_DirtyFragShellcode_May26 {
       date = "2026-05-07"
       score = 80
       hash = "a02ea2ba8108a9b7a997faa8808cfc55bb69af54e69178fa5aa1785681cf0ced"
+      id = "c156da87-c029-5084-9cd3-a233fefdaf25"
    strings:
       $op1 = {
          31 ff     // xor     edi, edi
@@ -64,6 +66,7 @@ rule EXPL_LNX_DirtyFrag_ForensicArtefacts_May26 {
       reference = "https://github.com/V4bel/dirtyfrag/tree/master"
       date = "2026-05-08"
       score = 75
+      id = "bda5e087-8eb7-55bd-a5ff-0eef91d63bcf"
    strings:
       $xa1 = "/V4bel/dirtyfrag.git" ascii
       $xa2 = "static const uint8_t shell_elf[PAYLOAD_LEN] = {" ascii

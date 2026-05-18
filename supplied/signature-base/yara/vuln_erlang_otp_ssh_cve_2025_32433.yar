@@ -5,6 +5,7 @@ rule VULN_Erlang_OTP_SSH_CVE_2025_32433_Apr25 {
       reference = "https://www.upwind.io/feed/cve-2025-32433-critical-erlang-otp-ssh-vulnerability-cvss-10"
       date = "2025-04-18"
       score = 60
+      id = "fd0ff924-d0f3-5dcc-90f3-55875b90102e"
    strings:
       $a1 = { 46 4F 52 31 ?? ?? ?? ?? 42 45 41 4D }
 

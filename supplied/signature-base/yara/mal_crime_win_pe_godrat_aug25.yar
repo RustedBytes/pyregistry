@@ -11,6 +11,7 @@ rule MAL_CRIME_RAT_WIN_PE_GodRat_Aug25: GodRAT {
       tags = "RAT, Windows, GodRAT, Gh0st RAT, GETGOD"
       victims = "Financial services"
       sha256 = "154e800ed1719dbdcb188c00d5822444717c2a89017f2d12b8511eeeda0c2f41"
+      id = "e6ec0af5-71d3-520a-a671-8634ac2f926f"
    strings:
       // WinRT version string
       $winrt_txt = "C++/WinRT version" ascii wide nocase

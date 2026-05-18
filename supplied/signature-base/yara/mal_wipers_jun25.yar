@@ -7,6 +7,7 @@ rule MAL_WIPER_Unknown_Jun25 {
       date = "2025-06-19"
       score = 75
       hash1 = "12c39f052f030a77c0cd531df86ad3477f46d1287b8b98b625d1dcf89385d721"
+      id = "ceb2b80f-6bc3-555a-b1c8-003f380533e5"
    strings:
       $x1 = "\\CWipeNew\\Release\\" ascii fullword
 
@@ -28,6 +29,7 @@ rule SUSP_LNX_SH_Disk_Wiper_Script_Jun25 {
       date = "2025-06-19"
       score = 65
       hash1 = "f662f69fc7f4240cd8c00661db9484e76b5d02f903590140b4086fefcf9d9331"
+      id = "aad68277-4889-512d-b8b3-a4c4706fbc9e"
    strings:
       $s1 = "THIS SCRIPT IS LIVE AND ARMED!" ascii fullword
       $s2 = "FAIR WARNING!" ascii fullword
@@ -46,6 +48,7 @@ rule SUSP_PY_PYInstaller_Swiper_Jun25 {
       date = "2025-06-19"
       score = 65
       hash1 = "4f669ecbe12e95d51f37be76933de4c2626d20bb01729086ce2efc603c4ffdf3"
+      id = "049587a8-275d-59a6-bfbd-b72173d21a73"
    strings:
       $a1 = "bzlib1.dll" ascii fullword
       $a2 = "VCRUNTIME140_1.dll" wide fullword
@@ -66,6 +69,7 @@ rule APT_MAL_IR_DruidFly_Wiper_Jun25 {
       date = "2025-06-21"
       score = 80
       hash1 = "81eb22828306f3197b35fef2035cef2c548f587f8511902852964850023389d7"
+      id = "4d731d9a-6f35-51a3-84de-5aa33114b75c"
    strings:
       $xc1 = { 2E 62 61 63 6B 75 70 00 2E 63 6F 6E 66 69 67 00   // .backup .config
                2E 64 62 00 00 00 00 00 2E 73 71 6C 69 74 65 00 } // // .db.... .sqlite

@@ -28,6 +28,7 @@ rule SUSP_Double_Base64_Encoded_Executable {
       hash = "f40c6116c05fbd0433fe4031a896e882c5d31059b93b5015a019c04e2a1add32"
       hash = "e396d1e1957e12595250ff85a7613873a065177c6e5b665e0f2b9f14224e33a3"
       hash = "ea96c8696d48884f337e19dfa4220c13200a28192220ebb1a856a7fd850dff99"
+      id = "2e714e91-c7e6-5c6f-930a-270ce452ff0c"
    strings:
    /* Double encoded MSDOS stubs
    This program cannot be run in DOS mode

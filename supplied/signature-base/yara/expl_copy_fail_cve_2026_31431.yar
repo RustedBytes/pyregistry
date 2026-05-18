@@ -10,6 +10,7 @@ rule EXPL_LNX_Copy_Fail_Artefacts_CVE_2026_31431_Apr26 {
       reference_6 = "https://github.com/iss4cf0ng/CVE-2026-31431-Linux-Copy-Fail"
       date = "2026-04-30"
       score = 75
+      id = "753c6116-16d0-5890-98ae-84a417345e94"
    strings:
       // Network indicators (e.g. in bash history, logs, etc.)
       $xn1 = "curl https://copy.fail/exp" ascii

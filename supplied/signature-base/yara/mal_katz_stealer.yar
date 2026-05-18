@@ -7,6 +7,7 @@ rule MAL_Katz_Stealer_May25 {
       hash = "fdc86a5b3d7df37a72c3272836f743747c47bfbc538f05af9ecf78547fa2e789"
       hash = "d92bb6e47cb0a0bdbb51403528ccfe643a9329476af53b5a729f04a4d2139647"
       score = 80
+      id = "ef84df99-3c1a-56b6-a0fd-39876982d0c3"
    strings:
       $s1 = "Motherboard Product: %s" ascii
       $s2 = "cmd.exe /c %s" ascii
@@ -28,6 +29,7 @@ rule MAL_DLL_Chrome_App_Bound_Encryption_Decryption_May25 {
       reference = "Internal Research"
       hash = "6dc8e99da68b703e86fa90a8794add87614f254f804a8d5d65927e0676107a9d"
       score = 80
+      id = "ee1e2584-7104-506f-93a9-89e97cf39a93"
    strings:
       $s1 = "Failed to set proxy blanket." ascii
       $s2 = "Decryption failed. Last error:" ascii
@@ -52,6 +54,7 @@ rule SUSP_Katz_Log_May25 {
       hash = "b10796c41e1cec7c84a3c68bfcaa7b20f49b620d1c94304a6b3ed73471fa9031"
       hash = "5a984e2e308fe84e4e2071dd877772361719ba0217c2c23da79dbb82dc15eac8"
       score = 65
+      id = "be56f0ae-e444-569e-95d7-edccf4c6dd2b"
    strings:
       $s1 = "Motherboard Manufacturer:" ascii
       $s2 = "===== System Information =====" ascii
@@ -70,6 +73,7 @@ rule MAL_NET_Katz_Stealer_Loader_May25 {
       reference = "Internal Research"
       hash = "0df13fd42fb4a4374981474ea87895a3830eddcc7f3bd494e76acd604c4004f7"
       score = 80
+      id = "c3d33818-66a1-51d9-9bcd-d8d255f96881"
    strings:
       $x = "ExecutarMetodoVAI" ascii
 
@@ -92,6 +96,7 @@ rule MAL_NET_UAC_Bypass_May25 {
       hash = "4f12c5dca2099492d0c0cd22edef841cbe8360af9be2d8e9b57c2f83d401c1a7"
       hash = "fcad234dc2ad5e2d8215bcf6caac29aef62666c34564e723fa6d2eee8b6468ed"
       score = 80
+      id = "bf14177f-be55-5bb1-8218-a4a734532ea4"
    strings:
       $x1 = "CmstpBypass" ascii
       $x2 = { 52 00 45 00 50 00 4C 00 41 00 43 00 45 00 5F 00 43 00 4F 00 4D 00 4D 00 41 00 4E 00 44 00 5F 00 4C 00 49 00 4E 00 45 00 00 13 63 00 6D 00 73 00 74 00 70 00 2E 00 65 00 78 00 65 00 00 33 63 00 6D 00 73 00 74 00 70 00 2E 00 65 00 78 00 65 }
