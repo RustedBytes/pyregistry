@@ -72,6 +72,7 @@ rule HKTL_CobaltStrike_Beacon_XOR_Strings {
       description = "Identifies XOR'd strings used in Cobalt Strike Beacon DLL"
       reference = "https://www.elastic.co/blog/detecting-cobalt-strike-with-memory-signatures"
       date = "2021-03-16"
+      modified = "2026-05-26"
       /* Used for beacon config decoding in THOR */
       xor_s1 = "%02d/%02d/%02d %02d:%02d:%02d"
       xor_s2 = "Started service %s on %s"
@@ -82,7 +83,8 @@ rule HKTL_CobaltStrike_Beacon_XOR_Strings {
       $s2 = "Started service %s on %s" xor(0x01-0xff)
       $s3 = "%s as %s\\%s: %d" xor(0x01-0xff)
 
-      $fp1 = "MalwareRemovalTool"
+      $fp1 = "MalwareRemovalTool" ascii wide
+      $fp2 = "advanced malware removal tool" ascii wide
    condition:
       2 of ($s*) and not 1 of ($fp*)
 }
@@ -95,13 +97,13 @@ rule HKTL_CobaltStrike_Beacon_4_2_Decrypt {
       date = "2021-03-16"
       id = "63b71eef-0af5-5765-b957-ccdc9dde053b"
    strings:
-      $a_x64 = {4C 8B 53 08 45 8B 0A 45 8B 5A 04 4D 8D 52 08 45 85 C9 75 05 45 85 DB 74 33 45 3B CB 73 E6 49 8B F9 4C 8B 03}
-      $a_x86 = {8B 46 04 8B 08 8B 50 04 83 C0 08 89 55 08 89 45 0C 85 C9 75 04 85 D2 74 23 3B CA 73 E6 8B 06 8D 3C 08 33 D2}
+      $a_x64 = { 4C 8B 53 08 45 8B 0A 45 8B 5A 04 4D 8D 52 08 45 85 C9 75 05 45 85 DB 74 33 45 3B CB 73 E6 49 8B F9 4C 8B 03 }
+      $a_x86 = { 8B 46 04 8B 08 8B 50 04 83 C0 08 89 55 08 89 45 0C 85 C9 75 04 85 D2 74 23 3B CA 73 E6 8B 06 8D 3C 08 33 D2 }
    condition:
       any of them
 }
 
-rule HKTL_Win_CobaltStrike : Commodity {
+rule HKTL_Win_CobaltStrike: Commodity {
    meta:
       author = "threatintel@volexity.com"
       date = "2021-05-25"
@@ -111,7 +113,7 @@ rule HKTL_Win_CobaltStrike : Commodity {
       id = "113ba304-261f-5c59-bc56-57515c239b6d"
    strings:
       $s1 = "%s (admin)" fullword
-      $s2 = {48 54 54 50 2F 31 2E 31 20 32 30 30 20 4F 4B 0D 0A 43 6F 6E 74 65 6E 74 2D 54 79 70 65 3A 20 61 70 70 6C 69 63 61 74 69 6F 6E 2F 6F 63 74 65 74 2D 73 74 72 65 61 6D 0D 0A 43 6F 6E 74 65 6E 74 2D 4C 65 6E 67 74 68 3A 20 25 64 0D 0A 0D 0A 00}
+      $s2 = { 48 54 54 50 2F 31 2E 31 20 32 30 30 20 4F 4B 0D 0A 43 6F 6E 74 65 6E 74 2D 54 79 70 65 3A 20 61 70 70 6C 69 63 61 74 69 6F 6E 2F 6F 63 74 65 74 2D 73 74 72 65 61 6D 0D 0A 43 6F 6E 74 65 6E 74 2D 4C 65 6E 67 74 68 3A 20 25 64 0D 0A 0D 0A 00 }
       $s3 = "%02d/%02d/%02d %02d:%02d:%02d" fullword
       $s4 = "%s as %s\\%s: %d" fullword
       $s5 = "%s&%s=%s" fullword
