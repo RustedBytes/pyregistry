@@ -13,7 +13,6 @@ use pyregistry_domain::{
     Tenant, TokenId, TokenScope, TrustedPublisher, TrustedPublisherId, ensure_unique_filenames,
 };
 use rand::distr::{Alphanumeric, SampleString};
-use sha2::{Digest, Sha256};
 
 const MAX_TOKEN_TTL_HOURS: i64 = 24 * 365;
 
@@ -215,6 +214,7 @@ impl PyregistryApp {
         .await
     }
 
+    #[cfg_attr(feature = "profiling", hotpath::measure)]
     async fn upload_artifact_for_tenant(
         &self,
         tenant: &Tenant,
@@ -299,7 +299,9 @@ impl PyregistryApp {
             )));
         }
 
-        let sha256 = hex::encode(Sha256::digest(&command.content));
+        // Inspection already computed the digest of these exact bytes.
+        let sha256 = inspection.sha256;
+        let size_bytes = command.content.len() as u64;
         let object_key = format!(
             "{}/{}/{}/{}",
             tenant.slug.as_str(),
@@ -308,7 +310,7 @@ impl PyregistryApp {
             command.filename
         );
         self.object_storage
-            .put(&object_key, command.content.clone())
+            .put(&object_key, command.content)
             .await?;
         debug!(
             "stored artifact bytes for tenant `{}` at object key `{}`",
@@ -319,7 +321,7 @@ impl PyregistryApp {
             ArtifactId::new(self.ids.next()),
             release.id,
             command.filename,
-            command.content.len() as u64,
+            size_bytes,
             DigestSet::new(sha256, None)?,
             object_key,
             now,

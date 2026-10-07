@@ -94,6 +94,7 @@ impl YaraWheelVirusScanner {
 }
 
 impl WheelVirusScanner for YaraWheelVirusScanner {
+    #[cfg_attr(feature = "profiling", hotpath::measure)]
     fn scan_archive(
         &self,
         archive: &WheelArchiveSnapshot,
@@ -179,6 +180,7 @@ struct CompiledYaraRules {
     skipped_rule_count: usize,
 }
 
+#[cfg_attr(feature = "profiling", hotpath::measure)]
 fn compile_rules_dir(path: &Path) -> Result<CompiledYaraRules, String> {
     if !path.exists() {
         return Err("rules directory does not exist".into());
@@ -234,6 +236,7 @@ fn compile_rules_dir(path: &Path) -> Result<CompiledYaraRules, String> {
     finish_compiler(compiler, rule_files.len(), skipped_rule_count)
 }
 
+#[cfg_attr(feature = "profiling", hotpath::measure)]
 fn compile_bundled_rules() -> Result<CompiledYaraRules, String> {
     let mut rule_files = bundled_yara_rule_files();
     rule_files.sort_by(|left, right| left.relative_path.cmp(right.relative_path));

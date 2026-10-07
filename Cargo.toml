@@ -22,9 +22,11 @@ rust-version = "1.85"
 version = "0.3.2"
 
 [workspace.dependencies]
+memchr = "2.7"
+hotpath = { version = "0.28.5", default-features = false }
 anyhow = "1.0"
 aegis = { version = "0.9.8", default-features = false, features = ["pure-rust"] }
-argon2 = "0.5"
+argon2 = { version = "0.5", features = ["std"] }
 askama = "0.15.6"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["multipart"] }
@@ -80,3 +82,10 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = "none"
+lto = false
+codegen-units = 16

@@ -24,6 +24,7 @@ static MAGIKA_SESSION: LazyLock<Mutex<Option<magika::Session>>> =
     LazyLock::new(|| Mutex::new(None));
 
 impl DistributionFileInspector for FilesystemDistributionInspector {
+    #[cfg_attr(feature = "profiling", hotpath::measure)]
     fn inspect_distribution(
         &self,
         path: &Path,
@@ -60,6 +61,7 @@ impl DistributionFileInspector for FilesystemDistributionInspector {
         })
     }
 
+    #[cfg_attr(feature = "profiling", hotpath::measure)]
     fn inspect_distribution_bytes(
         &self,
         filename: &str,
@@ -338,6 +340,7 @@ fn file_size(path: &Path) -> Result<u64, ApplicationError> {
     Ok(metadata.len())
 }
 
+#[cfg_attr(feature = "profiling", hotpath::measure)]
 fn sha256_file(path: &Path) -> Result<String, ApplicationError> {
     let mut file =
         File::open(path).map_err(|error| ApplicationError::External(error.to_string()))?;
@@ -375,6 +378,7 @@ fn inspect_source_zip_archive_path(path: &Path) -> Result<usize, ApplicationErro
     inspect_source_zip_archive(archive, &path.display().to_string())
 }
 
+#[cfg_attr(feature = "profiling", hotpath::measure)]
 fn inspect_zip_archive<R: Read + Seek>(
     mut archive: ZipArchive<R>,
     label: &str,
@@ -445,6 +449,7 @@ fn inspect_source_tar_gz_archive_path(path: &Path) -> Result<usize, ApplicationE
     inspect_source_tar_gz_reader(file, &path.display().to_string())
 }
 
+#[cfg_attr(feature = "profiling", hotpath::measure)]
 fn inspect_source_tar_gz_reader<R: Read>(
     reader: R,
     label: &str,

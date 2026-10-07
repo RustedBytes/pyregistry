@@ -54,6 +54,7 @@ impl FoxGuardWheelSourceSecurityScanner {
         }
     }
 
+    #[cfg_attr(feature = "profiling", hotpath::measure)]
     fn scan_archive_in_temp_dir(
         &self,
         archive: &WheelArchiveSnapshot,
