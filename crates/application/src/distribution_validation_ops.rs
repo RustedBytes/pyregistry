@@ -21,6 +21,20 @@ impl DistributionValidationUseCase {
         Self { inspector }
     }
 
+    /// Inspect an owned upload without blocking the async executor or copying it.
+    pub async fn inspect_bytes(
+        &self,
+        filename: String,
+        bytes: Vec<u8>,
+    ) -> Result<(crate::DistributionInspection, Vec<u8>), ApplicationError> {
+        let inspector = self.inspector.clone();
+        crate::artifact_cpu::run(move || {
+            let inspection = inspector.inspect_distribution_bytes(&filename, &bytes)?;
+            Ok((inspection, bytes))
+        })
+        .await
+    }
+
     pub fn validate(
         &self,
         command: ValidateDistributionCommand,

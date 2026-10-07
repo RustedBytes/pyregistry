@@ -576,7 +576,7 @@ impl PyregistryApp {
             normalized_project_name,
             version,
             artifact,
-            &bytes,
+            bytes,
         )
         .await;
         info!(
@@ -595,7 +595,7 @@ impl PyregistryApp {
         normalized_project_name: &str,
         version: &ReleaseVersion,
         artifact: &Artifact,
-        bytes: &[u8],
+        bytes: Vec<u8>,
     ) {
         if !artifact.filename.to_ascii_lowercase().ends_with(".whl") {
             return;
@@ -608,28 +608,17 @@ impl PyregistryApp {
             version.as_str()
         );
 
-        let archive = match self
-            .wheel_archive_reader
-            .read_wheel_bytes(&artifact.filename, bytes)
-        {
-            Ok(archive) => archive,
-            Err(error) => {
-                warn!(
-                    "wheel security audit could not read mirrored artifact `{}` for tenant `{tenant_slug}` project `{}` version `{}`: {error}",
-                    artifact.filename,
-                    normalized_project_name,
-                    version.as_str()
-                );
-                return;
-            }
-        };
-
         let report = match WheelAuditUseCase::new(
             self.wheel_archive_reader.clone(),
             self.wheel_virus_scanner.clone(),
             self.wheel_source_security_scanner.clone(),
         )
-        .audit_archive(normalized_project_name.to_string(), archive)
+        .audit_bytes(
+            normalized_project_name.to_string(),
+            artifact.filename.clone(),
+            bytes,
+        )
+        .await
         {
             Ok(report) => report,
             Err(error) => {

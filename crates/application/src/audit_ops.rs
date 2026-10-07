@@ -38,6 +38,25 @@ impl WheelAuditUseCase {
         }
     }
 
+    /// Extract and audit one owned wheel under shared CPU admission.
+    pub async fn audit_bytes(
+        &self,
+        project_name: String,
+        filename: String,
+        bytes: Vec<u8>,
+    ) -> Result<WheelAuditReport, ApplicationError> {
+        let audit = Self::new(
+            self.archive_reader.clone(),
+            self.virus_scanner.clone(),
+            self.source_security_scanner.clone(),
+        );
+        crate::artifact_cpu::run(move || {
+            let archive = audit.archive_reader.read_wheel_bytes(&filename, &bytes)?;
+            audit.audit_archive(project_name, archive)
+        })
+        .await
+    }
+
     #[cfg_attr(feature = "profiling", hotpath::measure)]
     pub fn audit(&self, command: AuditWheelCommand) -> Result<WheelAuditReport, ApplicationError> {
         info!(

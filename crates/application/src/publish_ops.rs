@@ -219,14 +219,19 @@ impl PyregistryApp {
         &self,
         tenant: &Tenant,
         publish_identity: Option<&PublishIdentity>,
-        command: UploadArtifactCommand,
+        mut command: UploadArtifactCommand,
     ) -> Result<(), ApplicationError> {
         let now = self.clock.now();
         let project_name = ProjectName::new(command.project_name)?;
         let version = ReleaseVersion::new(command.version)?;
-        let inspection = self
-            .distribution_inspector
-            .inspect_distribution_bytes(&command.filename, &command.content)?;
+        let (inspection, content) =
+            crate::DistributionValidationUseCase::new(self.distribution_inspector.clone())
+                .inspect_bytes(
+                    command.filename.clone(),
+                    std::mem::take(&mut command.content),
+                )
+                .await?;
+        command.content = content;
         if inspection.file_type.extension_mismatch() {
             warn!(
                 "upload rejected because artifact `{}` content type `{}` does not match extension {:?}",

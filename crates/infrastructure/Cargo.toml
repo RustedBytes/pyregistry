@@ -72,6 +72,7 @@ vulnerability-db = ["dep:pysentry"]
 virus-yara = ["dep:yara-x", "yara-x/default"]
 
 [dev-dependencies]
+futures-util.workspace = true
 bstr.workspace = true
 
 # pysentry declares an unconditional cdylib target; MinGW cannot link it on Windows.
