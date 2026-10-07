@@ -523,6 +523,7 @@ mod tests {
             installed_version: Version::from_str("1.0.0").expect("version"),
             vulnerability,
             is_direct: true,
+            source_file: None,
         };
 
         let mapped = map_vulnerability(vulnerability_match);
