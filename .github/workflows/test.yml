@@ -1,6 +1,13 @@
 name: Tests
 
 on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'supplied/**'
+      - '.github/workflows/test.yml'
   workflow_dispatch:
 
 permissions:
