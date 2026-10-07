@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "pyregistry-application"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1440,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "pyregistry-domain"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "pep440",
@@ -1466,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "pyregistry-infrastructure"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aegis",
  "anyhow",
