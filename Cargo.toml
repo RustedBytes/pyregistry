@@ -22,6 +22,7 @@ rust-version = "1.85"
 version = "0.3.2"
 
 [workspace.dependencies]
+async-lock = "3.4.2"
 memchr = "2.7"
 hotpath = { version = "0.28.5", default-features = false }
 anyhow = "1.0"

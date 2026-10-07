@@ -80,10 +80,12 @@ PR CI tests profiling enabled and disabled and verifies actual JSON report outpu
 Archive snapshots and the storage API still buffer complete payloads. The reader
 allows up to 512 MiB of declared uncompressed contents, and concurrent operations
 can multiply that footprint. Streaming would require a wider port/API change.
-Upload inspection and mirrored-wheel audit also still perform synchronous CPU work
-inside async use cases. Moving that work to a bounded CPU pool merits a separate
-load/concurrency study; these measurements do not establish a safe production
-concurrency setting. Database query performance, PyPI latency, ML classifiers and
+Upload inspection and mirrored-wheel extraction/audit now use shared bounded CPU
+offload; see [the isolated concurrency investigation](artifact-concurrency.md)
+for heartbeat, throughput and peak RSS comparisons. It limits active CPU work,
+not already-buffered waiting payloads, and does not establish safe production
+HTTP concurrency. The separate stored-wheel audit and other CPU stages remain
+outside that patch's scope. Database query performance, PyPI latency, ML classifiers and
 large real-world security rule workloads were not represented by this fixture.
 
 Hotpath reference: <https://hotpath.rs/functions> and

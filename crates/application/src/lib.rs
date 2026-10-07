@@ -1,4 +1,5 @@
 mod admin_ops;
+mod artifact_cpu;
 mod audit_ops;
 mod audit_trail_ops;
 mod distribution_validation_ops;
