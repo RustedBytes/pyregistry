@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
 """Write a deterministic, harmless 16 MiB wheel fixture for the profiling example."""
+
 import argparse
 import zipfile
 
