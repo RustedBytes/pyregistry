@@ -1,0 +1,32 @@
+name: Bundled YARA
+
+on:
+  pull_request:
+    paths:
+      - 'supplied/signature-base/**'
+      - 'crates/infrastructure/**'
+      - 'crates/application/**'
+      - 'crates/domain/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/yara.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundled-yara:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Storage unit tests require OpenDAL even when filtered to the YARA test.
+      - name: Compile bundled rules and scan smoke fixtures
+        run: >-
+          cargo test -p pyregistry-infrastructure --lib --locked
+          --no-default-features --features virus-yara,s3
+          virus::tests::bundled_rules_compile_and_scan_smoke
+          -- --exact --ignored --nocapture

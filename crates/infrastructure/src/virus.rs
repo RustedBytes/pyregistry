@@ -234,7 +234,6 @@ fn compile_rules_dir(path: &Path) -> Result<CompiledYaraRules, String> {
     finish_compiler(compiler, rule_files.len(), skipped_rule_count)
 }
 
-#[cfg_attr(test, allow(dead_code))]
 fn compile_bundled_rules() -> Result<CompiledYaraRules, String> {
     let mut rule_files = bundled_yara_rule_files();
     rule_files.sort_by(|left, right| left.relative_path.cmp(right.relative_path));
@@ -254,6 +253,11 @@ fn compile_bundled_rules() -> Result<CompiledYaraRules, String> {
                 .with_origin(format!("bundled:{}", file.relative_path.display())),
         ) {
             skipped_rule_count += 1;
+            #[cfg(test)]
+            eprintln!(
+                "incompatible bundled file {}: {error}",
+                file.relative_path.display()
+            );
             warn!(
                 "skipping incompatible bundled YARA rule file {}: {}",
                 file.relative_path.display(),
@@ -430,6 +434,51 @@ mod tests {
     use pyregistry_application::WheelArchiveEntry;
     use std::sync::Once;
     use uuid::Uuid;
+
+    #[test]
+    #[ignore = "compiles the full bundled signature set; run in the YARA PR check"]
+    fn bundled_rules_compile_and_scan_smoke() {
+        let compiled = compile_bundled_rules().expect("compile actual bundled rules");
+        eprintln!(
+            "bundled YARA: files={}, rules={}, skipped/incompatible files={}, warnings={}",
+            bundled_yara_rule_files().len(),
+            compiled.signature_rule_count,
+            compiled.skipped_rule_count,
+            compiled.rules.warnings().len()
+        );
+        assert_eq!(
+            compiled.skipped_rule_count, 0,
+            "bundled rules must not silently lose incompatible files"
+        );
+        let mut scanner = Scanner::new(&compiled.rules);
+        scanner.set_timeout(std::time::Duration::from_secs(10));
+        set_entry_globals(&mut scanner, "demo/clean.py").expect("set production globals");
+        let clean = scanner
+            .scan(b"def add(a, b):\n    return a + b\n")
+            .expect("scan clean fixture");
+        assert_eq!(
+            clean.matching_rules().len(),
+            0,
+            "clean fixture must not match"
+        );
+
+        // Harmless strings, not executable malware. Exercise both new Virtualizor rules.
+        for (data, expected) in [
+            (b"/tmp/.vz_svc_done".as_slice(), "APT_Virtualizor_Compromise_ForensicArtifacts_Aug26"),
+            (b"PKnet/ikvm/clientvds/stresser/methods/impl/l4/minecraft/protocollib/\0oshi/util/VirtualizationDetector\0META-INF/proguard/base.proUT".as_slice(), "APT_Virtualizor_Compromise_Payload_Aug26"),
+        ] {
+            set_entry_globals(&mut scanner, "demo/payload.bin").expect("set production globals");
+            let results = scanner.scan(data).expect("scan positive fixture");
+            assert!(results.matching_rules().any(|rule| rule.identifier() == expected), "missing expected match: {expected}");
+            eprintln!("smoke matched {expected}");
+        }
+        assert!(
+            !compiled
+                .rules
+                .iter()
+                .any(|rule| rule.identifier() == "DarkComet_Keylogger_File")
+        );
+    }
 
     #[test]
     fn builds_stable_namespace_from_relative_path() {
