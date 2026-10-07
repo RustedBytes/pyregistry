@@ -566,3 +566,129 @@ fn scanner_failures_are_reported_without_hiding_local_findings() {
             .any(|finding| finding.kind == WheelAuditFindingKind::PostInstallClue)
     );
 }
+
+#[test]
+fn byte_matchers_preserve_evidence_for_binary_and_invalid_utf8_inputs() {
+    let cases: &[&[u8]] = &[
+        b"",
+        b"tcp\0udp\0",
+        b"TCP \0 UDP\0",
+        b"ht\0tp://\0",
+        b"HTTPS://x\0SOCKET CURL WGET WSS://x REQUESTS\0",
+        b"\xffEXEC(\xfeEVAL(\0SUBPROCESS subprocess OS.SYSTEM\x80",
+        b"curlcurl connect( connect WEBHOOK webhook",
+    ];
+    for bytes in cases {
+        assert_pattern_equivalence(bytes);
+    }
+    // Deterministic mixed bytes with every pattern, separators and mixed case.
+    let mut seed = 42_u64;
+    for index in 0..1024 {
+        let mut bytes = Vec::new();
+        for _ in 0..256 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            bytes.push((seed >> 32) as u8);
+        }
+        bytes.extend_from_slice(
+            NETWORK_PATTERNS[index % NETWORK_PATTERNS.len()]
+                .to_ascii_uppercase()
+                .as_bytes(),
+        );
+        bytes.push(0xff);
+        bytes.extend_from_slice(
+            POST_INSTALL_PATTERNS[index % POST_INSTALL_PATTERNS.len()].as_bytes(),
+        );
+        assert_pattern_equivalence(&bytes);
+    }
+}
+
+#[test]
+fn byte_matchers_preserve_matches_at_chunk_boundaries_and_short_ascii_runs() {
+    for offset in [65_519, 65_535, 65_536, 65_537, 65_553] {
+        for pattern in NETWORK_PATTERNS.iter().chain(POST_INSTALL_PATTERNS.iter()) {
+            let mut bytes = vec![0xff; 2 * 65_536];
+            bytes[offset..offset + pattern.len()].copy_from_slice(pattern.as_bytes());
+            assert_pattern_equivalence(&bytes);
+            // A neighbouring space makes three-byte network markers eligible.
+            bytes[offset - 1] = b' ';
+            assert_pattern_equivalence(&bytes);
+        }
+    }
+}
+
+fn assert_pattern_equivalence(bytes: &[u8]) {
+    for limit in [0, 1, 4, 16] {
+        assert_eq!(
+            find_byte_patterns(bytes, &NETWORK_MATCHER, &NETWORK_PATTERNS, true, limit),
+            if limit == 0 {
+                Vec::new()
+            } else {
+                find_patterns(&ascii_strings(bytes), &NETWORK_PATTERNS, limit)
+            },
+        );
+        assert_eq!(
+            find_byte_patterns(
+                bytes,
+                &POST_INSTALL_MATCHER,
+                &POST_INSTALL_PATTERNS,
+                false,
+                limit
+            ),
+            if limit == 0 {
+                Vec::new()
+            } else {
+                find_patterns(
+                    &String::from_utf8_lossy(bytes),
+                    &POST_INSTALL_PATTERNS,
+                    limit,
+                )
+            },
+        );
+    }
+}
+
+// Previous implementation retained only as a differential-test oracle.
+fn ascii_strings(contents: &[u8]) -> String {
+    let mut out = String::with_capacity(contents.len());
+    let mut current = String::new();
+
+    for byte in contents {
+        let ch = *byte as char;
+        if ch.is_ascii_graphic() || ch == ' ' {
+            current.push(ch);
+        } else {
+            if current.len() >= 4 {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&current);
+            }
+            current.clear();
+        }
+    }
+
+    if current.len() >= 4 {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&current);
+    }
+
+    out
+}
+
+fn find_patterns(haystack: &str, patterns: &[&str], limit: usize) -> Vec<String> {
+    let lower = haystack.to_ascii_lowercase();
+    let mut hits = Vec::with_capacity(limit.min(patterns.len()));
+
+    for pattern in patterns {
+        if lower.contains(pattern) {
+            hits.push((*pattern).to_string());
+        }
+        if hits.len() >= limit {
+            break;
+        }
+    }
+
+    hits
+}

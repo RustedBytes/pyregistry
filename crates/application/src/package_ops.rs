@@ -287,6 +287,7 @@ impl PyregistryApp {
         Ok(page)
     }
 
+    #[cfg_attr(feature = "profiling", hotpath::measure)]
     pub async fn download_artifact(
         &self,
         tenant_slug: &str,
@@ -529,6 +530,7 @@ impl PyregistryApp {
         Ok(cached_artifact_count)
     }
 
+    #[cfg_attr(feature = "profiling", hotpath::measure)]
     async fn cache_mirrored_artifact_bytes(
         &self,
         tenant_slug: &str,
@@ -586,6 +588,7 @@ impl PyregistryApp {
         Ok(true)
     }
 
+    #[cfg_attr(feature = "profiling", hotpath::measure)]
     async fn audit_cached_mirrored_wheel(
         &self,
         tenant_slug: &str,

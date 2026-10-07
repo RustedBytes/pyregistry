@@ -5,12 +5,13 @@ use crate::{
     WheelVirusScanner,
 };
 use log::{debug, info, warn};
+use memchr::memmem::Finder;
 use pyregistry_domain::ProjectName;
 #[cfg(feature = "python-ast-audit")]
 use rustpython_parser::{Parse, ast};
 #[cfg(feature = "python-ast-audit")]
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 #[cfg(feature = "python-ast-audit")]
 const MAX_PYTHON_AST_EVIDENCE: usize = 12;
@@ -37,6 +38,7 @@ impl WheelAuditUseCase {
         }
     }
 
+    #[cfg_attr(feature = "profiling", hotpath::measure)]
     pub fn audit(&self, command: AuditWheelCommand) -> Result<WheelAuditReport, ApplicationError> {
         info!(
             "auditing wheel `{}` for project `{}`",
@@ -47,6 +49,7 @@ impl WheelAuditUseCase {
         self.audit_archive(command.project_name, archive)
     }
 
+    #[cfg_attr(feature = "profiling", hotpath::measure)]
     pub(crate) fn audit_archive(
         &self,
         project_name: String,
@@ -225,6 +228,7 @@ fn unexpected_executable_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAud
     findings
 }
 
+#[cfg_attr(feature = "profiling", hotpath::measure)]
 fn network_string_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding> {
     let mut findings = Vec::new();
 
@@ -233,26 +237,11 @@ fn network_string_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFindi
             continue;
         }
 
-        let matches = find_patterns(
-            &ascii_strings(&entry.contents),
-            &[
-                "http://",
-                "https://",
-                "socket",
-                "connect(",
-                "connect ",
-                "webhook",
-                "curl",
-                "wget",
-                "invoke-webrequest",
-                "powershell",
-                "ws://",
-                "wss://",
-                "urllib",
-                "requests",
-                "tcp",
-                "udp",
-            ],
+        let matches = find_byte_patterns(
+            &entry.contents,
+            &NETWORK_MATCHER,
+            &NETWORK_PATTERNS,
+            true,
             4,
         );
 
@@ -269,6 +258,7 @@ fn network_string_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFindi
     findings
 }
 
+#[cfg_attr(feature = "profiling", hotpath::measure)]
 fn post_install_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding> {
     let mut findings = Vec::new();
 
@@ -290,19 +280,11 @@ fn post_install_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding
         }
 
         if !path.ends_with(".py") {
-            let content_text = String::from_utf8_lossy(&entry.contents);
-            let text_matches = find_patterns(
-                &content_text,
-                &[
-                    "subprocess",
-                    "os.system",
-                    "pip._internal",
-                    "sitecustomize",
-                    "usercustomize",
-                    "atexit",
-                    "exec(",
-                    "eval(",
-                ],
+            let text_matches = find_byte_patterns(
+                &entry.contents,
+                &POST_INSTALL_MATCHER,
+                &POST_INSTALL_PATTERNS,
+                false,
                 4,
             );
             evidence.extend(text_matches);
@@ -322,6 +304,7 @@ fn post_install_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding
 }
 
 #[cfg(feature = "python-ast-audit")]
+#[cfg_attr(feature = "profiling", hotpath::measure)]
 fn python_ast_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding> {
     let mut findings = Vec::new();
 
@@ -380,6 +363,7 @@ fn python_ast_findings(entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding> 
 }
 
 #[cfg(not(feature = "python-ast-audit"))]
+#[cfg_attr(feature = "profiling", hotpath::measure)]
 fn python_ast_findings(_entries: &[WheelArchiveEntry]) -> Vec<WheelAuditFinding> {
     Vec::new()
 }
@@ -1051,49 +1035,97 @@ fn is_binary_content(contents: &[u8]) -> bool {
     suspicious * 5 > contents.len()
 }
 
-fn ascii_strings(contents: &[u8]) -> String {
-    let mut out = String::with_capacity(contents.len());
-    let mut current = String::new();
+const NETWORK_PATTERNS: [&str; 16] = [
+    "http://",
+    "https://",
+    "socket",
+    "connect(",
+    "connect ",
+    "webhook",
+    "curl",
+    "wget",
+    "invoke-webrequest",
+    "powershell",
+    "ws://",
+    "wss://",
+    "urllib",
+    "requests",
+    "tcp",
+    "udp",
+];
+const POST_INSTALL_PATTERNS: [&str; 8] = [
+    "subprocess",
+    "os.system",
+    "pip._internal",
+    "sitecustomize",
+    "usercustomize",
+    "atexit",
+    "exec(",
+    "eval(",
+];
+static NETWORK_MATCHER: LazyLock<[Finder<'static>; 16]> =
+    LazyLock::new(|| NETWORK_PATTERNS.map(|pattern| Finder::new(pattern.as_bytes())));
+static POST_INSTALL_MATCHER: LazyLock<[Finder<'static>; 8]> =
+    LazyLock::new(|| POST_INSTALL_PATTERNS.map(|pattern| Finder::new(pattern.as_bytes())));
 
-    for byte in contents {
-        let ch = *byte as char;
-        if ch.is_ascii_graphic() || ch == ' ' {
-            current.push(ch);
-        } else {
-            if current.len() >= 4 {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(&current);
+fn find_byte_patterns<const N: usize>(
+    contents: &[u8],
+    matchers: &[Finder<'static>; N],
+    patterns: &[&str; N],
+    ascii_runs_only: bool,
+    limit: usize,
+) -> Vec<String> {
+    const CHUNK_BYTES: usize = 64 * 1024;
+    // A bounded scratch buffer replaces payload-sized ASCII and lowercase copies.
+    let overlap = patterns
+        .iter()
+        .map(|pattern| pattern.len())
+        .max()
+        .unwrap_or(1)
+        - 1;
+    let mut lower = vec![0_u8; contents.len().min(CHUNK_BYTES + overlap)];
+    let mut hits = [false; N];
+    for start in (0..contents.len()).step_by(CHUNK_BYTES) {
+        let end = contents
+            .len()
+            .min(start.saturating_add(CHUNK_BYTES + overlap));
+        let chunk = &mut lower[..end - start];
+        chunk.copy_from_slice(&contents[start..end]);
+        chunk.make_ascii_lowercase();
+        for (index, finder) in matchers.iter().enumerate() {
+            if hits[index] {
+                continue;
             }
-            current.clear();
+            hits[index] = finder.find_iter(chunk).any(|offset| {
+                // All patterns are printable ASCII. Only the three-byte tcp/udp
+                // patterns need a neighbouring printable byte to belong to a
+                // four-byte run, as required by the original strings heuristic.
+                if !ascii_runs_only || patterns[index].len() >= 4 {
+                    return true;
+                }
+                let offset = start + offset;
+                let printable = |byte: &u8| byte.is_ascii_graphic() || *byte == b' ';
+                offset
+                    .checked_sub(1)
+                    .and_then(|i| contents.get(i))
+                    .is_some_and(printable)
+                    || contents
+                        .get(offset + patterns[index].len())
+                        .is_some_and(printable)
+            });
         }
-    }
-
-    if current.len() >= 4 {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&current);
-    }
-
-    out
-}
-
-fn find_patterns(haystack: &str, patterns: &[&str], limit: usize) -> Vec<String> {
-    let lower = haystack.to_ascii_lowercase();
-    let mut hits = Vec::with_capacity(limit.min(patterns.len()));
-
-    for pattern in patterns {
-        if lower.contains(pattern) {
-            hits.push((*pattern).to_string());
-        }
-        if hits.len() >= limit {
+        if hits.iter().take(limit.min(N)).all(|hit| *hit) {
             break;
         }
     }
-
-    hits
+    // Keep evidence priority and deduplication independent of match offsets.
+    patterns
+        .iter()
+        .zip(hits)
+        .filter(|(_, hit)| *hit)
+        .take(limit)
+        .map(|(pattern, _)| (*pattern).to_string())
+        .collect()
 }
 
 fn metadata_field<'a>(metadata: &'a str, field: &str) -> Option<&'a str> {

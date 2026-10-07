@@ -1,0 +1,50 @@
+name: Profiling features
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - '.github/workflows/profiling.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  profiling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - mode: disabled
+            application: ''
+            infrastructure: 'sqlite,postgres,sqlserver,s3'
+          - mode: enabled
+            application: 'profiling'
+            infrastructure: 'sqlite,postgres,sqlserver,s3,profiling'
+    name: Profiling ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: profiling-${{ matrix.mode }}
+      - name: Application regression tests
+        run: cargo test -p pyregistry-application --locked --features '${{ matrix.application }}'
+      - name: Infrastructure regression tests
+        run: cargo test -p pyregistry-infrastructure --lib --locked --no-default-features --features '${{ matrix.infrastructure }}'
+      - name: Check executable
+        run: cargo check -p pyregistry --locked --no-default-features --features '${{ matrix.infrastructure }}'
+      - name: Profiling smoke run
+        if: matrix.mode == 'enabled'
+        env:
+          HOTPATH_METRICS_SERVER_OFF: 'true'
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: '${{ runner.temp }}/profile.json'
+        run: |
+          python scripts/profile-wheel-fixture.py '${{ runner.temp }}/demo.whl'
+          cargo run -p pyregistry-infrastructure --example profile_wheel --locked --no-default-features --features profiling -- '${{ runner.temp }}/demo.whl' 1
+          python -c 'import json, os; d = json.load(open(os.environ["HOTPATH_OUTPUT_PATH"])); assert d["functions_timing"]["data"]; assert d["functions_alloc"]["data"]'

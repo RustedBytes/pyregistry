@@ -13,6 +13,7 @@ categories.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hotpath = { workspace = true, optional = true }
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
@@ -32,6 +33,7 @@ tower-http.workspace = true
 zip.workspace = true
 
 [features]
+profiling = ["dep:hotpath", "hotpath/hotpath", "hotpath/hotpath-alloc", "hotpath/threads", "pyregistry-application/profiling", "pyregistry-infrastructure/profiling"]
 default = [
     "python-ast-audit",
     "sqlite",

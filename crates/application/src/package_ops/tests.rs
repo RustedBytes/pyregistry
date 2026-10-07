@@ -2494,6 +2494,57 @@ struct FakeObjectStorage {
     objects: Mutex<HashMap<String, Vec<u8>>>,
 }
 
+#[tokio::test]
+async fn upload_moves_payload_into_storage_and_preserves_digest_and_size() {
+    let store = Arc::new(FakeRegistryStore::default());
+    let storage = Arc::new(FakeObjectStorage::default());
+    let app = test_app(
+        store.clone(),
+        storage.clone(),
+        Arc::new(FakeMirrorClient::with_artifact_count(0)),
+        1,
+    );
+    app.create_tenant(CreateTenantCommand {
+        slug: "acme".into(),
+        display_name: "Acme".into(),
+        mirroring_enabled: false,
+        admin_email: "admin@acme.test".into(),
+        admin_password: "tenant-secret".into(),
+    })
+    .await
+    .expect("tenant");
+    let content = vec![b'x'; 4 * 1024 * 1024];
+    let original_address = content.as_ptr() as usize;
+    let expected_sha256 = hex::encode(Sha256::digest(&content));
+    let size = content.len() as u64;
+    app.upload_artifact_as_admin(
+        "acme",
+        UploadArtifactCommand {
+            tenant_slug: "acme".into(),
+            project_name: "demo".into(),
+            version: "1.0.0".into(),
+            filename: "demo-1.0.0-py3-none-any.whl".into(),
+            summary: "demo".into(),
+            description: "demo".into(),
+            content,
+        },
+    )
+    .await
+    .expect("upload");
+    let objects = storage.objects.lock().expect("storage");
+    let bytes = objects.values().next().expect("stored bytes");
+    assert_eq!(
+        bytes.as_ptr() as usize,
+        original_address,
+        "upload must transfer ownership, not copy the payload"
+    );
+    assert_eq!(bytes.len() as u64, size);
+    let state = store.state.lock().expect("store");
+    let artifact = state.artifacts.values().next().expect("artifact");
+    assert_eq!(artifact.size_bytes, size);
+    assert_eq!(artifact.digests.sha256, expected_sha256);
+}
+
 impl FakeObjectStorage {
     fn object_count(&self) -> usize {
         self.objects.lock().expect("object storage").len()

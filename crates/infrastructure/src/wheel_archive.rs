@@ -43,6 +43,7 @@ impl WheelArchiveReader for ZipWheelArchiveReader {
     }
 }
 
+#[cfg_attr(feature = "profiling", hotpath::measure)]
 fn read_zip_archive<R: Read + std::io::Seek>(
     mut archive: ZipArchive<R>,
     wheel_filename: String,
@@ -76,7 +77,9 @@ fn read_zip_archive<R: Read + std::io::Seek>(
             )));
         }
 
-        let mut contents = Vec::new();
+        // The advertised size is bounded above before allocating. Avoid repeated
+        // growth and copies of large decompressed wheel entries.
+        let mut contents = Vec::with_capacity(file.size() as usize);
         file.take(MAX_WHEEL_ENTRY_BYTES + 1)
             .read_to_end(&mut contents)
             .map_err(|error| ApplicationError::External(error.to_string()))?;

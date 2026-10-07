@@ -5,6 +5,7 @@ mod reports;
 mod server;
 
 #[tokio::main]
+#[cfg_attr(feature = "profiling", hotpath::main)]
 async fn main() -> anyhow::Result<()> {
     cli::run().await
 }
